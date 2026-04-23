@@ -1,0 +1,97 @@
+# Ralph / planning — local only, not part of the library
+prd.md
+activity.md
+RALPH-PROMPT.md
+ralph.sh
+
+# Dependencies (Yarn 4 Berry, nodeLinker: node-modules)
+node_modules/
+
+# Yarn Berry — commit releases/plugins/sdks/patches, ignore the rest
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+.pnp.*
+.yarn-integrity
+
+# Derived artifacts
+nitrogen/
+packages/*/lib/
+packages/*/dist/
+packages/*/build/
+packages/*/plugin/build/
+
+# Test + coverage output
+coverage/
+.jest-cache/
+__snapshots__/*.snap.orig
+
+# Maestro
+.maestro/.recordings/
+
+# Playwright
+playwright-report/
+test-results/
+
+# iOS / Xcode
+ios/Pods/
+ios/build/
+ios/*.xcworkspace/xcuserdata/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+DerivedData/
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.pbxuser
+!default.pbxuser
+!default.mode1v3
+!default.mode2v3
+!default.perspectivev3
+xcshareddata/WorkspaceSettings.xcsettings
+
+# CocoaPods
+Pods/
+Podfile.lock.lock
+
+# Android / Gradle
+.gradle/
+android/.gradle/
+android/build/
+android/app/build/
+android/.cxx/
+android/local.properties
+android/gradle-app.setting
+!gradle-wrapper.jar
+.externalNativeBuild/
+*.keystore
+!debug.keystore
+
+# React Native / Metro
+.metro-health-check*
+.expo/
+.expo-shared/
+
+# Logs / runtime
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
