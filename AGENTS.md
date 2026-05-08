@@ -48,7 +48,7 @@ CI is deliberately the last task — local verification is the gate throughout.
 4. Run the applicable checks above.
 5. Append a dated entry to `activity.md` — what changed, what commands ran, issues + resolutions.
 6. Move that task from "Open" to "Done" in `TODO.md`.
-7. Commit to branch `v0.1` (create from `main` on the first iteration). One commit per task. Never push. Never commit to `main`.
+7. Commit on a topic branch (create from `main`), one commit per task, then open a PR against `main`. Never commit directly to `main`.
 
 ---
 
