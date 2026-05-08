@@ -1,0 +1,17 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["videopipeline"],
+  "ios": {
+    "iosModuleName": "NitroVideoPipeline"
+  },
+  "android": {
+    "androidNamespace": ["videopipeline"],
+    "androidCxxLibName": "NitroVideoPipeline"
+  },
+  "autolinking": {
+    "VideoPipeline": {
+      "kotlin": "HybridVideoPipeline"
+    }
+  },
+  "ignorePaths": ["node_modules", "lib", "plugin/build"]
+}

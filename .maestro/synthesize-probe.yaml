@@ -1,0 +1,27 @@
+# T054d — drive the bare-example's "Run Video.synthesize()" button and
+# confirm the new renderCompose path produces an MP4 end-to-end.
+#
+# Flow:
+#   1. Launch app (Skia boots in useEffect — banner shows "Skia boot: OK")
+#   2. Tap the Synthesize button (testID=run-synthesize)
+#   3. Wait up to 30s for the result-ok text to appear (render completes)
+#   4. Assert the result contains the pattern marker so we know it went
+#      through drawWithRGBA + bootstrapPatternRGBA (not the old placeholder)
+#
+# Runs against the already-installed bareexample build on the booted
+# simulator. Precondition: `yarn smoke:ios` has built the app and Metro is
+# running (or the JS bundle is already installed).
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- assertVisible: "Skia boot: OK.*"
+- tapOn:
+    id: "run-synthesize"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 30000
+- assertVisible: ".*BOOTSTRAP_PATTERN via drawWithRGBA.*"

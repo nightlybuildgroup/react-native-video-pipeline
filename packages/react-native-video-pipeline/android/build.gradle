@@ -1,0 +1,89 @@
+// Android library module for react-native-video-pipeline.
+//
+// Routed to the Kotlin `HybridVideoPipeline` class via the nitrogen-generated
+// OnLoad.cpp (nitro.json autolinks the HybridObject by its `kotlin:` key, so
+// the registration is a JNI factory that default-constructs the Kotlin class).
+// The Kotlin class at T040 throws typed "not implemented yet on Android"
+// errors from every Spec method — subsequent tasks (T041+) replace each throw
+// with Media3 Transformer / MediaMetadataRetriever / MediaCodecList logic.
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+
+def getExtOrDefault(name, defaultValue) {
+  return rootProject.ext.has(name) ? rootProject.ext.get(name) : defaultValue
+}
+
+android {
+  namespace "com.unbogify.videopipeline"
+
+  compileSdkVersion getExtOrDefault("compileSdkVersion", 35)
+  ndkVersion getExtOrDefault("ndkVersion", "26.1.10909125")
+  buildToolsVersion getExtOrDefault("buildToolsVersion", "35.0.0")
+
+  defaultConfig {
+    minSdkVersion getExtOrDefault("minSdkVersion", 24)
+    targetSdkVersion getExtOrDefault("targetSdkVersion", 34)
+
+    externalNativeBuild {
+      cmake {
+        cppFlags "-O2 -frtti -fexceptions -Wall -Werror -std=c++20"
+        arguments "-DANDROID_STL=c++_shared",
+                  "-DANDROID_TOOLCHAIN=clang",
+                  "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+      }
+    }
+  }
+
+  externalNativeBuild {
+    cmake {
+      path "CMakeLists.txt"
+    }
+  }
+
+  buildFeatures {
+    prefab true
+  }
+
+  // Keep resource / test folders minimal at the skeleton stage — T041+
+  // wires in real sources as each task adds them.
+  sourceSets {
+    main {
+      java.srcDirs += ["src/main/java"]
+      manifest.srcFile "src/main/AndroidManifest.xml"
+    }
+  }
+
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+
+  kotlinOptions {
+    jvmTarget = "17"
+  }
+
+  packaging {
+    // The Nitro shared lib ships its own `libc++_shared.so`; exclude ours so
+    // the app doesn't see two copies.
+    jniLibs {
+      excludes += ["**/libc++_shared.so"]
+    }
+  }
+}
+
+repositories {
+  mavenCentral()
+  google()
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+  implementation project(":react-native-nitro-modules")
+  implementation "org.jetbrains.kotlin:kotlin-stdlib"
+}
+
+// Pull in the nitrogen-generated Kotlin + CMake extensions. The autolinker
+// adds the generated kotlin/ source tree to this module and wires the shared
+// / android-specific C++ sources into NitroVideoPipeline's CMake target.
+apply from: "../nitrogen/generated/android/NitroVideoPipeline+autolinking.gradle"

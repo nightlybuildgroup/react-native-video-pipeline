@@ -1,0 +1,39 @@
+{
+  "name": "babel-plugin-video-pipeline",
+  "version": "0.0.0",
+  "description": "Babel plugin that enforces 'worklet'; directives on callbacks passed to react-native-video-pipeline APIs.",
+  "author": "Sebastian Biallas <sb@biallas.net>",
+  "license": "MIT",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "files": [
+    "build",
+    "src",
+    "!**/__tests__",
+    "!**/__fixtures__",
+    "!**/__mocks__",
+    "!**/.*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "del-cli build",
+    "prepack": "yarn build"
+  },
+  "keywords": [
+    "babel-plugin",
+    "react-native",
+    "worklet",
+    "video"
+  ],
+  "peerDependencies": {
+    "@babel/core": "^7.20.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.0",
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

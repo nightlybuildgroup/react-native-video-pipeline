@@ -1,0 +1,27 @@
+# T024 — drive the bare-example's bootstrap-fixtures button and confirm
+# all four declared fixture kinds (animated / gradient / rotated /
+# hdrFlag) are produced as MP4 files via the real JS → Nitro →
+# renderCompose → HybridFrameTarget pipeline (drawWithRGBA +
+# bootstrapPatternRGBA, asymmetric by design).
+#
+# Bare-example uses proxy resolutions (160×120) so the flow completes
+# in seconds; full-resolution production (1080p/4K/720p as declared in
+# __tests__/bootstrap/generators.ts) lives in T048's golden-file suite.
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- assertVisible: "Skia boot: OK.*"
+- tapOn:
+    id: "run-bootstrap-fixtures"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 60000
+- assertVisible: ".*animated=.*rnvp-bootstrap-animated\\.mp4.*"
+- assertVisible: ".*gradient=.*rnvp-bootstrap-gradient\\.mp4.*"
+- assertVisible: ".*rotated=.*rnvp-bootstrap-rotated\\.mp4.*"
+- assertVisible: ".*hdrFlag=.*rnvp-bootstrap-hdrFlag\\.mp4.*"
+- assertVisible: ".*BOOTSTRAP_PATTERN via drawWithRGBA.*"

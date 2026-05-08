@@ -1,0 +1,17 @@
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- scrollUntilVisible:
+    element:
+      id: "run-frame-number-overlay"
+    timeout: 5000
+- tapOn:
+    id: "run-frame-number-overlay"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 60000
+- takeScreenshot: build/frame-number-overlay

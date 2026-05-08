@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "lib/typescript",
+    "baseUrl": ".",
+    "paths": {
+      "react-native-video-pipeline": ["../react-native-video-pipeline/src/index"]
+    }
+  },
+  "include": ["src"],
+  "exclude": ["lib", "node_modules"]
+}

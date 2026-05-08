@@ -1,0 +1,24 @@
+# T054d (Skia path) — drive the bare-example's drawWithSkia button and
+# confirm the compose pipeline works with Skia actually running in Hermes
+# (not just the pointer-path via drawWithRGBA).
+#
+# Flow:
+#   1. Launch app; Skia boots.
+#   2. Tap "Run Video.synthesize() via drawWithSkia" (testID=run-synthesize-skia).
+#   3. Wait up to 30s for the result-ok text.
+#   4. Assert the result mentions the drawWithSkia marker so we know the
+#      Skia branch produced the MP4 (not the pointer branch).
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- assertVisible: "Skia boot: OK.*"
+- tapOn:
+    id: "run-synthesize-skia"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 30000
+- assertVisible: ".*Skia teal\\+yellow via drawWithSkia.*"

@@ -1,0 +1,19 @@
+# T054d (Android) — mirrors .maestro/synthesize-probe.yaml but targets the
+# Android app id (iOS uses `org.reactjs.native.example.bareexample`, Android
+# is `com.bareexample`). Eventually both platforms should share a single
+# flow via Maestro's per-platform config, but for v0.1 duplicate flows keep
+# the debugging simple.
+appId: com.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- assertVisible: "Skia boot: OK.*"
+- tapOn:
+    id: "run-synthesize"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 30000
+- assertVisible: ".*BOOTSTRAP_PATTERN via drawWithRGBA.*"

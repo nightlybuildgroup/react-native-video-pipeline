@@ -1,0 +1,108 @@
+{
+  "name": "react-native-video-pipeline",
+  "version": "0.0.0",
+  "description": "Offline video editing Nitro Module for React Native (iOS + Android). Trim, flip, stamp, compose, synthesize, probe.",
+  "author": "Sebastian Biallas <sb@biallas.net>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unbogify/react-native-video-pipeline.git",
+    "directory": "packages/react-native-video-pipeline"
+  },
+  "homepage": "https://github.com/unbogify/react-native-video-pipeline#readme",
+  "bugs": {
+    "url": "https://github.com/unbogify/react-native-video-pipeline/issues"
+  },
+  "main": "lib/commonjs/index.js",
+  "module": "lib/module/index.js",
+  "types": "lib/typescript/commonjs/src/index.d.ts",
+  "files": [
+    "src",
+    "lib",
+    "cpp",
+    "ios",
+    "android",
+    "nitrogen",
+    "plugin/build",
+    "plugin/app.plugin.js",
+    "nitro.json",
+    "NitroVideoPipeline.podspec",
+    "!**/__tests__",
+    "!**/__fixtures__",
+    "!**/__mocks__",
+    "!**/.*",
+    "!android/build",
+    "!android/.gradle",
+    "!ios/build",
+    "!**/node_modules"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "nitrogen": "nitrogen",
+    "build": "bob build",
+    "clean": "del-cli lib nitrogen plugin/build",
+    "prepack": "yarn nitrogen && yarn build"
+  },
+  "keywords": [
+    "react-native",
+    "nitro",
+    "video",
+    "offline",
+    "avfoundation",
+    "media3"
+  ],
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*",
+    "react-native-nitro-modules": "*",
+    "react-native-worklets-core": "*"
+  },
+  "peerDependenciesMeta": {
+    "@shopify/react-native-skia": {
+      "optional": true
+    },
+    "expo": {
+      "optional": true
+    },
+    "react-native-reanimated": {
+      "optional": true
+    },
+    "react-native-worklets-core": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "del-cli": "^7.0.0",
+    "nitrogen": "0.35.2",
+    "react-native-builder-bob": "^0.41.0",
+    "react-native-nitro-modules": "0.35.2",
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "commonjs",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ]
+    ]
+  }
+}

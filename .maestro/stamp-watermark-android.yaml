@@ -1,0 +1,28 @@
+# T044 — Android transcode + watermark verification.
+#
+# Precondition: source MP4 + watermark PNG must already be in the app's
+# cache dir on the device. The driver script `.maestro/_setup/push-stamp-
+# fixtures-android.sh` (run before this flow) does:
+#
+#   ffmpeg -f lavfi -i color=red:size=160x120:duration=1:rate=30 ...
+#   adb push /tmp/red-test.mp4   /data/local/tmp/...
+#   adb shell run-as com.bareexample cp ... cache/red-test.mp4
+#   ffmpeg -f lavfi -i color=yellow:size=40x40:duration=0.04 ...
+#   adb shell run-as com.bareexample cp ... cache/yellow.png
+#
+# Bypasses Video.synthesize because Android's renderCompose is iOS-only
+# (T041c); pre-pushed fixtures let us still exercise the transcode +
+# image-overlay path that is T044's actual subject.
+appId: com.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- tapOn:
+    id: "run-stamp-watermark"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 60000
+- assertVisible: ".*stamp\\+ImageOverlay \\(T044\\).*"

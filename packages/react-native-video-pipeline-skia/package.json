@@ -1,0 +1,42 @@
+{
+  "name": "react-native-video-pipeline-skia",
+  "version": "0.0.0",
+  "description": "Skia helper for react-native-video-pipeline — wraps Skia offscreen surface + readPixels/writeBytes in a single drawWithSkia() callback so consumer code stays Skia-boilerplate-free while the main library keeps zero Skia dependency.",
+  "author": "Sebastian Biallas <sb@biallas.net>",
+  "license": "MIT",
+  "main": "lib/commonjs/index.js",
+  "module": "lib/module/index.js",
+  "types": "lib/typescript/src/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "lib",
+    "!**/__tests__",
+    "!**/__fixtures__",
+    "!**/__mocks__",
+    "!**/.*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "react-native",
+    "skia",
+    "video",
+    "pipeline",
+    "worklet"
+  ],
+  "peerDependencies": {
+    "@shopify/react-native-skia": ">=2",
+    "react-native-video-pipeline": "*",
+    "react-native-worklets-core": "*"
+  },
+  "devDependencies": {
+    "@shopify/react-native-skia": "^2.6.2",
+    "typescript": "^5.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

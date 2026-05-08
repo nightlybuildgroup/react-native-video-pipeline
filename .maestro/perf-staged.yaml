@@ -1,0 +1,45 @@
+# Tiered perf test driver. The handler emits a Text node per stage with
+# testID `perf-stage-<name>` (probe / tiny / medium / native / full /
+# done). Maestro waits on each testID with its own short timeout so a
+# stall in any stage fails fast.
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- tapOn:
+    id: "run-perf-skia"
+- scrollUntilVisible:
+    element:
+      id: "result-box"
+    timeout: 5000
+- extendedWaitUntil:
+    visible:
+      id: "perf-stage-probe"
+    timeout: 8000
+- takeScreenshot: build/perf-stage-probe
+- extendedWaitUntil:
+    visible:
+      id: "perf-stage-tiny"
+    timeout: 15000
+- takeScreenshot: build/perf-stage-tiny
+- extendedWaitUntil:
+    visible:
+      id: "perf-stage-medium"
+    timeout: 60000
+- takeScreenshot: build/perf-stage-medium
+- extendedWaitUntil:
+    visible:
+      id: "perf-stage-native"
+    timeout: 60000
+- takeScreenshot: build/perf-stage-native
+- extendedWaitUntil:
+    visible:
+      id: "perf-stage-full"
+    timeout: 300000
+- takeScreenshot: build/perf-stage-full
+- extendedWaitUntil:
+    visible:
+      id: "perf-stage-done"
+    timeout: 5000

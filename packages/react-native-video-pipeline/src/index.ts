@@ -1,0 +1,55 @@
+export * from './bootstrap-pattern';
+export * from './controller';
+export * from './drawWithRGBA';
+export * from './errors';
+// Re-export the shared types from the Nitro spec so consumers don't have to
+// reach into `./nitro/...` themselves.
+export type {
+  Anchor,
+  AnchorPoint,
+  AnchorPreset,
+  AudioMode,
+  AudioSpec,
+  Clip,
+  ClipTransform,
+  CropRect,
+  DurationMode,
+  DurationSpec,
+  EncoderCaps,
+  FixedDuration,
+  FlipAxis,
+  FontWeight,
+  FrameDrawer,
+  FrameDrawerContext,
+  FrameSource,
+  FrameTarget,
+  ImageOverlay,
+  MetadataSpec,
+  NativeOverlay,
+  OpenDuration,
+  OutputSpec,
+  Overlay,
+  OverlayKind,
+  PixelFormat,
+  Progress,
+  RenderControllerState,
+  RenderOptions,
+  RenderPriority,
+  Rotation,
+  Size,
+  TextAlign,
+  TextOverlay,
+  TextShadow,
+  TextStyle,
+  ThumbnailOptions,
+  TimeRange,
+  VideoCodec,
+  VideoContainer,
+  VideoInfo,
+  VideoPipelineErrorCode,
+  VideoPipelineErrorShape,
+  WGS84Coordinate,
+  WorkletOverlay,
+} from './nitro/VideoPipeline.nitro';
+export * from './overlay';
+export * from './video';

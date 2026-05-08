@@ -1,0 +1,17 @@
+# Quick perf test — drives the bare-example's "Run perf test" button which
+# probes IMG_6643.MP4 (1080x1920 / 240fps / 2.66s, ~640 frames) and runs
+# Video.synthesize at the same shape with a Skia circle + frame-number text
+# per frame. Reports info() latency and synthesize ms/frame in the result UI.
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- tapOn:
+    id: "run-perf-skia"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 300000
+- assertVisible: ".*Skia circle \\+ frame# text \\(perf\\).*"
