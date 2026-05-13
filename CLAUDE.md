@@ -95,13 +95,29 @@ A task is not "done" until every check that applies to its diff passes locally. 
 
 ## Task workflow
 
+The two task-style flows below are kept separate on purpose. Pick the one that matches what you're doing:
+
+### Planned-TODO flow (the original Ralph loop)
+
+Used for the staged feature work that filled the v0.1 roadmap. The defining trait: a real entry in `TODO.md` with `priority` and `depends_on` you can read off the file.
+
 1. Read `activity.md` to see what's already done.
 2. In `TODO.md` (gitignored, local), find the lowest-`priority` open task whose `depends_on` are all done.
 3. Implement exactly **one** task per iteration.
 4. Run the applicable checks above.
 5. Append a dated entry to `activity.md` — what changed, what commands ran, issues + resolutions.
 6. Move that task from "Open" to "Done" in `TODO.md`.
-7. Commit to branch `v0.1` (create from `main` on the first iteration). One commit per task. Never push. Never commit to `main`.
+7. Commit on a dedicated feature branch (`fix/...`, `feat/...`, `chore/...`) — one commit per task, branched from `main`. Never push. Never commit to `main`.
+
+### Ad-hoc work flow
+
+Used for everything else — bug reports, consumer-driven investigations, follow-up fixes after v0.1.0 shipped, refactors that didn't go through `TODO.md`. The defining trait: the work was driven by an active conversation, not a queued task.
+
+1. Skip `TODO.md` / `activity.md`. Those files are for planned work; cluttering them with ad-hoc churn defeats the point.
+2. Run the applicable checks above (lint / format / typecheck / tests as the diff warrants) the same as planned work.
+3. Commit on a topic branch named for the change (`fix/<symptom>`, `feat/<thing>`, `chore/<task>`) branched from `main`. One logical change per commit. Never push. Never commit to `main`.
+
+> **Historical note:** before v0.1.0 shipped (commit `494e1f9`), iteration commits accumulated on a single `v0.1` integration branch — that's why prior versions of this section said "commit to branch `v0.1`." After release, that branch's purpose ended; new work goes on properly-named topic branches branched from `main`.
 
 ---
 
