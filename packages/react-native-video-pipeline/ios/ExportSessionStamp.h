@@ -1,19 +1,11 @@
 ///
 /// ExportSessionStamp.h
 ///
-/// AVAssetExportSession-based driver for the @c Video.stamp watermark path.
-/// Replaces the AVAssetReader+AVAssetWriter pump in @c Transcoder.mm for the
-/// static-overlay case: an iPhone slo-mo HEVC source (1080p @ 240fps, ~48
-/// Mbps) wedges the polling pump on real hardware because the encoder's
-/// @c readyForMoreMediaData flag never recovers under the bitrate/fps the
-/// stamp router was copying verbatim from the source. AVFoundation's own
-/// high-level export pipeline does not have this problem — it owns the
-/// encoder pacing, GOP placement, bitrate selection, and audio passthrough.
-///
-/// The legacy @c VideoTools.exportVideo Swift module in unbogify uses the
-/// same API (AVAssetExportSession + AVMutableVideoComposition +
-/// AVVideoCompositionCoreAnimationTool); this driver matches its shape so the
-/// rendered output is visually equivalent to the pre-pipeline export.
+/// AVAssetExportSession-based driver for the @c Video.stamp watermark path
+/// when the overlay is static (image / text — not a per-frame worklet).
+/// Uses AVFoundation's high-level export pipeline so the encoder, audio
+/// passthrough, container metadata, GOP placement, and bitrate selection
+/// are owned by the framework rather than the library.
 ///
 /// Scope:
 ///   - static image and text overlays (the @c RNVPImageOverlay /
@@ -21,15 +13,14 @@
 ///   - metadata stamping merged via the same
 ///     @c RNVPStampMetadata (MergeWriting) category the remux path uses;
 ///   - audio passthrough (AVFoundation handles it via the composition);
-///   - container metadata round-trip (preserved when this driver does not
-///     overwrite it).
+///   - container metadata round-trip.
 ///
-/// Out of scope (kept on the old transcode path for now):
-///   - per-frame programmatic drawing (the @c Video.compose worklet case) —
-///     wired in a follow-up via a custom @c AVVideoCompositing class.
+/// Out of scope (handled elsewhere in the library):
+///   - per-frame programmatic drawing (the @c Video.compose worklet case)
+///     stays on the @c RNVPTranscoder read/write pump, which gives the
+///     library frame-level control needed to invoke a JS callback per frame.
 ///   - resize / flip / rotate transforms — the stamp router never invokes
-///     those; the @c Video.render / @c Video.flip routers will move onto an
-///     export-session path in follow-up work.
+///     those; @c Video.render / @c Video.flip have their own routers.
 ///
 
 #pragma once

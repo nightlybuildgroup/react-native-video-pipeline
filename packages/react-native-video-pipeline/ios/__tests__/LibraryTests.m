@@ -5028,10 +5028,8 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
 
 /// RNVPExportSessionStamp: parity with testTranscodeAppliesCenterImageOverlay
 /// but routed through the AVAssetExportSession driver. Same 80x60 gray
-/// source, same 20x20 red overlay anchored center; verifies the new path
-/// composites the overlay correctly. The legacy reader/writer pump wedged
-/// on real-device slo-mo HEVC; this is the path Video.stamp(watermark)
-/// switched to.
+/// source, same 20x20 red overlay anchored center; verifies the
+/// static-overlay path composites the overlay correctly.
 - (void)testExportSessionStampAppliesCenterImageOverlay
 {
   const NSInteger kWidth = 80;
@@ -5122,9 +5120,8 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
 }
 
 /// RNVPExportSessionStamp: stamp metadata is written to the output container
-/// the same way the metadata-only remux path writes it. Covers the "watermark
-/// + metadata in one pass" case the unbogify exportVideo wrapper invokes for
-/// every save-to-library / share flow.
+/// the same way the metadata-only remux path writes it. Covers the
+/// "watermark + metadata in one pass" case.
 - (void)testExportSessionStampWritesStampMetadata
 {
   const NSInteger kWidth = 64;
@@ -5166,7 +5163,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                                    longitude:0.0
                               hasGpsAltitude:NO
                                     altitude:0.0
-                                    software:@"unbogify.com"
+                                    software:@"rnvp-test"
                                 creationDate:nil
                           contentDescription:@"export-session test"
                                       custom:nil];
@@ -5200,7 +5197,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       seenDescription = value;
     }
   }
-  XCTAssertEqualObjects(seenSoftware, @"unbogify.com");
+  XCTAssertEqualObjects(seenSoftware, @"rnvp-test");
   XCTAssertEqualObjects(seenDescription, @"export-session test");
 
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
@@ -5398,15 +5395,18 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
-/// RNVPExportSessionStamp: integration test against a real iPhone slo-mo
-/// HEVC recording. Skipped unless @c RNVP_REAL_FIXTURE points at a real
-/// .mp4/.MP4 source (CLAUDE.md forbids committing binary video to the repo,
-/// so the fixture lives outside; the consumer's repo carries one). Runs
-/// against whatever AVFoundation flavor the test binary was built for —
-/// macOS via @c yarn test:native, or iOS Simulator via @c yarn smoke:ios.
+/// RNVPExportSessionStamp: integration test against an arbitrary real-world
+/// recording. Skipped unless @c RNVP_REAL_FIXTURE points at a real
+/// .mp4/.MP4 source — CLAUDE.md forbids committing binary video to the
+/// repo, so the fixture is supplied externally. Useful for verifying the
+/// export path against the specific shapes the library's synthesizer
+/// cannot produce (HEVC, high-fps, container-side time mappings, edit
+/// lists, etc.). Runs against whatever AVFoundation flavor the test binary
+/// was built for — macOS via @c yarn test:native, or iOS Simulator via
+/// @c yarn smoke:ios.
 ///
 /// Probes both source and output via @c RNVPAVDemuxer — the same probe the
-/// JS @c Video.info call uses — so the assertion matches what consumers
+/// JS @c Video.info call uses — so the assertion matches what callers
 /// observe through the public API.
 - (void)testExportSessionStampRealFixturePreservesFps
 {

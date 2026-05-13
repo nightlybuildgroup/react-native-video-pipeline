@@ -30,6 +30,7 @@
 #import "AVMuxer.h"
 #import "BackgroundTaskGuard.h"
 #import "Capabilities.h"
+#import "ExportSession.h"
 #import "ExportSessionStamp.h"
 #import "HybridFrameSource.h"
 #import "HybridFrameTarget.h"
@@ -1044,15 +1045,10 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
     });
   }
 
-  // Watermark present → AVAssetExportSession path (RNVPExportSessionStamp).
-  // The legacy AVAssetReader+AVAssetWriter pump in @c RNVPTranscoder wedges on
-  // real-device slo-mo HEVC sources (1080p @ 240fps, ~48 Mbps) because the
-  // hand-rolled @c readyForMoreMediaData polling loop has no recovery when
-  // the hardware encoder stalls under that bitrate/fps. The high-level
-  // AVAssetExportSession API does not have this problem — it owns the
-  // encoder pacing, bitrate selection, GOP placement, and audio passthrough.
-  // The overlay flows through the same @c RNVPOverlayRenderer pre-rasterizer
-  // either way; only the encoder/IO driver changes.
+  // Watermark present → @c RNVPExportSessionStamp, a thin facade that
+  // builds an @c RNVPOverlayRenderer from the supplied overlays and hands
+  // a composer block to @c RNVPExportSession (the generic
+  // AVAssetExportSession-backed driver shared by compose / render too).
   NSMutableArray* nativeOverlays =
       [NSMutableArray arrayWithCapacity:1];
   appendNativeOverlay(nativeOverlays, *watermark);
@@ -1079,7 +1075,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
   });
 }
 
-// --- renderCompose — null-input synthesize through a JS worklet -----------
+// --- renderCompose — compose-on-clip via RNVPExportSession; null-input via
+// --- RNVPAVMuxer (no source asset for AVAssetExportSession to consume).
 
 std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
     const VideoSpec& spec,
@@ -1159,100 +1156,209 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
       [fm removeItemAtPath:outputPathNS error:NULL];
     }
 
-    // -------------------------------------------------------------------
-    // Set up the source reader (compose-on-clip only).
-    // -------------------------------------------------------------------
-    AVAssetReader* reader = nil;
-    AVAssetReaderTrackOutput* videoOutput = nil;
-    NSArray<AVMetadataItem*>* sourceMetadata = nil;
-    int width = specWidth;
-    int height = specHeight;
-    double fps = specFps;
-    int nbFramesEstimate = 0;
-
+    // ===================================================================
+    // Compose-on-clip branch — route through @c RNVPExportSession.
+    // The driver owns AVAssetExportSession, encoder pacing, audio
+    // passthrough, and the encoder pipeline. We supply a composer block
+    // that materializes the CIImage frame into a CVPixelBuffer (for the JS
+    // worklet to read), allocates a target CVPixelBuffer (for the JS to
+    // write into), and wraps the result back as a CIImage for the encoder.
+    // ===================================================================
     if (!isSynthesized) {
       NSString* clipUriNS =
           [NSString stringWithUTF8String:clipUri.c_str()] ?: @"";
       NSURL* sourceURL = [clipUriNS hasPrefix:@"file://"]
                             ? [NSURL URLWithString:clipUriNS]
                             : [NSURL fileURLWithPath:clipUriNS];
-      AVURLAsset* asset = [[AVURLAsset alloc] initWithURL:sourceURL options:nil];
-      NSArray<AVAssetTrack*>* videoTracks =
-          [asset tracksWithMediaType:AVMediaTypeVideo];
-      if (videoTracks.count == 0) {
+
+      // Probe the source for the canvas size so per-frame buffer allocations
+      // can be sized correctly. The driver itself does the same probe
+      // internally, but we need it here for the per-frame allocations.
+      AVURLAsset* composeAsset = [AVURLAsset assetWithURL:sourceURL];
+      AVAssetTrack* composeVideoTrack =
+          [composeAsset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+      if (composeVideoTrack == nil) {
         RenderTokenRegistry::unregisterToken(tokenCopy);
         throw std::runtime_error(
             "VideoPipeline.renderCompose: clip has no video track");
       }
-      AVAssetTrack* videoTrack = videoTracks.firstObject;
+      const CGSize composeNatural = composeVideoTrack.naturalSize;
+      const CGSize composeApplied =
+          CGSizeApplyAffineTransform(composeNatural,
+                                      composeVideoTrack.preferredTransform);
+      const NSInteger canvasW =
+          static_cast<NSInteger>(std::llround(std::fabs(composeApplied.width)));
+      const NSInteger canvasH =
+          static_cast<NSInteger>(std::llround(std::fabs(composeApplied.height)));
 
-      NSError* readerErr = nil;
-      reader = [[AVAssetReader alloc] initWithAsset:asset error:&readerErr];
-      if (reader == nil) {
-        RenderTokenRegistry::unregisterToken(tokenCopy);
-        const char* desc = readerErr.localizedDescription.UTF8String ?: "(nil)";
-        throw std::runtime_error(
-            std::string("VideoPipeline.renderCompose: AVAssetReader init "
-                         "failed: ") +
-            desc);
-      }
-      NSDictionary<NSString*, id>* decompressSettings = @{
+      RNVPStopToken* runnerToken =
+          stop ? [RNVPStopToken tokenFromSharedPtr:stop] : nil;
+      const auto t0 = std::chrono::steady_clock::now();
+
+      // CIContext lives for the duration of the export — re-creating it per
+      // frame would burn Metal setup cost every call.
+      CIContext* ciContext = [CIContext contextWithOptions:nil];
+      NSDictionary<NSString*, id>* pbAttrs = @{
         (NSString*)kCVPixelBufferPixelFormatTypeKey :
             @(kCVPixelFormatType_32BGRA),
+        (NSString*)kCVPixelBufferWidthKey : @(canvasW),
+        (NSString*)kCVPixelBufferHeightKey : @(canvasH),
         (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
       };
-      videoOutput = [[AVAssetReaderTrackOutput alloc]
-            initWithTrack:videoTrack
-           outputSettings:decompressSettings];
-      videoOutput.alwaysCopiesSampleData = NO;
-      if (![reader canAddOutput:videoOutput]) {
-        RenderTokenRegistry::unregisterToken(tokenCopy);
-        throw std::runtime_error(
-            "VideoPipeline.renderCompose: AVAssetReader refused decompressed "
-            "video output");
-      }
-      [reader addOutput:videoOutput];
-      if (![reader startReading]) {
-        RenderTokenRegistry::unregisterToken(tokenCopy);
-        const char* desc =
-            reader.error.localizedDescription.UTF8String ?: "(nil)";
-        throw std::runtime_error(
-            std::string("VideoPipeline.renderCompose: AVAssetReader "
-                         "startReading failed: ") +
-            desc);
+
+      RNVPExportSessionComposer composer =
+          ^CIImage*(CIImage* source, CMTime t, int32_t i) {
+            // Materialize the source CIImage into a CVPixelBuffer the JS
+            // worklet can read (HybridFrameSource wraps a CVPixelBuffer).
+            CVPixelBufferRef sourcePb = NULL;
+            const CVReturn cvSrc = CVPixelBufferCreate(
+                kCFAllocatorDefault, (size_t)canvasW, (size_t)canvasH,
+                kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pbAttrs,
+                &sourcePb);
+            if (cvSrc != kCVReturnSuccess || sourcePb == NULL) {
+              @throw [NSException
+                  exceptionWithName:@"RNVPComposeWorklet"
+                             reason:[NSString stringWithFormat:
+                                                   @"CVPixelBufferCreate(source)"
+                                                   @" failed (cv=%d)",
+                                                   (int)cvSrc]
+                           userInfo:nil];
+            }
+            [ciContext render:source
+                toCVPixelBuffer:sourcePb
+                         bounds:CGRectMake(0, 0, canvasW, canvasH)
+                     colorSpace:nil];
+
+            // Allocate a destination buffer the JS worklet can write to.
+            CVPixelBufferRef targetPb = NULL;
+            const CVReturn cvDst = CVPixelBufferCreate(
+                kCFAllocatorDefault, (size_t)canvasW, (size_t)canvasH,
+                kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pbAttrs,
+                &targetPb);
+            if (cvDst != kCVReturnSuccess || targetPb == NULL) {
+              CVPixelBufferRelease(sourcePb);
+              @throw [NSException
+                  exceptionWithName:@"RNVPComposeWorklet"
+                             reason:[NSString stringWithFormat:
+                                                   @"CVPixelBufferCreate(target)"
+                                                   @" failed (cv=%d)",
+                                                   (int)cvDst]
+                           userInfo:nil];
+            }
+
+            auto target = std::make_shared<HybridFrameTarget>(
+                targetPb, PixelFormat::BGRA8888);
+            auto sourceWrapper = std::make_shared<HybridFrameSource>(
+                sourcePb, PixelFormat::BGRA8888);
+            auto sourceArg =
+                std::optional<std::shared_ptr<HybridFrameSourceSpec>>(
+                    std::static_pointer_cast<HybridFrameSourceSpec>(
+                        sourceWrapper));
+
+            NSException* threw = nil;
+            try {
+              auto promise = drawFrameCopy(target, sourceArg,
+                                            static_cast<double>(i),
+                                            CMTimeGetSeconds(t));
+              promise->await().get();
+            } catch (const std::exception& e) {
+              threw = [NSException
+                  exceptionWithName:@"RNVPComposeWorklet"
+                             reason:[NSString stringWithFormat:
+                                                   @"drawFrame threw at frame "
+                                                   @"%d: %s",
+                                                   i, e.what()]
+                           userInfo:nil];
+            }
+            target->invalidate();
+            sourceWrapper->invalidate();
+
+            CIImage* output =
+                [CIImage imageWithCVPixelBuffer:targetPb];
+            CVPixelBufferRelease(sourcePb);
+            CVPixelBufferRelease(targetPb);
+            if (threw != nil) {
+              @throw threw;
+            }
+            return output;
+          };
+
+      // Translate the driver's per-frame progress callback into the
+      // existing C++ @c Progress shape so consumers see the same fields
+      // regardless of which driver runs underneath.
+      RNVPExportSessionProgress progressBlock = nil;
+      if (onProgressCopy.has_value()) {
+        progressBlock =
+            ^(int32_t framesCompleted, int32_t nbFrames) {
+              const auto elapsed = std::chrono::steady_clock::now() - t0;
+              const double elapsedMs =
+                  std::chrono::duration<double, std::milli>(elapsed).count();
+              const double etaMs =
+                  framesCompleted > 0 && nbFrames > framesCompleted
+                      ? elapsedMs *
+                            static_cast<double>(nbFrames - framesCompleted) /
+                            static_cast<double>(framesCompleted)
+                      : 0.0;
+              Progress p(static_cast<double>(framesCompleted),
+                         nbFrames > 0
+                             ? std::optional<double>(
+                                   static_cast<double>(nbFrames))
+                             : std::optional<double>(),
+                         elapsedMs, std::optional<double>(etaMs));
+              (*onProgressCopy)(p);
+              if (framesCompleted % 50 == 0 ||
+                  (nbFrames > 0 && framesCompleted == nbFrames)) {
+                if (nbFrames > 0) {
+                  NSLog(@"[RNVP.renderCompose] %d/%d frames in %.0fms "
+                        @"(%.1fms/frame)",
+                        framesCompleted, nbFrames, elapsedMs,
+                        elapsedMs / static_cast<double>(framesCompleted));
+                } else {
+                  NSLog(@"[RNVP.renderCompose] %d frames in %.0fms "
+                        @"(%.1fms/frame)",
+                        framesCompleted, elapsedMs,
+                        elapsedMs / static_cast<double>(framesCompleted));
+                }
+              }
+            };
       }
 
-      const CGSize naturalSize = videoTrack.naturalSize;
-      width = static_cast<int>(std::llround(naturalSize.width));
-      height = static_cast<int>(std::llround(naturalSize.height));
-      fps = static_cast<double>(videoTrack.nominalFrameRate);
-      if (fps <= 0.0) fps = 30.0;  // pathological source — pick something sane.
-      nbFramesEstimate = static_cast<int>(std::llround(
-          CMTimeGetSeconds(asset.duration) * fps));
-      // Capture container-level metadata so the writer can re-emit it on
-      // the output. If the caller supplied @c spec.metadata, run the source
-      // bag through the same merger the stamp/transcode paths use —
-      // caller fields override / supplement, source fields pass through.
-      // Otherwise raw pass-through.
-      if (stampMetadata != nil) {
-        sourceMetadata =
-            [stampMetadata mergedWithSourceMetadata:asset.metadata];
-      } else {
-        sourceMetadata = asset.metadata;
+      NSError* err = nil;
+      const BOOL ok = [RNVPExportSession
+          exportFromURL:sourceURL
+                  toURL:[NSURL fileURLWithPath:outputPathNS]
+                composer:composer
+                metadata:stampMetadata
+                    stop:runnerToken
+                progress:progressBlock
+                   error:&err];
+      RenderTokenRegistry::unregisterToken(tokenCopy);
+      if (!ok) {
+        if (runnerToken != nil && runnerToken.abortRequested) {
+          throw std::runtime_error("VideoPipeline.renderCompose: Cancelled");
+        }
+        const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+        throw std::runtime_error(
+            std::string("VideoPipeline.renderCompose: ") + desc);
       }
-    } else if (stampMetadata != nil) {
-      // Synthesize path: no source asset to merge with, but caller-supplied
-      // stamp items still apply.
+      return;
+    }
+
+    // ===================================================================
+    // Null-input synthesize branch — stays on @c RNVPAVMuxer because
+    // AVAssetExportSession requires a source asset and we have none.
+    // ===================================================================
+    NSArray<AVMetadataItem*>* sourceMetadata = nil;
+    if (stampMetadata != nil) {
       sourceMetadata = [stampMetadata mergedWithSourceMetadata:nil];
     }
 
+    const int width = specWidth;
+    const int height = specHeight;
+    const double fps = specFps;
     const int nbFrames =
-        isSynthesized ? static_cast<int>(std::llround(specFps * specSeconds))
-                      : nbFramesEstimate;
+        static_cast<int>(std::llround(specFps * specSeconds));
 
-    // -------------------------------------------------------------------
-    // Open the writer.
-    // -------------------------------------------------------------------
     RNVPAVMuxer* muxer = [[RNVPAVMuxer alloc] init];
     NSError* openErr = nil;
     const BOOL opened = [muxer openVideoOnlyAtPath:outputPathNS
@@ -1269,9 +1375,6 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
           desc);
     }
 
-    // -------------------------------------------------------------------
-    // Pump.
-    // -------------------------------------------------------------------
     NSDictionary<NSString*, id>* pbAttrs = @{
       (NSString*)kCVPixelBufferPixelFormatTypeKey :
           @(kCVPixelFormatType_32BGRA),
@@ -1285,55 +1388,17 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
     const auto t0 = std::chrono::steady_clock::now();
     int frameIndex = 0;
 
-    while (true) {
+    while (frameIndex < nbFrames) {
       if (stop && stop->abortRequested()) {
         aborted = true;
         break;
       }
-      // Synthesize ends after a fixed frame count; compose-on-clip ends at
-      // source EOS. The two checks below collapse into one loop body.
-      if (isSynthesized && frameIndex >= nbFrames) break;
 
-      // Pull the source frame for this iteration (compose-on-clip only).
-      CMSampleBufferRef sourceSample = NULL;
-      CVPixelBufferRef sourcePb = NULL;
-      CMTime srcPts = kCMTimeInvalid;
-      if (!isSynthesized) {
-        sourceSample = [videoOutput copyNextSampleBuffer];
-        if (sourceSample == NULL) {
-          // EOS or reader failure — distinguish:
-          if (reader.status == AVAssetReaderStatusFailed) {
-            failure = reader.error
-                          ?: [NSError errorWithDomain:@"VideoPipeline"
-                                                 code:0
-                                             userInfo:@{
-                                               NSLocalizedDescriptionKey :
-                                                   @"AVAssetReader failed"
-                                             }];
-          }
-          break;
-        }
-        sourcePb = CMSampleBufferGetImageBuffer(sourceSample);
-        srcPts = CMSampleBufferGetPresentationTimeStamp(sourceSample);
-        if (sourcePb == NULL) {
-          CFRelease(sourceSample);
-          failure = [NSError errorWithDomain:@"VideoPipeline"
-                                        code:0
-                                    userInfo:@{
-                                      NSLocalizedDescriptionKey :
-                                          @"source sample missing image buffer"
-                                    }];
-          break;
-        }
-      }
-
-      // Allocate the destination buffer and hand to JS for drawing.
       CVPixelBufferRef destPb = NULL;
       CVReturn cv = CVPixelBufferCreate(
           kCFAllocatorDefault, (size_t)width, (size_t)height,
           kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pbAttrs, &destPb);
       if (cv != kCVReturnSuccess || destPb == NULL) {
-        if (sourceSample != NULL) CFRelease(sourceSample);
         failure = [NSError
             errorWithDomain:@"VideoPipeline"
                        code:0
@@ -1348,28 +1413,16 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
 
       auto target =
           std::make_shared<HybridFrameTarget>(destPb, PixelFormat::BGRA8888);
-      std::shared_ptr<HybridFrameSource> sourceWrapper;
-      std::optional<std::shared_ptr<HybridFrameSourceSpec>> sourceArg;
-      if (sourcePb != NULL) {
-        sourceWrapper = std::make_shared<HybridFrameSource>(
-            sourcePb, PixelFormat::BGRA8888);
-        sourceArg = std::static_pointer_cast<HybridFrameSourceSpec>(
-            sourceWrapper);
-      }
-
-      const double timeSec =
-          isSynthesized ? static_cast<double>(frameIndex) / fps
-                        : CMTimeGetSeconds(srcPts);
+      const double timeSec = static_cast<double>(frameIndex) / fps;
 
       try {
-        auto promise = drawFrameCopy(target, sourceArg,
-                                     static_cast<double>(frameIndex), timeSec);
+        auto promise = drawFrameCopy(target, std::nullopt,
+                                      static_cast<double>(frameIndex),
+                                      timeSec);
         promise->await().get();
       } catch (const std::exception& e) {
         target->invalidate();
-        if (sourceWrapper) sourceWrapper->invalidate();
         CVPixelBufferRelease(destPb);
-        if (sourceSample != NULL) CFRelease(sourceSample);
         char msg[512];
         std::snprintf(msg, sizeof(msg),
                       "drawFrame threw at frame %d: %s", frameIndex, e.what());
@@ -1382,20 +1435,15 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
         break;
       }
       target->invalidate();
-      if (sourceWrapper) sourceWrapper->invalidate();
 
-      const CMTime pts =
-          isSynthesized
-              ? CMTimeMake(static_cast<int64_t>(std::llround(
-                                timeSec * 1'000'000'000.0)),
-                           1'000'000'000)
-              : srcPts;
+      const CMTime pts = CMTimeMake(
+          static_cast<int64_t>(std::llround(timeSec * 1'000'000'000.0)),
+          1'000'000'000);
       NSError* appendErr = nil;
       const BOOL appended = [muxer appendPixelBuffer:destPb
                                     presentationTime:pts
                                                error:&appendErr];
       CVPixelBufferRelease(destPb);
-      if (sourceSample != NULL) CFRelease(sourceSample);
       if (!appended) {
         failure = appendErr;
         break;
@@ -1405,9 +1453,6 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
         const auto elapsed = std::chrono::steady_clock::now() - t0;
         const double elapsedMs =
             std::chrono::duration<double, std::milli>(elapsed).count();
-        const double total = nbFrames > 0
-                                 ? static_cast<double>(nbFrames)
-                                 : static_cast<double>(frameIndex + 1);
         const double etaMs = nbFrames > 0
                                  ? elapsedMs *
                                        static_cast<double>(nbFrames -
@@ -1415,36 +1460,21 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
                                        static_cast<double>(frameIndex + 1)
                                  : 0.0;
         Progress p(static_cast<double>(frameIndex + 1),
-                   nbFrames > 0
-                       ? std::optional<double>(total)
-                       : std::optional<double>(),
+                   std::optional<double>(static_cast<double>(nbFrames)),
                    elapsedMs, std::optional<double>(etaMs));
         (*onProgressCopy)(p);
       }
 
       frameIndex++;
-      // Periodic progress heartbeat. Distinguishes a slow encoder (steady
-      // log cadence) from a hard stall (no logs after a frame number) when
-      // diagnosing future regressions.
-      if (frameIndex % 50 == 0 ||
-          (nbFrames > 0 && frameIndex == nbFrames)) {
+      if (frameIndex % 50 == 0 || frameIndex == nbFrames) {
         const auto elapsed = std::chrono::steady_clock::now() - t0;
         const double elapsedMs =
             std::chrono::duration<double, std::milli>(elapsed).count();
-        if (nbFrames > 0) {
-          NSLog(@"[RNVP.renderCompose] %d/%d frames in %.0fms (%.1fms/frame)",
-                frameIndex, nbFrames, elapsedMs,
-                elapsedMs / static_cast<double>(frameIndex));
-        } else {
-          NSLog(@"[RNVP.renderCompose] %d frames in %.0fms (%.1fms/frame)",
-                frameIndex, elapsedMs,
-                elapsedMs / static_cast<double>(frameIndex));
-        }
+        NSLog(@"[RNVP.renderCompose] synth %d/%d frames in %.0fms "
+              @"(%.1fms/frame)",
+              frameIndex, nbFrames, elapsedMs,
+              elapsedMs / static_cast<double>(frameIndex));
       }
-    }
-
-    if (reader != nil) {
-      [reader cancelReading];
     }
 
     NSError* closeErr = nil;
