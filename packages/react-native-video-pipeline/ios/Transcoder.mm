@@ -574,14 +574,36 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
         loopAborted = YES;
         break;
       }
+      if (writer.status == AVAssetWriterStatusFailed) break;
       [NSThread sleepForTimeInterval:0.001];
     }
     if (loopAborted) break;
     if (!videoInput.readyForMoreMediaData) {
       loopError = writer.error
                       ?: makeError(RNVPTranscoderErrorCodeWriterFailed,
-                                   @"Video encoder did not become ready "
-                                   @"within 30s.");
+                                   [NSString stringWithFormat:
+                                       @"Video encoder did not become ready "
+                                       @"within 30s "
+                                       @"(writer.status=%ld, "
+                                       @"reader.status=%ld, "
+                                       @"framesPushed=%d, "
+                                       @"target=%ldx%ld@%.2f %@ %ldbps, "
+                                       @"writerErr=%@).",
+                                       (long)writer.status,
+                                       (long)reader.status,
+                                       outputIndex,
+                                       (long)target.width,
+                                       (long)target.height,
+                                       target.fps,
+                                       target.codec == RNVPTranscodeCodecHEVC
+                                           ? @"HEVC" : @"H264",
+                                       (long)(target.bitrate > 0
+                                           ? target.bitrate
+                                           : defaultBitrate(target.width,
+                                                            target.height,
+                                                            target.fps)),
+                                       writer.error
+                                           ?: (id)[NSNull null]]);
       break;
     }
 

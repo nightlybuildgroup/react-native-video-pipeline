@@ -30,6 +30,7 @@
 #import "AVMuxer.h"
 #import "BackgroundTaskGuard.h"
 #import "Capabilities.h"
+#import "ExportSessionStamp.h"
 #import "HybridFrameSource.h"
 #import "HybridFrameTarget.h"
 #import "OverlayRenderer.h"
@@ -1043,62 +1044,32 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
     });
   }
 
-  // Watermark present → transcode path (T033 pipeline with T034/T035 overlay
-  // rendering). Preserve source dimensions / fps / codec / bitrate so the
-  // US2 "watermark-only call with no resolution change preserves source fps
-  // exactly" acceptance holds. The overlay flows through the same
-  // @c RNVPOverlayRenderer as the render-branch path; metadata rides along
-  // in a single writer pass.
+  // Watermark present → AVAssetExportSession path (RNVPExportSessionStamp).
+  // The legacy AVAssetReader+AVAssetWriter pump in @c RNVPTranscoder wedges on
+  // real-device slo-mo HEVC sources (1080p @ 240fps, ~48 Mbps) because the
+  // hand-rolled @c readyForMoreMediaData polling loop has no recovery when
+  // the hardware encoder stalls under that bitrate/fps. The high-level
+  // AVAssetExportSession API does not have this problem — it owns the
+  // encoder pacing, bitrate selection, GOP placement, and audio passthrough.
+  // The overlay flows through the same @c RNVPOverlayRenderer pre-rasterizer
+  // either way; only the encoder/IO driver changes.
   NSMutableArray* nativeOverlays =
       [NSMutableArray arrayWithCapacity:1];
   appendNativeOverlay(nativeOverlays, *watermark);
 
-  RNVPAVDemuxer* demuxer = [[RNVPAVDemuxer alloc] init];
-  NSError* probeErr = nil;
-  if (![demuxer openAtURL:sourceURL error:&probeErr]) {
-    const char* desc = probeErr.localizedDescription.UTF8String ?: "(nil)";
-    return Promise<void>::rejected(std::make_exception_ptr(std::runtime_error(
-        std::string("VideoPipeline.stamp probe failed: ") + desc)));
-  }
-  const NSInteger sourceW = demuxer.width;
-  const NSInteger sourceH = demuxer.height;
-  const double sourceFps = demuxer.fps > 0.0 ? demuxer.fps : 30.0;
-  const NSInteger sourceBitrate = demuxer.bitRate;
-  const RNVPTranscodeCodec codec =
-      [demuxer.codec isEqualToString:@"hevc"] ? RNVPTranscodeCodecHEVC
-                                              : RNVPTranscodeCodecH264;
-  [demuxer closeWithError:nullptr];
-
-  RNVPTranscodeTarget* target =
-      [[RNVPTranscodeTarget alloc] initWithWidth:sourceW
-                                          height:sourceH
-                                             fps:sourceFps
-                                           codec:codec
-                                         bitrate:sourceBitrate
-                                          rotate:-1
-                                           flipH:NO
-                                           flipV:NO
-                                           cropX:0.0
-                                           cropY:0.0
-                                       cropWidth:0.0
-                                      cropHeight:0.0];
-
   RNVPBackgroundTaskGuard* stampTranscodeGuard = [RNVPBackgroundTaskGuard
-      beginWithTokenId:internalJournalToken("stamp-transcode")
+      beginWithTokenId:internalJournalToken("stamp-export-session")
             outputPath:stampOutputPath
              stopToken:nil];
   return Promise<void>::async(
-      [sourceURL, outputURL, target, nativeOverlays, stampMetadata,
+      [sourceURL, outputURL, nativeOverlays, stampMetadata,
        stampTranscodeGuard]() {
     NSError* err = nil;
-    const BOOL ok = [RNVPTranscoder transcodeFromURL:sourceURL
-                                               toURL:outputURL
-                                              target:target
-                                            overlays:nativeOverlays
-                                            metadata:stampMetadata
-                                                stop:nil
-                                            progress:nil
-                                               error:&err];
+    const BOOL ok = [RNVPExportSessionStamp stampFromURL:sourceURL
+                                                   toURL:outputURL
+                                                overlays:nativeOverlays
+                                                metadata:stampMetadata
+                                                   error:&err];
     [stampTranscodeGuard end];
     if (!ok) {
       const char* desc = err.localizedDescription.UTF8String ?: "(nil)";

@@ -42,6 +42,7 @@ OBJCXX_SOURCES=(
   "$PKG/ios/AVDemuxer.mm"
   "$PKG/ios/BackgroundTaskGuard.mm"
   "$PKG/ios/Capabilities.mm"
+  "$PKG/ios/ExportSessionStamp.mm"
   "$PKG/ios/MetalBlit.mm"
   "$PKG/ios/OverlayRenderer.mm"
   "$PKG/ios/Remuxer.mm"

@@ -465,6 +465,27 @@ extern NSString *const RNVPBackgroundTaskJournalDefaultsKey;
 - (void)end;
 @end
 
+// Forward-declare RNVPExportSessionStamp for the same clang-module reason as
+// the other RNVP* classes above. Keep in lockstep with
+// packages/react-native-video-pipeline/ios/ExportSessionStamp.h.
+extern NSErrorDomain const RNVPExportSessionStampErrorDomain;
+
+typedef NS_ERROR_ENUM(RNVPExportSessionStampErrorDomain,
+                      RNVPExportSessionStampErrorCode) {
+  RNVPExportSessionStampErrorCodeInvalidSpec = 1,
+  RNVPExportSessionStampErrorCodeSourceCorrupted = 2,
+  RNVPExportSessionStampErrorCodeExportFailed = 3,
+  RNVPExportSessionStampErrorCodeImageLoadFailed = 4,
+};
+
+@interface RNVPExportSessionStamp : NSObject
++ (BOOL)stampFromURL:(NSURL *)sourceURL
+               toURL:(NSURL *)outputURL
+            overlays:(NSArray *)overlays
+            metadata:(nullable RNVPStampMetadata *)metadata
+               error:(NSError *_Nullable __autoreleasing *)error;
+@end
+
 @interface bareexampleTests : XCTestCase
 @end
 
@@ -3509,6 +3530,112 @@ static NSString *authorSolidColorPng(NSInteger width, NSInteger height,
   return ok ? path : nil;
 }
 
+/// Author a video where every frame is visually distinct so a frame-uniqueness
+/// test can observe encoder duplication. Frame N fills the canvas with
+/// (R, G, B) = (N*step % 256, 0x80, 0x80) — the R channel ramps with frame
+/// index. step=4 keeps consecutive frames ≥4 units apart, robust against
+/// H.264 quantization noise (which lands at ~±10 on a flat source per the
+/// T034 acceptance tolerance, but our per-frame delta-from-flat-mean is the
+/// signal we care about — duplicated frames produce identical decoded R
+/// regardless of absolute level).
+static NSString *authorMotionFixture(NSInteger width, NSInteger height,
+                                      NSInteger fps, NSInteger frameCount,
+                                      NSString *tag,
+                                      NSError *_Nullable __autoreleasing *outError) {
+  NSString *path = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"motion-src-%@-%@.mp4", tag,
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  if (![muxer openAtPath:path width:width height:height fps:fps error:outError]) {
+    return nil;
+  }
+
+  NSDictionary *pbAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+    (id)kCVPixelBufferWidthKey : @(width),
+    (id)kCVPixelBufferHeightKey : @(height),
+  };
+  const int step = 4;
+  for (NSInteger i = 0; i < frameCount; i++) {
+    CVPixelBufferRef pb = NULL;
+    CVReturn cv = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                      kCVPixelFormatType_32BGRA,
+                                      (__bridge CFDictionaryRef)pbAttrs, &pb);
+    if (cv != kCVReturnSuccess) {
+      if (outError) {
+        *outError = [NSError errorWithDomain:@"authorMotionFixture"
+                                        code:cv
+                                    userInfo:nil];
+      }
+      return nil;
+    }
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pb);
+    const uint8_t r = (uint8_t)((i * step) & 0xFF);
+    for (NSInteger y = 0; y < height; y++) {
+      uint8_t *row = base + (size_t)y * bytesPerRow;
+      for (NSInteger x = 0; x < width; x++) {
+        uint8_t *px = row + (size_t)x * 4;
+        px[0] = 0x80;  // B
+        px[1] = 0x80;  // G
+        px[2] = r;     // R — varies per frame
+        px[3] = 0xFF;  // A
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    CMTime pts = CMTimeMake((int64_t)i, (int32_t)fps);
+    const BOOL ok =
+        [muxer appendPixelBuffer:pb presentationTime:pts error:outError];
+    CVPixelBufferRelease(pb);
+    if (!ok) return nil;
+  }
+  if (![muxer closeWithError:outError]) return nil;
+  return path;
+}
+
+/// Decode every video frame and return the center-pixel R value as an
+/// NSNumber array, in PTS order. Use with @c authorMotionFixture for
+/// frame-uniqueness assertions: each fixture frame has a distinct R, so the
+/// returned series tells you whether the encoder duplicated frames (long
+/// runs of identical R) or sampled them correctly (R varies frame-to-frame).
+static NSArray<NSNumber *> *decodeCenterRSeries(NSString *videoPath) {
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:videoPath]];
+  AVAssetTrack *videoTrack = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  if (videoTrack == nil) return nil;
+  NSError *readerError = nil;
+  AVAssetReader *reader =
+      [[AVAssetReader alloc] initWithAsset:asset error:&readerError];
+  if (reader == nil) return nil;
+  AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:videoTrack
+     outputSettings:@{
+       (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+     }];
+  [reader addOutput:output];
+  if (![reader startReading]) return nil;
+
+  NSMutableArray<NSNumber *> *rs = [NSMutableArray array];
+  while (YES) {
+    CMSampleBufferRef sample = [output copyNextSampleBuffer];
+    if (sample == NULL) break;
+    CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sample);
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pb);
+    const NSInteger w = (NSInteger)CVPixelBufferGetWidth(pb);
+    const NSInteger h = (NSInteger)CVPixelBufferGetHeight(pb);
+    const uint8_t *center = base + (h / 2) * bytesPerRow + (w / 2) * 4;
+    [rs addObject:@(center[2])];  // R channel — BGRA layout
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    CFRelease(sample);
+  }
+  return rs;
+}
+
 /// Read the first decoded BGRA frame of @p videoPath into an arbitrary pixel
 /// sampler block. The block receives (baseAddr, bytesPerRow, width, height)
 /// and returns nothing — tests use it to sample the regions they care about
@@ -4897,6 +5024,574 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                  0u);
 
   [RNVPBackgroundTaskJournal resetForTesting];
+}
+
+/// RNVPExportSessionStamp: parity with testTranscodeAppliesCenterImageOverlay
+/// but routed through the AVAssetExportSession driver. Same 80x60 gray
+/// source, same 20x20 red overlay anchored center; verifies the new path
+/// composites the overlay correctly. The legacy reader/writer pump wedged
+/// on real-device slo-mo HEVC; this is the path Video.stamp(watermark)
+/// switched to.
+- (void)testExportSessionStampAppliesCenterImageOverlay
+{
+  const NSInteger kWidth = 80;
+  const NSInteger kHeight = 60;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 15;  // 0.5s @ 30fps
+
+  NSError *fixtureError = nil;
+  NSString *sourcePath = authorOpaqueGrayFixture(kWidth, kHeight, kFps,
+                                                  kFrameCount,
+                                                  @"export-session-center",
+                                                  &fixtureError);
+  XCTAssertNotNil(sourcePath, @"source fixture failed: %@", fixtureError);
+
+  NSString *overlayPath = authorSolidColorPng(20, 20, 0xFF, 0x00, 0x00,
+                                               @"red-20-export-session");
+  XCTAssertNotNil(overlayPath, @"overlay PNG authoring failed");
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"export-session-stamp-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPImageOverlay *overlay = [[RNVPImageOverlay alloc]
+      initWithImageURL:[NSURL fileURLWithPath:overlayPath]
+               anchorX:0.5
+               anchorY:0.5
+                 sizeW:20.0
+                 sizeH:20.0
+               opacity:1.0
+          hasTimeRange:NO
+              startSec:0.0
+                endSec:0.0];
+
+  NSError *error = nil;
+  const BOOL ok =
+      [RNVPExportSessionStamp stampFromURL:[NSURL fileURLWithPath:sourcePath]
+                                     toURL:[NSURL fileURLWithPath:outPath]
+                                  overlays:@[ overlay ]
+                                  metadata:nil
+                                     error:&error];
+  XCTAssertTrue(ok, @"export-session stamp failed: %@", error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
+
+  __block int centerB = 0, centerG = 0, centerR = 0;
+  __block int cornerB = 0, cornerG = 0, cornerR = 0;
+  __block NSInteger observedW = 0, observedH = 0;
+  const BOOL decoded = withFirstDecodedFrame(outPath, ^(
+      const uint8_t *base, size_t bytesPerRow, NSInteger w, NSInteger h) {
+    observedW = w;
+    observedH = h;
+    const uint8_t *center = base + (h / 2) * bytesPerRow + (w / 2) * 4;
+    centerB = center[0];
+    centerG = center[1];
+    centerR = center[2];
+    const uint8_t *corner = base + 3 * bytesPerRow + 3 * 4;
+    cornerB = corner[0];
+    cornerG = corner[1];
+    cornerR = corner[2];
+  });
+  XCTAssertTrue(decoded, @"could not decode output");
+  XCTAssertEqual(observedW, kWidth);
+  XCTAssertEqual(observedH, kHeight);
+
+  XCTAssertGreaterThan(centerR, 180,
+                       @"center R channel %d (expected > 180 for red overlay)",
+                       centerR);
+  XCTAssertLessThan(centerG, 60, @"center G channel %d (expected < 60)", centerG);
+  XCTAssertLessThan(centerB, 60, @"center B channel %d (expected < 60)", centerB);
+
+  // Corner is outside the 20x20 overlay footprint, must NOT be red. Tolerance
+  // matches the existing transcode-overlay test: the H.264 round trip
+  // imbalances channels by a few units even on a flat-gray source.
+  XCTAssertLessThan(abs(cornerR - cornerG), 24,
+                    @"corner R=%d/G=%d unexpectedly imbalanced",
+                    cornerR, cornerG);
+  XCTAssertLessThan(abs(cornerR - cornerB), 24,
+                    @"corner R=%d/B=%d unexpectedly imbalanced",
+                    cornerR, cornerB);
+  XCTAssertLessThan(cornerR, 180,
+                    @"corner R %d unexpectedly matches the red overlay",
+                    cornerR);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:overlayPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// RNVPExportSessionStamp: stamp metadata is written to the output container
+/// the same way the metadata-only remux path writes it. Covers the "watermark
+/// + metadata in one pass" case the unbogify exportVideo wrapper invokes for
+/// every save-to-library / share flow.
+- (void)testExportSessionStampWritesStampMetadata
+{
+  const NSInteger kWidth = 64;
+  const NSInteger kHeight = 48;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 10;
+
+  NSError *fixtureError = nil;
+  NSString *sourcePath = authorOpaqueGrayFixture(kWidth, kHeight, kFps,
+                                                  kFrameCount,
+                                                  @"export-session-metadata",
+                                                  &fixtureError);
+  XCTAssertNotNil(sourcePath, @"source fixture failed: %@", fixtureError);
+
+  NSString *overlayPath = authorSolidColorPng(8, 8, 0x00, 0xFF, 0x00,
+                                               @"green-8-export-session-md");
+  XCTAssertNotNil(overlayPath, @"overlay PNG authoring failed");
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"export-session-stamp-md-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPImageOverlay *overlay = [[RNVPImageOverlay alloc]
+      initWithImageURL:[NSURL fileURLWithPath:overlayPath]
+               anchorX:0.0
+               anchorY:0.0
+                 sizeW:8.0
+                 sizeH:8.0
+               opacity:1.0
+          hasTimeRange:NO
+              startSec:0.0
+                endSec:0.0];
+
+  RNVPStampMetadata *metadata =
+      [[RNVPStampMetadata alloc] initWithGps:NO
+                                    latitude:0.0
+                                   longitude:0.0
+                              hasGpsAltitude:NO
+                                    altitude:0.0
+                                    software:@"unbogify.com"
+                                creationDate:nil
+                          contentDescription:@"export-session test"
+                                      custom:nil];
+
+  NSError *error = nil;
+  const BOOL ok =
+      [RNVPExportSessionStamp stampFromURL:[NSURL fileURLWithPath:sourcePath]
+                                     toURL:[NSURL fileURLWithPath:outPath]
+                                  overlays:@[ overlay ]
+                                  metadata:metadata
+                                     error:&error];
+  XCTAssertTrue(ok, @"export-session stamp failed: %@", error);
+
+  AVURLAsset *outAsset =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outPath]];
+  NSArray<AVMetadataItem *> *items = outAsset.metadata;
+  __block NSString *seenSoftware = nil;
+  __block NSString *seenDescription = nil;
+  for (AVMetadataItem *item in items) {
+    NSString *value = nil;
+    if ([item.value isKindOfClass:[NSString class]]) {
+      value = (NSString *)item.value;
+    } else if ([item.value respondsToSelector:@selector(stringValue)]) {
+      value = [(id)item.value stringValue];
+    }
+    if (value == nil) continue;
+    if ([item.commonKey isEqualToString:AVMetadataCommonKeySoftware]) {
+      seenSoftware = value;
+    } else if ([item.commonKey
+                   isEqualToString:AVMetadataCommonKeyDescription]) {
+      seenDescription = value;
+    }
+  }
+  XCTAssertEqualObjects(seenSoftware, @"unbogify.com");
+  XCTAssertEqualObjects(seenDescription, @"export-session test");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:overlayPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// RNVPExportSessionStamp: every source frame must round-trip as a distinct
+/// output frame. Catches the "container reports 240fps but the encoder
+/// duplicated the same frame N times" decimation bug — metadata-fps alone
+/// is a lying signal; this test decodes pixels and compares.
+///
+/// Fixture is @c authorMotionFixture, where each frame's R channel ramps
+/// with frame index. A clean round-trip produces N distinct decoded R
+/// values; a decimating encoder produces long runs of identical R.
+- (void)testExportSessionStampPreservesFrameUniqueness
+{
+  const NSInteger kWidth = 80;
+  const NSInteger kHeight = 60;
+  const NSInteger kFps = 60;
+  const NSInteger kFrameCount = 60;  // 1s @ 60fps, R ramps 0..236
+
+  NSError *fixtureError = nil;
+  NSString *sourcePath = authorMotionFixture(kWidth, kHeight, kFps,
+                                              kFrameCount,
+                                              @"export-session-uniqueness",
+                                              &fixtureError);
+  XCTAssertNotNil(sourcePath, @"motion fixture failed: %@", fixtureError);
+
+  // Tiny corner overlay so the stamp path runs but doesn't smear the
+  // center-pixel R signal we sample.
+  NSString *overlayPath = authorSolidColorPng(4, 4, 0x00, 0xFF, 0x00,
+                                               @"green-4-uniqueness");
+  XCTAssertNotNil(overlayPath);
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"export-session-uniqueness-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPImageOverlay *overlay = [[RNVPImageOverlay alloc]
+      initWithImageURL:[NSURL fileURLWithPath:overlayPath]
+               anchorX:0.0
+               anchorY:0.0
+                 sizeW:4.0
+                 sizeH:4.0
+               opacity:1.0
+          hasTimeRange:NO
+              startSec:0.0
+                endSec:0.0];
+
+  NSError *stampError = nil;
+  const BOOL ok =
+      [RNVPExportSessionStamp stampFromURL:[NSURL fileURLWithPath:sourcePath]
+                                     toURL:[NSURL fileURLWithPath:outPath]
+                                  overlays:@[ overlay ]
+                                  metadata:nil
+                                     error:&stampError];
+  XCTAssertTrue(ok, @"stamp failed: %@", stampError);
+
+  NSArray<NSNumber *> *rs = decodeCenterRSeries(outPath);
+  XCTAssertNotNil(rs);
+  XCTAssertGreaterThan(rs.count, 0u);
+
+  // Two assertions that catch frame-duplication independently:
+  //  1. distinct values: a clean encoder produces kFrameCount distinct Rs
+  //     (modulo H.264 quantization clustering, allow a tolerance).
+  //  2. consecutive duplicates: in a healthy stream, frame[i].R should
+  //     differ from frame[i+1].R for the overwhelming majority of i.
+  //     A decimating encoder repeats the same R for long runs.
+  NSMutableSet<NSNumber *> *distinct = [NSMutableSet set];
+  NSInteger consecutiveDuplicates = 0;
+  for (NSUInteger i = 0; i < rs.count; i++) {
+    [distinct addObject:rs[i]];
+    if (i > 0 && [rs[i] isEqual:rs[i - 1]]) consecutiveDuplicates++;
+  }
+  NSLog(@"[uniqueness] decoded %lu frames, %lu distinct R values, %ld "
+        @"consecutive duplicates",
+        (unsigned long)rs.count, (unsigned long)distinct.count,
+        (long)consecutiveDuplicates);
+
+  // Distinct should be at least kFrameCount / 2 (allows quantization to
+  // merge near-neighbor R values, but not catastrophically). The bug pattern
+  // collapses this to a handful — assertion fires at single-digit values.
+  XCTAssertGreaterThan(distinct.count, (NSUInteger)(kFrameCount / 2),
+                       @"only %lu distinct R values from %lu frames — "
+                       @"encoder duplicated content",
+                       (unsigned long)distinct.count,
+                       (unsigned long)rs.count);
+  // Consecutive duplicates should be rare. Allow up to 20% as a safety
+  // margin; the bug pattern reaches 80%+.
+  XCTAssertLessThan(consecutiveDuplicates, (NSInteger)(rs.count / 5),
+                    @"%ld consecutive-duplicate pairs out of %lu — "
+                    @"encoder is sampling the source sparsely",
+                    (long)consecutiveDuplicates,
+                    (unsigned long)rs.count);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:overlayPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// RNVPExportSessionStamp: a high-fps source (240fps, simulating iPhone
+/// slo-mo) must round-trip its fps through the export — not get decimated
+/// to AVAssetExportSession's default-frame-rate (30fps). Regression for the
+/// real-device case where the watermarked output was ~2 fps because the
+/// composition we built did not carry the source's frameDuration.
+- (void)testExportSessionStampPreservesHighFps
+{
+  const NSInteger kWidth = 64;
+  const NSInteger kHeight = 48;
+  const NSInteger kFps = 240;
+  const NSInteger kFrameCount = 60;  // 0.25s @ 240fps
+
+  NSError *fixtureError = nil;
+  NSString *sourcePath = authorOpaqueGrayFixture(kWidth, kHeight, kFps,
+                                                  kFrameCount,
+                                                  @"export-session-240fps",
+                                                  &fixtureError);
+  XCTAssertNotNil(sourcePath, @"source fixture failed: %@", fixtureError);
+
+  NSString *overlayPath = authorSolidColorPng(8, 8, 0xFF, 0x00, 0x00,
+                                               @"red-8-240fps");
+  XCTAssertNotNil(overlayPath, @"overlay PNG authoring failed");
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"export-session-240fps-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPImageOverlay *overlay = [[RNVPImageOverlay alloc]
+      initWithImageURL:[NSURL fileURLWithPath:overlayPath]
+               anchorX:0.0
+               anchorY:0.0
+                 sizeW:8.0
+                 sizeH:8.0
+               opacity:1.0
+          hasTimeRange:NO
+              startSec:0.0
+                endSec:0.0];
+
+  NSError *error = nil;
+  const BOOL ok =
+      [RNVPExportSessionStamp stampFromURL:[NSURL fileURLWithPath:sourcePath]
+                                     toURL:[NSURL fileURLWithPath:outPath]
+                                  overlays:@[ overlay ]
+                                  metadata:nil
+                                     error:&error];
+  XCTAssertTrue(ok, @"export-session stamp failed: %@", error);
+
+  AVURLAsset *outAsset =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outPath]];
+  NSArray<AVAssetTrack *> *outVideoTracks =
+      [outAsset tracksWithMediaType:AVMediaTypeVideo];
+  XCTAssertEqual(outVideoTracks.count, 1u, @"output must have one video track");
+  AVAssetTrack *outVideoTrack = outVideoTracks.firstObject;
+
+  // Nominal frame rate is the authoritative "what was this encoded as" field.
+  // Tolerate ±2fps drift — AVAssetWriter sometimes reports the round-trip
+  // rate as nominal±epsilon depending on the timescale chosen by the encoder.
+  const float observedFps = outVideoTrack.nominalFrameRate;
+  XCTAssertGreaterThan(observedFps, (float)(kFps - 2),
+                       @"output fps %.2f decimated from source %ld",
+                       observedFps, (long)kFps);
+
+  // Frame count is the secondary check: a decimated output (e.g. the
+  // default-30fps bug) drops to ~kFrameCount * 30 / 240 = 7 frames for the
+  // 0.25s clip, which makes the bug stand out independently of nominalFps.
+  NSInteger outputFrames = 0;
+  AVAssetReader *reader =
+      [[AVAssetReader alloc] initWithAsset:outAsset error:nil];
+  AVAssetReaderTrackOutput *trackOut = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:outVideoTrack
+     outputSettings:@{
+       (NSString *)kCVPixelBufferPixelFormatTypeKey :
+           @(kCVPixelFormatType_32BGRA)
+     }];
+  [reader addOutput:trackOut];
+  [reader startReading];
+  while (YES) {
+    CMSampleBufferRef sample = [trackOut copyNextSampleBuffer];
+    if (sample == NULL) break;
+    outputFrames++;
+    CFRelease(sample);
+  }
+  XCTAssertGreaterThanOrEqual(outputFrames, kFrameCount - 2,
+                              @"output had %ld frames, source had %ld — "
+                              @"frames got decimated",
+                              (long)outputFrames, (long)kFrameCount);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:overlayPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// RNVPExportSessionStamp: integration test against a real iPhone slo-mo
+/// HEVC recording. Skipped unless @c RNVP_REAL_FIXTURE points at a real
+/// .mp4/.MP4 source (CLAUDE.md forbids committing binary video to the repo,
+/// so the fixture lives outside; the consumer's repo carries one). Runs
+/// against whatever AVFoundation flavor the test binary was built for —
+/// macOS via @c yarn test:native, or iOS Simulator via @c yarn smoke:ios.
+///
+/// Probes both source and output via @c RNVPAVDemuxer — the same probe the
+/// JS @c Video.info call uses — so the assertion matches what consumers
+/// observe through the public API.
+- (void)testExportSessionStampRealFixturePreservesFps
+{
+  NSString *fixturePath =
+      NSProcessInfo.processInfo.environment[@"RNVP_REAL_FIXTURE"];
+  if (fixturePath.length == 0) {
+    NSLog(@"[skip] testExportSessionStampRealFixturePreservesFps — "
+          @"set RNVP_REAL_FIXTURE=<path> to enable");
+    return;
+  }
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:fixturePath],
+                @"RNVP_REAL_FIXTURE does not exist: %@", fixturePath);
+
+  // Probe source via RNVPAVDemuxer — the same path Video.info uses on the JS
+  // side. Whatever fps the consumer sees in Video.info(srcUri), this test
+  // sees the same number.
+  RNVPAVDemuxer *srcDemuxer = [[RNVPAVDemuxer alloc] init];
+  NSError *probeError = nil;
+  XCTAssertTrue([srcDemuxer openAtURL:[NSURL fileURLWithPath:fixturePath]
+                                 error:&probeError],
+                @"source probe failed: %@", probeError);
+  const double sourceFps = srcDemuxer.fps;
+  const double sourceDurationSec = srcDemuxer.durationSec;
+  const NSInteger sourceW = srcDemuxer.width;
+  const NSInteger sourceH = srcDemuxer.height;
+  NSLog(@"[real-fixture] SOURCE fps=%.2f duration=%.2fs size=%ldx%ld codec=%@",
+        sourceFps, sourceDurationSec, (long)sourceW, (long)sourceH,
+        srcDemuxer.codec);
+  [srcDemuxer closeWithError:nil];
+
+  NSString *overlayPath = authorSolidColorPng(64, 64, 0xFF, 0x00, 0x00,
+                                               @"red-64-real-fixture");
+  XCTAssertNotNil(overlayPath);
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"real-fixture-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPImageOverlay *overlay = [[RNVPImageOverlay alloc]
+      initWithImageURL:[NSURL fileURLWithPath:overlayPath]
+               anchorX:0.5
+               anchorY:0.5
+                 sizeW:64.0
+                 sizeH:64.0
+               opacity:1.0
+          hasTimeRange:NO
+              startSec:0.0
+                endSec:0.0];
+
+  NSError *stampError = nil;
+  const BOOL ok = [RNVPExportSessionStamp
+      stampFromURL:[NSURL fileURLWithPath:fixturePath]
+             toURL:[NSURL fileURLWithPath:outPath]
+          overlays:@[ overlay ]
+          metadata:nil
+             error:&stampError];
+  XCTAssertTrue(ok, @"stamp failed: %@", stampError);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
+
+  // Probe output the same way — symmetry with what Video.info(destUri)
+  // would report. The fps assertion is therefore the same contract a
+  // consumer reads.
+  RNVPAVDemuxer *outDemuxer = [[RNVPAVDemuxer alloc] init];
+  NSError *outProbeError = nil;
+  XCTAssertTrue([outDemuxer openAtURL:[NSURL fileURLWithPath:outPath]
+                                 error:&outProbeError],
+                @"output probe failed: %@", outProbeError);
+  const double outputFps = outDemuxer.fps;
+  const double outputDurationSec = outDemuxer.durationSec;
+  NSLog(@"[real-fixture] OUTPUT fps=%.2f duration=%.2fs size=%ldx%ld codec=%@",
+        outputFps, outputDurationSec, (long)outDemuxer.width,
+        (long)outDemuxer.height, outDemuxer.codec);
+  [outDemuxer closeWithError:nil];
+
+  // Output fps must round-trip within ±2fps. Anything lower is the
+  // decimation bug consumers see on real iOS hardware (the "2fps output
+  // for a 240fps source" symptom).
+  XCTAssertGreaterThan(outputFps, sourceFps - 2.0,
+                       @"output fps %.2f decimated from source %.2f",
+                       outputFps, sourceFps);
+  // Duration round-trips too — same content, just re-encoded with a logo.
+  XCTAssertEqualWithAccuracy(outputDurationSec, sourceDurationSec, 0.1,
+                             @"output duration drifted from source");
+
+  // Frame-uniqueness: even when metadata-fps looks right, the encoder can
+  // duplicate the same source frame N times. A single-pixel sample isn't
+  // discriminative (real scenes have static centers), so hash a stride-100
+  // grid across the whole frame — that surface contains plenty of motion
+  // even when individual points don't. A clean encoder produces ~N distinct
+  // hashes for N frames; a decimating encoder produces a handful.
+  AVURLAsset *outAssetForDecode =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outPath]];
+  AVAssetTrack *outVideoTrack =
+      [outAssetForDecode tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  AVAssetReader *outReader =
+      [[AVAssetReader alloc] initWithAsset:outAssetForDecode error:nil];
+  AVAssetReaderTrackOutput *outOut = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:outVideoTrack
+     outputSettings:@{
+       (id)kCVPixelBufferPixelFormatTypeKey :
+           @(kCVPixelFormatType_32BGRA),
+     }];
+  [outReader addOutput:outOut];
+  [outReader startReading];
+  NSMutableSet<NSNumber *> *distinctHashes = [NSMutableSet set];
+  NSInteger consecutiveDups = 0;
+  NSNumber *previous = nil;
+  NSInteger totalFrames = 0;
+  while (YES) {
+    CMSampleBufferRef sample = [outOut copyNextSampleBuffer];
+    if (sample == NULL) break;
+    CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sample);
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(pb);
+    const NSInteger w = (NSInteger)CVPixelBufferGetWidth(pb);
+    const NSInteger h = (NSInteger)CVPixelBufferGetHeight(pb);
+    uint64_t hash = 1469598103934665603ULL;  // FNV-1a basis
+    for (NSInteger y = 0; y < h; y += 100) {
+      for (NSInteger x = 0; x < w; x += 100) {
+        const uint8_t *p = base + (size_t)y * bytesPerRow + (size_t)x * 4;
+        hash ^= (uint64_t)p[0];
+        hash *= 1099511628211ULL;
+        hash ^= (uint64_t)p[1];
+        hash *= 1099511628211ULL;
+        hash ^= (uint64_t)p[2];
+        hash *= 1099511628211ULL;
+      }
+    }
+    NSNumber *key = @(hash);
+    [distinctHashes addObject:key];
+    if (previous != nil && [previous isEqual:key]) consecutiveDups++;
+    previous = key;
+    totalFrames++;
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    CFRelease(sample);
+  }
+  NSLog(@"[real-fixture] decoded %ld frames, %lu distinct frame hashes, "
+        @"%ld consecutive duplicates",
+        (long)totalFrames, (unsigned long)distinctHashes.count,
+        (long)consecutiveDups);
+
+  // Real content with motion at 240fps produces a different stride-100 hash
+  // on essentially every frame. Allow some tolerance for runs of static
+  // content (a held pose, scene-change) but at least half the frames must
+  // be distinct from their predecessor.
+  XCTAssertGreaterThan(distinctHashes.count,
+                       (NSUInteger)(totalFrames / 2),
+                       @"only %lu distinct frame hashes from %ld frames — "
+                       @"encoder duplicated content (metadata looks fine, "
+                       @"playback is broken)",
+                       (unsigned long)distinctHashes.count, (long)totalFrames);
+
+  [[NSFileManager defaultManager] removeItemAtPath:overlayPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// RNVPExportSessionStamp: a missing source file rejects with a typed error
+/// (SourceCorrupted) rather than spinning the encoder. Sanity check for the
+/// up-front asset probe.
+- (void)testExportSessionStampRejectsMissingSource
+{
+  NSString *bogus = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"does-not-exist-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"export-session-stamp-missing-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+
+  NSError *error = nil;
+  const BOOL ok =
+      [RNVPExportSessionStamp stampFromURL:[NSURL fileURLWithPath:bogus]
+                                     toURL:[NSURL fileURLWithPath:outPath]
+                                  overlays:@[]
+                                  metadata:nil
+                                     error:&error];
+  XCTAssertFalse(ok);
+  XCTAssertNotNil(error);
+  XCTAssertEqualObjects(error.domain, RNVPExportSessionStampErrorDomain);
+  XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:outPath],
+                 @"no partial output expected for a missing source");
 }
 
 @end
