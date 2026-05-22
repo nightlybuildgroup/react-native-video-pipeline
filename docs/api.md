@@ -67,6 +67,8 @@ Video.trim(uri: string, options: TrimOptions): Promise<void>
 
 Trim a clip. Always remuxes (passthrough — no re-encode) when `options.transform` is `undefined` or rotation-only; transcodes when `transform.crop`, `flipH`, or `flipV` is present. See [Routing rules](#routing-rules).
 
+End-past-EOF requests (`startSec + durationSec > sourceDuration`) are silently clamped to the source's actual duration — matches `AVAssetExportSession` and ffmpeg leniency. This absorbs muxer-vs-encoder rounding drift (e.g. recorders that report a target duration ~10ms shorter than the bytes they actually wrote). Only `startSec` past EOF rejects with `InvalidSpec`.
+
 ### `Video.flip`
 
 ```ts

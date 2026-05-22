@@ -2048,8 +2048,11 @@ typedef NS_ERROR_ENUM(RNVPExportSessionStampErrorDomain,
   [[NSFileManager defaultManager] removeItemAtPath:trimPath error:nil];
 }
 
-/// T027 acceptance: out-of-range trim rejects with InvalidSpec.
-- (void)testRemuxTrimRejectsOutOfRangeWindow
+/// End-past-EOF trim windows are silently clamped to the source's actual
+/// duration — matches AVAssetExportSession / ffmpeg leniency, and absorbs
+/// muxer-vs-encoder rounding drift (e.g. VisionCamera reports a target
+/// duration that ends up ~10ms shorter than the bytes it actually wrote).
+- (void)testRemuxTrimClampsEndPastEOFToSourceDuration
 {
   const NSInteger kWidth = 64;
   const NSInteger kHeight = 64;
@@ -2058,11 +2061,81 @@ typedef NS_ERROR_ENUM(RNVPExportSessionStampErrorDomain,
 
   NSString *sourcePath = [NSTemporaryDirectory()
       stringByAppendingPathComponent:
-          [NSString stringWithFormat:@"t027-oor-%@.mp4",
+          [NSString stringWithFormat:@"t027-clamp-%@.mp4",
                                      NSUUID.UUID.UUIDString]];
   NSString *trimPath = [NSTemporaryDirectory()
       stringByAppendingPathComponent:
-          [NSString stringWithFormat:@"t027-oor-out-%@.mp4",
+          [NSString stringWithFormat:@"t027-clamp-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:trimPath error:nil];
+
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  NSError *error = nil;
+  XCTAssertTrue([muxer openAtPath:sourcePath
+                            width:kWidth
+                           height:kHeight
+                              fps:kFps
+                            error:&error]);
+  NSDictionary *pbAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+    (id)kCVPixelBufferWidthKey : @(kWidth),
+    (id)kCVPixelBufferHeightKey : @(kHeight),
+  };
+  for (NSInteger i = 0; i < kFrameCount; i++) {
+    CVPixelBufferRef pb = NULL;
+    CVPixelBufferCreate(kCFAllocatorDefault, kWidth, kHeight,
+                        kCVPixelFormatType_32BGRA,
+                        (__bridge CFDictionaryRef)pbAttrs, &pb);
+    CVPixelBufferLockBaseAddress(pb, 0);
+    memset(CVPixelBufferGetBaseAddress(pb), 0x80,
+           CVPixelBufferGetBytesPerRow(pb) * (size_t)kHeight);
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    CMTime pts = CMTimeMake((int64_t)i, (int32_t)kFps);
+    [muxer appendPixelBuffer:pb presentationTime:pts error:nil];
+    CVPixelBufferRelease(pb);
+  }
+  XCTAssertTrue([muxer closeWithError:&error]);
+
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+  NSURL *trimURL = [NSURL fileURLWithPath:trimPath];
+
+  error = nil;
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
+                                        toURL:trimURL
+                                     startSec:0.0
+                                  durationSec:100.0
+                                        error:&error],
+                @"remux should clamp an end-past-EOF window, not reject it");
+  XCTAssertNil(error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:trimPath]);
+
+  // Output should contain ~1s of samples (the entire source), not 100s.
+  AVURLAsset *trimmedAsset = [AVURLAsset assetWithURL:trimURL];
+  const double trimmedSec = CMTimeGetSeconds(trimmedAsset.duration);
+  XCTAssertEqualWithAccuracy(trimmedSec, 1.0, 0.1,
+                             @"clamped trim should produce ~1s of output");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:trimPath error:nil];
+}
+
+/// startSec past EOF leaves zero frames to copy — still rejects with
+/// InvalidSpec. The clamp behavior above only applies to the end bound.
+- (void)testRemuxTrimRejectsStartPastSourceEnd
+{
+  const NSInteger kWidth = 64;
+  const NSInteger kHeight = 64;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 30;  // 1s source
+
+  NSString *sourcePath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"t027-start-oor-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  NSString *trimPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"t027-start-oor-out-%@.mp4",
                                      NSUUID.UUID.UUIDString]];
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:trimPath error:nil];
@@ -2100,10 +2173,10 @@ typedef NS_ERROR_ENUM(RNVPExportSessionStampErrorDomain,
   error = nil;
   XCTAssertFalse([RNVPRemuxer remuxTrimFromURL:sourceURL
                                          toURL:trimURL
-                                      startSec:0.0
-                                   durationSec:100.0
+                                      startSec:10.0
+                                   durationSec:1.0
                                          error:&error],
-                 @"remux should reject a durationSec past the source end");
+                 @"remux should reject startSec past the source end");
   XCTAssertEqualObjects(error.domain, RNVPRemuxerErrorDomain);
   XCTAssertEqual(error.code, RNVPRemuxerErrorCodeInvalidSpec);
   XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:trimPath],

@@ -27,12 +27,15 @@ std::optional<std::string> describeTrimRejection(
     return "trim: durationSec must be a positive finite number";
   }
   if (sourceDurationSec.has_value()) {
-    // One-millisecond tolerance keeps a caller asking for "the last second
-    // of a one-second file" — where both bounds round-trip through doubles
-    // — from tripping on sub-frame float error.
-    if (spec.startSec + spec.durationSec >
-        *sourceDurationSec + kSecondsTolerance) {
-      return "trim: startSec + durationSec exceeds source duration";
+    // startSec past EOF leaves zero frames to copy — surface that as
+    // InvalidSpec. End-past-EOF (startSec + durationSec > sourceDuration)
+    // is silently clamped by the platform remuxers, mirroring
+    // AVAssetExportSession and ffmpeg behavior. Rejecting it would force
+    // every consumer to do millisecond-precise duration arithmetic to avoid
+    // tripping on muxer-vs-encoder rounding drift (e.g. VisionCamera reports
+    // a target duration ~10ms shorter than the bytes it actually wrote).
+    if (spec.startSec > *sourceDurationSec + kSecondsTolerance) {
+      return "trim: startSec exceeds source duration";
     }
   }
   return std::nullopt;

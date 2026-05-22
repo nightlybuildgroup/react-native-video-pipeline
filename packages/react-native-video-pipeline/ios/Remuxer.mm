@@ -205,9 +205,10 @@ CGAffineTransform flipTransformForAxis(RNVPFlipAxis axis,
   const CMTime assetEnd = asset.duration;
   const CMTime requestedEnd = CMTimeAdd(startTime, duration);
   if (CMTimeCompare(requestedEnd, assetEnd) > 0) {
-    // describeTrimRejection already enforces start+duration <= sourceDuration
-    // within a 1ms tolerance; if we're ever-so-slightly past due to rounding,
-    // clamp silently so AVAssetReader doesn't reject the range.
+    // End-past-EOF is intentionally allowed by describeTrimRejection (matches
+    // AVAssetExportSession / ffmpeg leniency). Clamp here so AVAssetReader
+    // gets a valid in-range window and the output contains whatever samples
+    // actually exist between startTime and assetEnd.
     duration = CMTimeSubtract(assetEnd, startTime);
   }
   const CMTime endTime = CMTimeAdd(startTime, duration);

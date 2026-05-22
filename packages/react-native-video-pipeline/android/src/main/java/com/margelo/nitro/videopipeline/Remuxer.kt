@@ -78,10 +78,14 @@ internal object Remuxer {
     }
 
     val sourceDurationSec = probeDurationSec(sourcePath)
-    if (startSec + durationSec > sourceDurationSec + 1e-3) {
+    // startSec past EOF leaves zero frames to copy — reject. End-past-EOF is
+    // silently clamped below (see `endUs` calc) to match AVAssetExportSession
+    // / ffmpeg behavior; rejecting it would force every consumer to do
+    // millisecond-precise duration arithmetic to avoid tripping on
+    // muxer-vs-encoder rounding drift.
+    if (startSec > sourceDurationSec + 1e-3) {
       throw InvalidSpecException(
-        "trim: startSec + durationSec (${startSec + durationSec}) exceeds source duration " +
-          "($sourceDurationSec)"
+        "trim: startSec ($startSec) exceeds source duration ($sourceDurationSec)"
       )
     }
 
@@ -101,7 +105,12 @@ internal object Remuxer {
         muxer.start()
 
         val startUs = (startSec * 1_000_000.0).roundToLong()
-        val endUs = ((startSec + durationSec) * 1_000_000.0).roundToLong()
+        // Clamp to source duration so an end-past-EOF request copies whatever
+        // samples actually exist instead of overshooting the extractor's seek
+        // range. See `describeTrimRejection` / Remuxer.cpp for the rationale.
+        val sourceDurationUs = (sourceDurationSec * 1_000_000.0).roundToLong()
+        val requestedEndUs = ((startSec + durationSec) * 1_000_000.0).roundToLong()
+        val endUs = minOf(requestedEndUs, sourceDurationUs)
         copyRange(
           extractor = extractor,
           muxer = muxer,

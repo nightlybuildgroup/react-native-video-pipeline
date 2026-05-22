@@ -33,6 +33,11 @@ struct TrimSpec {
 /// Returns a human-readable reason when @p spec cannot be honored by any
 /// remuxer implementation. Returns std::nullopt when the spec is valid.
 ///
+/// End-past-EOF (startSec + durationSec > sourceDuration) is intentionally
+/// NOT rejected — the platform remuxers clamp internally and return however
+/// many samples actually exist, matching AVAssetExportSession / ffmpeg
+/// behavior. Only @c startSec past EOF rejects (zero frames to copy).
+///
 /// @param sourceDurationSec Source clip duration, if already known. Pass
 ///                          std::nullopt to skip the bound check (e.g. to
 ///                          validate the spec before opening the source).
