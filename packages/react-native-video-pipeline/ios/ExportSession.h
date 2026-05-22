@@ -1,42 +1,43 @@
 ///
 /// ExportSession.h
 ///
-/// Unified iOS driver for "source video → per-frame transform → output video"
-/// operations. Wraps the canonical AVFoundation pattern:
+/// Unified iOS driver for AVAssetExportSession-backed operations. One request
+/// struct (@c RNVPExportRequest), one entry point (@c +runRequest:error:).
+/// The driver internally picks between the two backend shapes AVFoundation
+/// gives us based on what's in the request:
 ///
-///   AVURLAsset
-///     → AVMutableComposition (insertTimeRange: ofTrack:)
-///     → AVMutableVideoComposition (renderSize, frameDuration,
-///                                  customVideoCompositorClass)
-///     → AVAssetExportSession (preset, outputURL)
+///   - Passthrough (no composer): @c AVAssetExportSession with
+///     @c AVAssetExportPresetPassthrough. Copies compressed samples verbatim;
+///     AVFoundation owns muxer pacing, edit-list rebasing, audio passthrough,
+///     transform preservation. Used by @c Video.trim (no transform) and the
+///     metadata-only legs of @c Video.stamp / @c Video.flip.
 ///
-/// AVFoundation owns the encoder, audio passthrough, GOP placement, bitrate
-/// selection, and the multi-threaded pixel-buffer pool. The library only
-/// supplies the per-frame work via a composer block.
-///
-/// Used by:
-///   - @c Video.stamp (watermark — static image/text overlays)
-///   - @c Video.compose (worklet — per-frame JS draw)
-///   - @c Video.render / @c Video.flip / non-passthrough @c Video.trim
-///     (programmatic transforms — flip, rotate, resize, crop)
+///   - Composition (with composer): @c AVMutableComposition →
+///     @c AVMutableVideoComposition (custom compositor) →
+///     @c AVAssetExportSession with @c AVAssetExportPresetHighestQuality.
+///     AVFoundation owns the encoder; the library only supplies the
+///     per-frame work. Used by @c Video.stamp (watermark) and the per-clip
+///     leg of @c Video.compose.
 ///
 /// NOT used by:
-///   - @c Video.synthesize and the null-input @c Video.compose case — those
-///     have no source asset for AVAssetExportSession to consume; they use
-///     the bare @c RNVPAVMuxer writer pattern instead.
-///   - Pure passthrough remux paths (@c Video.trim no-flip,
-///     metadata-only @c Video.stamp) — those stay on @c RNVPRemuxer for
-///     true byte-for-byte sample passthrough.
+///   - @c Video.render / re-encode transcode with explicit bitrate/codec
+///     control — those go through @c RNVPTranscoder, which uses
+///     @c AVAssetWriter directly because @c AVAssetExportSession presets
+///     don't expose @c AVVideoAverageBitRateKey / @c AVVideoCodecKey.
+///     Follow-up work could give that driver the same request-style API.
+///   - @c Video.synthesize and null-input @c Video.compose — no source asset
+///     for AVAssetExportSession to consume; uses @c RNVPAVMuxer directly.
+///   - Multi-clip concat — see @c RNVPRemuxer.
 ///
 
 #pragma once
 
+#import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 
-@class RNVPStampMetadata;
 @class RNVPStopToken;
 
 NS_ASSUME_NONNULL_BEGIN
@@ -58,7 +59,7 @@ typedef NS_ERROR_ENUM(RNVPExportSessionErrorDomain,
 /// the source's @c preferredTransform applied, and returns the composited
 /// @c CIImage AVFoundation should emit. To pass the source through unchanged
 /// (e.g. when a time-ranged overlay isn't active for this frame), return
-/// @p source directly.
+/// @p sourceImage directly.
 ///
 /// Synchronicity contract: the block is called synchronously and must return
 /// before the next frame is requested. Async work the implementation needs
@@ -74,34 +75,51 @@ typedef CIImage *_Nonnull (^RNVPExportSessionComposer)(
 typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
                                            int32_t nbFrames);
 
+/// Immutable request struct consumed by @c RNVPExportSession.+runRequest:error:.
+/// Fields are read-only — build with the designated initializer.
+///
+/// Backend selection follows from the field combination:
+///   - @c composer nil  → passthrough preset, no composition built
+///   - @c composer set  → composition preset (HighestQuality), composer
+///                        invoked per output frame
+///
+/// @c timeRange is @c kCMTimeRangeInvalid for "use the asset's full range";
+/// otherwise the export session window is set verbatim (caller is
+/// responsible for clamping to the source's actual duration when in doubt).
+@interface RNVPExportRequest : NSObject
+
+@property(nonatomic, readonly) NSURL *source;
+@property(nonatomic, readonly) NSURL *output;
+@property(nonatomic, readonly) CMTimeRange timeRange;
+@property(nonatomic, readonly, nullable)
+    NSArray<AVMetadataItem *> *metadata;
+@property(nonatomic, readonly, nullable) RNVPExportSessionComposer composer;
+@property(nonatomic, readonly, nullable) RNVPStopToken *stop;
+@property(nonatomic, readonly, nullable) RNVPExportSessionProgress progress;
+
+- (instancetype)initWithSource:(NSURL *)source
+                        output:(NSURL *)output
+                     timeRange:(CMTimeRange)timeRange
+                      metadata:(nullable NSArray<AVMetadataItem *> *)metadata
+                      composer:(nullable RNVPExportSessionComposer)composer
+                          stop:(nullable RNVPStopToken *)stop
+                      progress:(nullable RNVPExportSessionProgress)progress
+    NS_DESIGNATED_INITIALIZER;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+@end
+
 @interface RNVPExportSession : NSObject
 
-/// Export @p sourceURL through @p composer to @p outputURL.
-///
-/// @param sourceURL  File URL of the source video. Must exist and have at
-///                   least one video track.
-/// @param outputURL  File URL the result will be written to. Pre-existing
-///                   files are removed before the export starts.
-/// @param composer   Per-frame composer block. See @c RNVPExportSessionComposer.
-/// @param metadata   Optional stamp metadata. Merged on top of the source's
-///                   container metadata via
-///                   @c RNVPStampMetadata.mergedWithSourceMetadata:.
-/// @param stop       Optional cancellation token. When fired, the export is
-///                   aborted and any partial output file is deleted.
-/// @param progress   Optional progress callback. Invoked once per output
-///                   frame on the compositor's rendering queue.
-/// @param error      Out-error.
-///
-/// Returns @c YES on a successful export. On failure, @p error is populated
-/// with an @c RNVPExportSessionErrorDomain error and any partial output file
-/// is deleted.
-+ (BOOL)exportFromURL:(NSURL *)sourceURL
-                toURL:(NSURL *)outputURL
-              composer:(RNVPExportSessionComposer)composer
-              metadata:(nullable RNVPStampMetadata *)metadata
-                  stop:(nullable RNVPStopToken *)stop
-              progress:(nullable RNVPExportSessionProgress)progress
-                 error:(NSError *_Nullable __autoreleasing *)error;
+/// Run @p request synchronously. Returns @c YES on success; on failure
+/// populates @p error with an @c RNVPExportSessionErrorDomain error and
+/// deletes any partial output file. Blocks the caller until the export
+/// session reports @c …Completed (success) or @c …Failed / @c …Cancelled
+/// (failure).
++ (BOOL)runRequest:(RNVPExportRequest *)request
+             error:(NSError *_Nullable __autoreleasing *)error;
 
 @end
 

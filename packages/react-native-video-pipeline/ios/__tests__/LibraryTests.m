@@ -5639,6 +5639,76 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
+/// RNVPRemuxer.remuxTrim: integration test against an arbitrary real-world
+/// recording. Skipped unless @c RNVP_REAL_FIXTURE points at a real source.
+/// Catches the class of bugs in-tree fixtures cannot: the synthesizer only
+/// authors H.264 30fps low-bitrate sources, so it never reproduces the
+/// AVAssetReader+AVAssetWriter polling wedge that hits real iPhone slo-mo
+/// HEVC (1080p @ 240fps @ ~50Mbps; see commits cb7c972 and the trim fix
+/// that followed). With the unified RNVPExportSession driver this should
+/// pass; if it ever hangs, the hand-rolled pump has snuck back in.
+- (void)testRemuxTrimRealFixturePassthroughCompletes
+{
+  NSString *fixturePath =
+      NSProcessInfo.processInfo.environment[@"RNVP_REAL_FIXTURE"];
+  if (fixturePath.length == 0) {
+    NSLog(@"[skip] testRemuxTrimRealFixturePassthroughCompletes — "
+          @"set RNVP_REAL_FIXTURE=<path> to enable");
+    return;
+  }
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:fixturePath],
+                @"RNVP_REAL_FIXTURE does not exist: %@", fixturePath);
+
+  RNVPAVDemuxer *srcDemuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([srcDemuxer openAtURL:[NSURL fileURLWithPath:fixturePath]
+                                 error:nil]);
+  const double sourceDurationSec = srcDemuxer.durationSec;
+  const double sourceFps = srcDemuxer.fps;
+  NSLog(@"[real-fixture trim] SOURCE duration=%.2fs fps=%.2f codec=%@",
+        sourceDurationSec, sourceFps, srcDemuxer.codec);
+  [srcDemuxer closeWithError:nil];
+
+  // Trim a window deliberately exceeding the source's reported duration by
+  // a few ms — this is the exact shape the slo-mo HEVC wedge bug produced
+  // in unbogify (VisionCamera-reported duration shorter than actual file).
+  const double startSec = 0.0;
+  const double overshootSec = sourceDurationSec + 0.005;
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"real-fixture-trim-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  NSError *trimError = nil;
+  const BOOL ok =
+      [RNVPRemuxer remuxTrimFromURL:[NSURL fileURLWithPath:fixturePath]
+                              toURL:[NSURL fileURLWithPath:outPath]
+                           startSec:startSec
+                        durationSec:overshootSec
+                              error:&trimError];
+  XCTAssertTrue(ok,
+                @"real-fixture trim failed (slo-mo HEVC wedge if "
+                @"\"writer input did not become ready\"): %@",
+                trimError);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
+
+  // Output should round-trip the source duration (clamped against EOF).
+  RNVPAVDemuxer *outDemuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([outDemuxer openAtURL:[NSURL fileURLWithPath:outPath]
+                                 error:nil]);
+  NSLog(@"[real-fixture trim] OUTPUT duration=%.2fs fps=%.2f codec=%@",
+        outDemuxer.durationSec, outDemuxer.fps, outDemuxer.codec);
+  XCTAssertEqualWithAccuracy(outDemuxer.durationSec, sourceDurationSec, 0.1,
+                             @"output duration drifted from source");
+  XCTAssertEqualWithAccuracy(outDemuxer.fps, sourceFps, 2.0,
+                             @"output fps drifted from source (encoder "
+                             @"shouldn't have run — this is passthrough)");
+  [outDemuxer closeWithError:nil];
+
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
 /// RNVPExportSessionStamp: a missing source file rejects with a typed error
 /// (SourceCorrupted) rather than spinning the encoder. Sanity check for the
 /// up-front asset probe.

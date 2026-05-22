@@ -128,14 +128,23 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
                                    atTimeSec:CMTimeGetSeconds(t)];
       };
 
+  // Merge stamp metadata over the source's container metadata before handing
+  // it to the driver — the driver itself is format-agnostic.
+  NSArray<AVMetadataItem *> *mergedMetadata =
+      metadata != nil ? [metadata mergedWithSourceMetadata:asset.metadata]
+                      : nil;
+
+  RNVPExportRequest *request =
+      [[RNVPExportRequest alloc] initWithSource:sourceURL
+                                         output:outputURL
+                                      timeRange:kCMTimeRangeInvalid
+                                       metadata:mergedMetadata
+                                       composer:composer
+                                           stop:nil
+                                       progress:nil];
+
   NSError *driverError = nil;
-  const BOOL ok = [RNVPExportSession exportFromURL:sourceURL
-                                             toURL:outputURL
-                                           composer:composer
-                                           metadata:metadata
-                                               stop:nil
-                                           progress:nil
-                                              error:&driverError];
+  const BOOL ok = [RNVPExportSession runRequest:request error:&driverError];
   if (!ok && error) {
     *error = mapDriverError(driverError);
   }

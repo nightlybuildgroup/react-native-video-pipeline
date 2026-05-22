@@ -1333,15 +1333,25 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
             };
       }
 
-      NSError* err = nil;
-      const BOOL ok = [RNVPExportSession
-          exportFromURL:sourceURL
-                  toURL:[NSURL fileURLWithPath:outputPathNS]
+      // Pre-merge stamp metadata over the source's container metadata before
+      // building the request — RNVPExportRequest is format-agnostic and takes
+      // an already-merged AVMetadataItem array.
+      NSArray<AVMetadataItem*>* mergedMetadata = nil;
+      if (stampMetadata != nil) {
+        AVURLAsset* metaAsset = [AVURLAsset assetWithURL:sourceURL];
+        mergedMetadata =
+            [stampMetadata mergedWithSourceMetadata:metaAsset.metadata];
+      }
+      RNVPExportRequest* request = [[RNVPExportRequest alloc]
+          initWithSource:sourceURL
+                  output:[NSURL fileURLWithPath:outputPathNS]
+               timeRange:kCMTimeRangeInvalid
+                metadata:mergedMetadata
                 composer:composer
-                metadata:stampMetadata
                     stop:runnerToken
-                progress:progressBlock
-                   error:&err];
+                progress:progressBlock];
+      NSError* err = nil;
+      const BOOL ok = [RNVPExportSession runRequest:request error:&err];
       RenderTokenRegistry::unregisterToken(tokenCopy);
       if (!ok) {
         if (runnerToken != nil && runnerToken.abortRequested) {

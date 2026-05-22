@@ -1,30 +1,22 @@
 ///
 /// ExportSession.mm — see header for high-level rationale.
 ///
-/// Implementation:
+/// One @c +runRequest:error: entry point that internally branches between
+/// the passthrough preset (no composer) and the composition + HighestQuality
+/// preset (composer set). The two backend shapes share output-file cleanup,
+/// timeRange wiring, metadata wiring, stop-token polling, and status / error
+/// reporting — extracted into helpers so the per-branch code stays focused
+/// on the AVFoundation-shape-specific work.
 ///
-///   AVURLAsset
-///     → AVMutableComposition (insertTimeRange: ofTrack:)
-///     → AVMutableVideoComposition built via
-///       +videoCompositionWithAsset:applyingCIFiltersWithHandler:
-///     → AVAssetExportSession (HighestQuality preset)
-///
-/// The composition is built against the @c AVMutableComposition (not the
-/// raw asset) so the export-session sees a clean linear timeline, regardless
-/// of whatever container-side packaging the source recording carries (edit
-/// lists, time mappings, etc). The CI handler is the per-frame seam: it
-/// receives the source frame as a pre-oriented @c CIImage and is expected to
-/// return the composited @c CIImage to feed the encoder.
-///
-/// Why @c +applyingCIFiltersWithHandler: instead of a hand-written
-/// @c AVVideoCompositing subclass? The hand-written compositor is the
-/// canonical pattern but in practice it triggered framework-side fps
-/// decimation on the macOS-host XCTest path (a 240fps source emerged as
-/// 75fps output). The applying-handler API uses AVFoundation's internal
-/// compositor, which is the same one the rest of AVFoundation uses for
-/// CIFilter chains, and it preserves source fps reliably across both
-/// macOS-host and iOS-Simulator builds. The custom-compositor approach can
-/// come back if we ever need per-frame work the CI handler can't express
+/// Why @c +applyingCIFiltersWithHandler: in the composition branch instead
+/// of a hand-written @c AVVideoCompositing subclass? The hand-written
+/// compositor is the canonical pattern but in practice it triggered
+/// framework-side fps decimation on the macOS-host XCTest path (a 240fps
+/// source emerged as 75fps output). The applying-handler API uses
+/// AVFoundation's internal compositor, the same one the rest of AVFoundation
+/// uses for CIFilter chains, and it preserves source fps reliably across
+/// both macOS-host and iOS-Simulator builds. The custom-compositor approach
+/// can come back if we ever need per-frame work the CI handler can't express
 /// (multi-track compositing, opaque rendering pipelines).
 ///
 /// The driver runs synchronously via @c dispatch_semaphore so it can be
@@ -72,36 +64,54 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
 
 }  // namespace
 
+@implementation RNVPExportRequest
+
+- (instancetype)initWithSource:(NSURL *)source
+                        output:(NSURL *)output
+                     timeRange:(CMTimeRange)timeRange
+                      metadata:(NSArray<AVMetadataItem *> *)metadata
+                      composer:(RNVPExportSessionComposer)composer
+                          stop:(RNVPStopToken *)stop
+                      progress:(RNVPExportSessionProgress)progress {
+  if ((self = [super init])) {
+    _source = source;
+    _output = output;
+    _timeRange = timeRange;
+    _metadata = metadata;
+    _composer = composer;
+    _stop = stop;
+    _progress = progress;
+  }
+  return self;
+}
+
+@end
+
 @implementation RNVPExportSession
 
-+ (BOOL)exportFromURL:(NSURL *)sourceURL
-                toURL:(NSURL *)outputURL
-              composer:(RNVPExportSessionComposer)composer
-              metadata:(RNVPStampMetadata *)metadata
-                  stop:(RNVPStopToken *)stop
-              progress:(RNVPExportSessionProgress)progress
-                 error:(NSError *__autoreleasing *)error {
-  if (sourceURL == nil) {
++ (BOOL)runRequest:(RNVPExportRequest *)request
+             error:(NSError *__autoreleasing *)error {
+  if (request == nil) {
     if (error)
       *error = makeError(RNVPExportSessionErrorCodeInvalidSpec,
-                         @"sourceURL is nil");
+                         @"request is nil");
     return NO;
   }
-  if (outputURL == nil) {
+  if (request.source == nil) {
     if (error)
       *error = makeError(RNVPExportSessionErrorCodeInvalidSpec,
-                         @"outputURL is nil");
+                         @"source is nil");
     return NO;
   }
-  if (composer == nil) {
+  if (request.output == nil) {
     if (error)
       *error = makeError(RNVPExportSessionErrorCodeInvalidSpec,
-                         @"composer is nil");
+                         @"output is nil");
     return NO;
   }
 
   // Source asset + video track probe -----------------------------------------
-  AVURLAsset *asset = [AVURLAsset assetWithURL:sourceURL];
+  AVURLAsset *asset = [AVURLAsset assetWithURL:request.source];
   NSArray<AVAssetTrack *> *videoTracks =
       [asset tracksWithMediaType:AVMediaTypeVideo];
   if (videoTracks.count == 0) {
@@ -111,173 +121,214 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
     return NO;
   }
   AVAssetTrack *sourceVideoTrack = videoTracks.firstObject;
-  const CGSize canvas = displayedSize(sourceVideoTrack);
-  if (canvas.width <= 0.0 || canvas.height <= 0.0) {
-    if (error)
-      *error = makeError(RNVPExportSessionErrorCodeSourceCorrupted,
-                         @"source video track has degenerate displayed size");
-    return NO;
+
+  // Branch the backend shape on whether a per-frame composer is supplied.
+  // The composition branch wraps the source in AVMutableComposition and uses
+  // the HighestQuality preset so AVFoundation re-encodes through the composer.
+  // The passthrough branch hands the raw asset to AVAssetExportSession with
+  // the Passthrough preset — compressed samples copy through verbatim.
+  AVAsset *exportInput = nil;
+  NSString *presetName = nil;
+  AVMutableVideoComposition *videoComposition = nil;
+  __block NSError *composerError = nil;
+
+  if (request.composer != nil) {
+    const CGSize canvas = displayedSize(sourceVideoTrack);
+    if (canvas.width <= 0.0 || canvas.height <= 0.0) {
+      if (error)
+        *error = makeError(RNVPExportSessionErrorCodeSourceCorrupted,
+                           @"source video track has degenerate displayed size");
+      return NO;
+    }
+
+    // The mutable composition gives AVAssetExportSession a clean linear
+    // timeline regardless of what container-level edit lists / time mappings
+    // the source carries — important for real iPhone slo-mo recordings, which
+    // the raw-asset path mis-handles by exporting the time-mapped timeline.
+    AVMutableComposition *composition = [AVMutableComposition composition];
+    AVMutableCompositionTrack *videoCompositionTrack = [composition
+        addMutableTrackWithMediaType:AVMediaTypeVideo
+                    preferredTrackID:kCMPersistentTrackID_Invalid];
+    const CMTimeRange sourceRange =
+        CMTimeRangeMake(kCMTimeZero, asset.duration);
+    NSError *insertError = nil;
+    if (![videoCompositionTrack insertTimeRange:sourceRange
+                                         ofTrack:sourceVideoTrack
+                                          atTime:kCMTimeZero
+                                           error:&insertError]) {
+      if (error) {
+        *error = makeError(
+            RNVPExportSessionErrorCodeSourceCorrupted,
+            [NSString
+                stringWithFormat:@"could not insert source video track: %@",
+                                 insertError.localizedDescription ?: @"(nil)"]);
+      }
+      return NO;
+    }
+    // Carry the source's preferredTransform forward so AVFoundation orients
+    // the source frames the composer receives.
+    videoCompositionTrack.preferredTransform =
+        sourceVideoTrack.preferredTransform;
+
+    // Audio passthrough — AVAssetExportSession re-emits the audio track from
+    // the composition automatically when no audioMix is supplied.
+    AVAssetTrack *sourceAudioTrack =
+        [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+    if (sourceAudioTrack != nil) {
+      AVMutableCompositionTrack *audioCompositionTrack = [composition
+          addMutableTrackWithMediaType:AVMediaTypeAudio
+                      preferredTrackID:kCMPersistentTrackID_Invalid];
+      [audioCompositionTrack insertTimeRange:sourceRange
+                                       ofTrack:sourceAudioTrack
+                                        atTime:kCMTimeZero
+                                         error:nil];
+    }
+
+    // Per-frame composer wiring -----------------------------------------------
+    // AVFoundation calls the handler once per output frame with the source
+    // frame already oriented per the composition track's preferredTransform.
+    // The frame counter lives in __block ints so the block can mutate them
+    // across invocations.
+    __block int32_t frameIndex = 0;
+    __block int32_t framesEmitted = 0;
+    RNVPExportSessionComposer composer = request.composer;
+    RNVPStopToken *stop = request.stop;
+    RNVPExportSessionProgress progress = request.progress;
+
+    videoComposition = [AVMutableVideoComposition
+        videoCompositionWithAsset:composition
+     applyingCIFiltersWithHandler:^(
+         AVAsynchronousCIImageFilteringRequest *_Nonnull req) {
+          if (stop != nil && stop.abortRequested) {
+            [req finishWithError:makeError(
+                                     RNVPExportSessionErrorCodeCancelled,
+                                     @"export cancelled")];
+            return;
+          }
+          if (composerError != nil) {
+            // A previous frame raised; short-circuit the remaining requests
+            // so the export session ends quickly with a proper error.
+            [req finishWithError:composerError];
+            return;
+          }
+          CIImage *output = nil;
+          @try {
+            output = composer(req.sourceImage, req.compositionTime, frameIndex);
+          } @catch (NSException *exception) {
+            composerError = makeError(
+                RNVPExportSessionErrorCodeComposerFailed,
+                [NSString stringWithFormat:@"composer raised %@: %@",
+                                            exception.name, exception.reason]);
+            [req finishWithError:composerError];
+            return;
+          }
+          if (output == nil) {
+            output = req.sourceImage;
+          }
+          frameIndex++;
+          framesEmitted++;
+          if (progress != nil) {
+            progress(framesEmitted, 0);
+          }
+          [req finishWithImage:output context:nil];
+        }];
+
+    // Force the composition's output rate to track the source. AVFoundation's
+    // applyingCIFiltersWithHandler default reads @c nominalFrameRate, which for
+    // real iPhone slo-mo HEVC sources can land on a low value;
+    // @c minFrameDuration is the shortest sample interval the source actually
+    // uses, a tighter signal.
+    const CMTime sourceMinFrameDuration = sourceVideoTrack.minFrameDuration;
+    if (CMTIME_IS_VALID(sourceMinFrameDuration) &&
+        CMTimeGetSeconds(sourceMinFrameDuration) > 0.0) {
+      videoComposition.frameDuration = sourceMinFrameDuration;
+    } else if (sourceVideoTrack.nominalFrameRate > 0.0f) {
+      videoComposition.frameDuration = CMTimeMake(
+          1, (int32_t)std::lround(sourceVideoTrack.nominalFrameRate));
+    }
+
+    exportInput = composition;
+    presetName = AVAssetExportPresetHighestQuality;
+  } else {
+    exportInput = asset;
+    presetName = AVAssetExportPresetPassthrough;
   }
 
-  // Wrap source tracks in AVMutableComposition. -----------------------------
-  // The mutable composition gives AVAssetExportSession a clean linear
-  // timeline regardless of what container-level edit lists / time mappings
-  // the source carries — important for real iPhone slo-mo recordings, which
-  // the raw-asset path mis-handles by exporting the time-mapped timeline.
-  AVMutableComposition *composition = [AVMutableComposition composition];
-  AVMutableCompositionTrack *videoCompositionTrack = [composition
-      addMutableTrackWithMediaType:AVMediaTypeVideo
-                  preferredTrackID:kCMPersistentTrackID_Invalid];
-  const CMTimeRange sourceRange =
-      CMTimeRangeMake(kCMTimeZero, asset.duration);
-  NSError *insertError = nil;
-  if (![videoCompositionTrack insertTimeRange:sourceRange
-                                       ofTrack:sourceVideoTrack
-                                        atTime:kCMTimeZero
-                                         error:&insertError]) {
+  // Pre-clean the output path — AVAssetExportSession refuses to overwrite.
+  [[NSFileManager defaultManager] removeItemAtURL:request.output error:nil];
+
+  // Run AVAssetExportSession ------------------------------------------------
+  AVAssetExportSession *exportSession =
+      [[AVAssetExportSession alloc] initWithAsset:exportInput
+                                       presetName:presetName];
+  if (exportSession == nil) {
     if (error) {
       *error = makeError(
-          RNVPExportSessionErrorCodeSourceCorrupted,
-          [NSString
-              stringWithFormat:@"could not insert source video track: %@",
-                               insertError.localizedDescription ?: @"(nil)"]);
+          RNVPExportSessionErrorCodeExportFailed,
+          [NSString stringWithFormat:
+                        @"could not create AVAssetExportSession with preset %@",
+                        presetName]);
     }
     return NO;
   }
-  // Carry the source's preferredTransform forward so AVFoundation orients
-  // the source frames the composer receives.
-  videoCompositionTrack.preferredTransform = sourceVideoTrack.preferredTransform;
-
-  // Audio passthrough — AVAssetExportSession re-emits the audio track from
-  // the composition automatically when no audioMix is supplied.
-  AVAssetTrack *sourceAudioTrack =
-      [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-  if (sourceAudioTrack != nil) {
-    AVMutableCompositionTrack *audioCompositionTrack = [composition
-        addMutableTrackWithMediaType:AVMediaTypeAudio
-                    preferredTrackID:kCMPersistentTrackID_Invalid];
-    [audioCompositionTrack insertTimeRange:sourceRange
-                                    ofTrack:sourceAudioTrack
-                                     atTime:kCMTimeZero
-                                      error:nil];
-  }
-
-  // Per-frame composer wiring ------------------------------------------------
-  // AVFoundation calls the handler once per output frame with the source
-  // frame already oriented per the composition track's preferredTransform.
-  // The frame counter lives in a captured mutable box because the block is
-  // re-entered per frame; ints/floats can't be captured by-reference in
-  // Obj-C blocks without @c __block, and a heap-allocated holder is the
-  // simplest way to keep it across invocations.
-  __block int32_t frameIndex = 0;
-  __block int32_t framesEmitted = 0;
-  __block NSError *composerError = nil;
-
-  AVMutableVideoComposition *videoComposition = [AVMutableVideoComposition
-      videoCompositionWithAsset:composition
-   applyingCIFiltersWithHandler:^(
-       AVAsynchronousCIImageFilteringRequest *_Nonnull request) {
-        if (stop != nil && stop.abortRequested) {
-          [request finishWithError:makeError(
-                                       RNVPExportSessionErrorCodeCancelled,
-                                       @"export cancelled")];
-          return;
-        }
-        if (composerError != nil) {
-          // A previous frame raised; short-circuit the remaining requests
-          // so the export session ends quickly with a proper error.
-          [request finishWithError:composerError];
-          return;
-        }
-        CIImage *output = nil;
-        @try {
-          output = composer(request.sourceImage, request.compositionTime,
-                            frameIndex);
-        } @catch (NSException *exception) {
-          composerError = makeError(
-              RNVPExportSessionErrorCodeComposerFailed,
-              [NSString stringWithFormat:@"composer raised %@: %@",
-                                          exception.name, exception.reason]);
-          [request finishWithError:composerError];
-          return;
-        }
-        if (output == nil) {
-          output = request.sourceImage;
-        }
-        frameIndex++;
-        framesEmitted++;
-        if (progress != nil) {
-          // totalFrameCount isn't known precisely without probing the
-          // source's sample count — use the asset duration divided by the
-          // frame duration as an approximation. The actual total may differ
-          // by ±1 for fractional-fps sources.
-          progress(framesEmitted, 0);
-        }
-        [request finishWithImage:output context:nil];
-      }];
-
-  // Force the composition's output rate to track the source. AVFoundation's
-  // applyingCIFiltersWithHandler default reads @c nominalFrameRate, which for
-  // real iPhone slo-mo HEVC sources can land on a low value; @c minFrameDuration
-  // is the shortest sample interval the source actually uses, a tighter signal.
-  const CMTime sourceMinFrameDuration = sourceVideoTrack.minFrameDuration;
-  if (CMTIME_IS_VALID(sourceMinFrameDuration) &&
-      CMTimeGetSeconds(sourceMinFrameDuration) > 0.0) {
-    videoComposition.frameDuration = sourceMinFrameDuration;
-  } else if (sourceVideoTrack.nominalFrameRate > 0.0f) {
-    videoComposition.frameDuration =
-        CMTimeMake(1, (int32_t)std::lround(sourceVideoTrack.nominalFrameRate));
-  }
-
-  // Pre-clean the output path -------------------------------------------------
-  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-
-  // Run AVAssetExportSession --------------------------------------------------
-  AVAssetExportSession *exportSession = [[AVAssetExportSession alloc]
-      initWithAsset:composition
-         presetName:AVAssetExportPresetHighestQuality];
-  if (exportSession == nil) {
-    if (error)
-      *error = makeError(RNVPExportSessionErrorCodeExportFailed,
-                         @"could not create AVAssetExportSession with the "
-                         @"HighestQuality preset");
-    return NO;
-  }
-  exportSession.outputURL = outputURL;
-  exportSession.outputFileType = fileTypeForOutputURL(outputURL);
-  exportSession.videoComposition = videoComposition;
+  exportSession.outputURL = request.output;
+  exportSession.outputFileType = fileTypeForOutputURL(request.output);
   exportSession.shouldOptimizeForNetworkUse = NO;
-  // Bound the timeline to the asset's reported duration. Without this,
-  // AVAssetExportSession defaults to "every sample the video track contains"
-  // — which on some sources is longer than @c asset.duration claims.
-  exportSession.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
-  if (metadata != nil) {
-    exportSession.metadata =
-        [metadata mergedWithSourceMetadata:asset.metadata];
+  if (videoComposition != nil) {
+    exportSession.videoComposition = videoComposition;
+  }
+  // Bound the timeline. Caller-supplied timeRange wins; otherwise default to
+  // the asset's reported duration. Without an explicit timeRange,
+  // AVAssetExportSession falls back to "every sample the video track contains"
+  // — which on some sources is longer than @c asset.duration claims (a 2.66s
+  // source produced a 2.99s output / +77 frames in commit cb7c972).
+  if (CMTIMERANGE_IS_VALID(request.timeRange) &&
+      !CMTIMERANGE_IS_EMPTY(request.timeRange)) {
+    exportSession.timeRange = request.timeRange;
+  } else {
+    exportSession.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+  }
+  if (request.metadata != nil) {
+    exportSession.metadata = request.metadata;
   }
 
   dispatch_semaphore_t sem = dispatch_semaphore_create(0);
   [exportSession exportAsynchronouslyWithCompletionHandler:^{
     dispatch_semaphore_signal(sem);
   }];
-  // Poll the stop token alongside the semaphore so a cancellation reaches
-  // the export within ~50ms of the request, not whenever the export
-  // finishes on its own.
-  while (dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW,
-                                                     50 * NSEC_PER_MSEC)) !=
-         0) {
-    if (stop != nil && stop.abortRequested) {
+  // Poll the stop token alongside the semaphore so a cancellation reaches the
+  // export within ~50ms of the request, not whenever the export finishes on
+  // its own. 30s is the hard upper bound — wedged session fails the xcodebuild
+  // per-test budget rather than the harness budget.
+  const uint64_t deadlineNs =
+      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC));
+  while (YES) {
+    const long signaled = dispatch_semaphore_wait(
+        sem, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC));
+    if (signaled == 0) break;
+    if (dispatch_time(DISPATCH_TIME_NOW, 0) > deadlineNs) {
+      [exportSession cancelExport];
+      [[NSFileManager defaultManager] removeItemAtURL:request.output
+                                                 error:nil];
+      if (error) {
+        *error = makeError(
+            RNVPExportSessionErrorCodeExportFailed,
+            @"AVAssetExportSession did not complete within 30s.");
+      }
+      return NO;
+    }
+    if (request.stop != nil && request.stop.abortRequested) {
       [exportSession cancelExport];
     }
   }
 
   if (composerError != nil) {
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    [[NSFileManager defaultManager] removeItemAtURL:request.output error:nil];
     if (error) *error = composerError;
     return NO;
   }
   if (exportSession.status != AVAssetExportSessionStatusCompleted) {
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    [[NSFileManager defaultManager] removeItemAtURL:request.output error:nil];
     if (error) {
       if (exportSession.status == AVAssetExportSessionStatusCancelled) {
         *error = makeError(RNVPExportSessionErrorCodeCancelled,

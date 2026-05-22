@@ -4,6 +4,7 @@
 
 #import "Remuxer.h"
 #import "Remuxer+Internal.h"
+#import "ExportSession.h"
 #import "SynthesizeRunner.h"
 #import "SynthesizeRunner+Internal.h"
 
@@ -161,7 +162,6 @@ CGAffineTransform flipTransformForAxis(RNVPFlipAxis axis,
     }
     return NO;
   }
-  AVAssetTrack *videoTrack = videoTracks.firstObject;
 
   const double sourceDurationSec = CMTimeGetSeconds(asset.duration);
   margelo::nitro::videopipeline::TrimSpec trim{startSec, durationSec};
@@ -174,196 +174,45 @@ CGAffineTransform flipTransformForAxis(RNVPFlipAxis axis,
     return NO;
   }
 
-  // AVAssetWriter rejects an existing file — clear it here so callers don't
-  // have to (symmetrical with RNVPSynthesizeRunner).
-  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-
-  NSError *writerError = nil;
-  AVAssetWriter *writer =
-      [[AVAssetWriter alloc] initWithURL:outputURL
-                                fileType:fileTypeForOutputURL(outputURL)
-                                   error:&writerError];
-  if (writer == nil) {
-    if (error) {
-      *error = writerError
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter init failed.");
-    }
-    return NO;
-  }
-
-  // Forward container-level metadata verbatim — creation date, location,
-  // software, custom keys all round-trip through AVURLAsset.metadata.
-  writer.metadata = asset.metadata;
-
-  // Build the source-time window. The reader enforces the end bound; the
-  // writer's session + endSession pair mark the same window on the output
-  // timeline so AVAssetWriter can emit an edit list that rebases playback
-  // to start at 0 in the resulting container.
+  // Build the source-time window. AVAssetExportSession rebases the output
+  // timeline so playback starts at 0 in the resulting container.
   const CMTime startTime = CMTimeMakeWithSeconds(startSec, NSEC_PER_SEC);
   CMTime duration = CMTimeMakeWithSeconds(durationSec, NSEC_PER_SEC);
   const CMTime assetEnd = asset.duration;
   const CMTime requestedEnd = CMTimeAdd(startTime, duration);
   if (CMTimeCompare(requestedEnd, assetEnd) > 0) {
     // End-past-EOF is intentionally allowed by describeTrimRejection (matches
-    // AVAssetExportSession / ffmpeg leniency). Clamp here so AVAssetReader
-    // gets a valid in-range window and the output contains whatever samples
+    // AVAssetExportSession / ffmpeg leniency). Clamp here so the export gets
+    // a valid in-range window and the output contains whatever samples
     // actually exist between startTime and assetEnd.
     duration = CMTimeSubtract(assetEnd, startTime);
   }
-  const CMTime endTime = CMTimeAdd(startTime, duration);
   const CMTimeRange timeRange = CMTimeRangeMake(startTime, duration);
 
-  NSError *readerError = nil;
-  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset
-                                                         error:&readerError];
-  if (reader == nil) {
+  // Delegate to the unified AVAssetExportSession driver. The hand-rolled
+  // AVAssetReader + AVAssetWriter polling pump that lived here previously
+  // wedged on real-device slo-mo HEVC (1080p @ 240fps @ ~50Mbps); see commit
+  // cb7c972 for the same wedge / same fix on the stamp path.
+  //
+  // TODO: remuxFlip below and the concat path further down still use the
+  // manual pump; they should adopt RNVPExportRequest too, but each needs
+  // its own focused testing (flip needs AVMutableComposition transform
+  // override; concat needs multi-source request shape).
+  RNVPExportRequest *request =
+      [[RNVPExportRequest alloc] initWithSource:sourceURL
+                                         output:outputURL
+                                      timeRange:timeRange
+                                       metadata:asset.metadata
+                                       composer:nil
+                                           stop:nil
+                                       progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
     if (error) {
-      *error = readerError
-                   ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                @"AVAssetReader init failed.");
+      NSString *desc = exportError.localizedDescription
+                           ?: @"AVAssetExportSession passthrough trim failed.";
+      *error = makeError(RNVPRemuxerErrorCodeWriterFailed, desc);
     }
-    return NO;
-  }
-  reader.timeRange = timeRange;
-
-  // --- Video: reader output + writer input (compressed passthrough) --------
-  AVAssetReaderTrackOutput *videoOutput =
-      [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack
-                                       outputSettings:nil];
-  if (![reader canAddOutput:videoOutput]) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                         @"AVAssetReader refused passthrough video output.");
-    }
-    return NO;
-  }
-  [reader addOutput:videoOutput];
-
-  CMFormatDescriptionRef videoFormat = NULL;
-  if (videoTrack.formatDescriptions.count > 0) {
-    videoFormat = (__bridge CMFormatDescriptionRef)
-        videoTrack.formatDescriptions.firstObject;
-  }
-  AVAssetWriterInput *videoInput =
-      [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo
-                                         outputSettings:nil
-                                       sourceFormatHint:videoFormat];
-  videoInput.expectsMediaDataInRealTime = NO;
-  // Preserve source rotation by copying the preferredTransform onto the
-  // writer input. Identity transforms (typical for AVMuxer-authored files)
-  // stay identity; 90°/180°/270°-rotated sources carry their rotation into
-  // the output without touching pixel bytes.
-  videoInput.transform = videoTrack.preferredTransform;
-  if (![writer canAddInput:videoInput]) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter refused passthrough video input.");
-    }
-    return NO;
-  }
-  [writer addInput:videoInput];
-
-  // --- Optional audio (compressed passthrough) -----------------------------
-  AVAssetReaderTrackOutput *audioOutput = nil;
-  AVAssetWriterInput *audioInput = nil;
-  NSArray<AVAssetTrack *> *audioTracks =
-      [asset tracksWithMediaType:AVMediaTypeAudio];
-  if (audioTracks.count > 0) {
-    AVAssetTrack *audioTrack = audioTracks.firstObject;
-    AVAssetReaderTrackOutput *candidateOutput =
-        [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack
-                                         outputSettings:nil];
-    if ([reader canAddOutput:candidateOutput]) {
-      [reader addOutput:candidateOutput];
-      CMFormatDescriptionRef audioFormat = NULL;
-      if (audioTrack.formatDescriptions.count > 0) {
-        audioFormat = (__bridge CMFormatDescriptionRef)
-            audioTrack.formatDescriptions.firstObject;
-      }
-      AVAssetWriterInput *candidateInput =
-          [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
-                                             outputSettings:nil
-                                           sourceFormatHint:audioFormat];
-      candidateInput.expectsMediaDataInRealTime = NO;
-      if ([writer canAddInput:candidateInput]) {
-        [writer addInput:candidateInput];
-        audioOutput = candidateOutput;
-        audioInput = candidateInput;
-      }
-    }
-  }
-
-  if (![writer startWriting]) {
-    if (error) {
-      *error = writer.error
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter startWriting failed.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  [writer startSessionAtSourceTime:startTime];
-
-  if (![reader startReading]) {
-    if (error) {
-      *error = reader.error
-                   ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                @"AVAssetReader startReading failed.");
-    }
-    [writer cancelWriting];
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-
-  NSError *pumpError = nil;
-  BOOL videoOK = pumpPassthroughSamples(videoOutput, videoInput, reader,
-                                        writer, &pumpError);
-  BOOL audioOK = YES;
-  if (videoOK && audioInput != nil) {
-    audioOK = pumpPassthroughSamples(audioOutput, audioInput, reader, writer,
-                                     &pumpError);
-  }
-
-  [videoInput markAsFinished];
-  if (audioInput != nil) [audioInput markAsFinished];
-
-  if (!videoOK || !audioOK) {
-    [writer cancelWriting];
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    if (error) *error = pumpError;
-    return NO;
-  }
-
-  [writer endSessionAtSourceTime:endTime];
-
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  [writer finishWritingWithCompletionHandler:^{
-    dispatch_semaphore_signal(done);
-  }];
-  // Generous bound — a 1-minute 4K remux on an iPhone 13 should finish in
-  // <2s (US1 acceptance), and the macOS host path runs against sub-second
-  // fixtures. 30s is long enough to survive a CI cold start, short enough
-  // that a wedged writer fails the xcodebuild per-test budget.
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)));
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter.finishWriting did not complete "
-                         @"within 30s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  if (writer.status != AVAssetWriterStatusCompleted) {
-    if (error) {
-      *error = writer.error
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter did not reach the Completed "
-                                @"status.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
     return NO;
   }
   return YES;
