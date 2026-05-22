@@ -63,8 +63,13 @@ internal object ProbeRunner {
 
       val mime = videoFormat.getString(MediaFormat.KEY_MIME) ?: ""
       val codec = canonicalCodec(mime)
-      val width = videoFormat.getInteger(MediaFormat.KEY_WIDTH, 0)
-      val height = videoFormat.getInteger(MediaFormat.KEY_HEIGHT, 0)
+      // KEY_WIDTH/HEIGHT is the encoded sample grid (`codedWidth`/`codedHeight`
+      // in the public API). KEY_ROTATION encodes the displayed orientation;
+      // some OEMs pre-rotate METADATA_KEY_VIDEO_WIDTH/HEIGHT — we sidestep
+      // that by always reading from MediaFormat and computing displayed
+      // dims ourselves.
+      val codedWidth = videoFormat.getInteger(MediaFormat.KEY_WIDTH, 0)
+      val codedHeight = videoFormat.getInteger(MediaFormat.KEY_HEIGHT, 0)
       val fps = readFrameRate(videoFormat)
       val bitRate = readBitRate(videoFormat, retriever)
       val durationSec = readDurationSec(videoFormat, retriever)
@@ -98,11 +103,17 @@ internal object ProbeRunner {
         0.0
       }
 
+      val rotatedSideways = rotation == 90 || rotation == 270
+      val displayedWidth = if (rotatedSideways) codedHeight else codedWidth
+      val displayedHeight = if (rotatedSideways) codedWidth else codedHeight
+
       return VideoInfo(
         uri = uri,
         durationSec = durationSec,
-        width = width.toDouble(),
-        height = height.toDouble(),
+        width = displayedWidth.toDouble(),
+        height = displayedHeight.toDouble(),
+        codedWidth = codedWidth.toDouble(),
+        codedHeight = codedHeight.toDouble(),
         fps = fps,
         bitRate = bitRate.toDouble(),
         fileSizeBytes = fileSizeBytes,

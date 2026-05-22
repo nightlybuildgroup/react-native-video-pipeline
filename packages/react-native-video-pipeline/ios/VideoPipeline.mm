@@ -107,8 +107,18 @@ VideoInfo buildVideoInfoFromDemuxer(RNVPAVDemuxer* demuxer, const std::string& u
   VideoInfo info;
   info.uri = uri;
   info.durationSec = demuxer.durationSec;
-  info.width = static_cast<double>(demuxer.width);
-  info.height = static_cast<double>(demuxer.height);
+  // The demuxer stores the natural (pre-rotation) AVAssetTrack.naturalSize.
+  // Public API contract: `width`/`height` are the displayed dimensions
+  // (post-rotation) — `codedWidth`/`codedHeight` carry the natural grid.
+  // Swap when the source's preferredTransform encodes a 90°/270° rotation.
+  const NSInteger codedW = demuxer.width;
+  const NSInteger codedH = demuxer.height;
+  const BOOL rotatedSideways =
+      (demuxer.rotation == 90 || demuxer.rotation == 270);
+  info.width = static_cast<double>(rotatedSideways ? codedH : codedW);
+  info.height = static_cast<double>(rotatedSideways ? codedW : codedH);
+  info.codedWidth = static_cast<double>(codedW);
+  info.codedHeight = static_cast<double>(codedH);
   info.fps = demuxer.fps;
   info.bitRate = static_cast<double>(demuxer.bitRate);
   info.fileSizeBytes = 0.0;

@@ -347,8 +347,31 @@ export interface WGS84Coordinate {
 export interface VideoInfo {
   uri: string;
   durationSec: number;
+  /**
+   * Displayed dimensions — what a viewer sees, after the container's
+   * rotation metadata is applied. For a portrait phone recording with
+   * `rotation: 90`, `width` is the short side and `height` the long
+   * side, matching what `AVPlayer` / `ExoPlayer` / Photos.app render.
+   *
+   * For the pre-rotation pixel grid (matches `AVAssetTrack.naturalSize`
+   * on iOS and `MediaFormat.KEY_WIDTH/HEIGHT` on Android), use
+   * `codedWidth` / `codedHeight`. Naming follows the WebCodecs
+   * convention (`VideoFrame.codedWidth` vs `displayWidth`).
+   */
   width: number;
   height: number;
+  /**
+   * Pre-rotation encoded sample grid — the "coded picture" dimensions
+   * in H.264/H.265 spec language. Required when constructing
+   * `ClipTransform.crop`, which is documented as source-pixel
+   * coordinates (i.e. coded-space).
+   *
+   * For unrotated content `codedWidth === width` and
+   * `codedHeight === height`; for `rotation: 90 | 270` they are
+   * swapped relative to `width`/`height`.
+   */
+  codedWidth: number;
+  codedHeight: number;
   fps: number;
   bitRate: number;
   /**
