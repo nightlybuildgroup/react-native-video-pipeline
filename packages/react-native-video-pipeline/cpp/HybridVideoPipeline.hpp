@@ -40,18 +40,21 @@ public:
       double startSec,
       double durationSec,
       const std::optional<ClipTransform>& transform,
-      const std::string& renderToken) override;
+      const std::string& renderToken,
+      const std::optional<std::function<void(const Progress&)>>& onProgress) override;
   std::shared_ptr<Promise<void>> flip(
       const std::string& uri,
       const std::string& outPath,
       FlipAxis axis,
-      const std::string& renderToken) override;
+      const std::string& renderToken,
+      const std::optional<std::function<void(const Progress&)>>& onProgress) override;
   std::shared_ptr<Promise<void>> stamp(
       const std::string& uri,
       const std::string& outPath,
       const std::optional<std::variant<ImageOverlay, TextOverlay>>& watermark,
       const std::optional<MetadataSpec>& metadata,
-      const std::string& renderToken) override;
+      const std::string& renderToken,
+      const std::optional<std::function<void(const Progress&)>>& onProgress) override;
 
   // Compose path — see prd.md §9 routing rules. The worklet (or plain JS
   // callback) runs per frame with a live FrameTarget HybridObject; writes

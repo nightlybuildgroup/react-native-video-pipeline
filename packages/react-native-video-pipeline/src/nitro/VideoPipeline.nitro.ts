@@ -550,7 +550,12 @@ export interface VideoPipeline extends HybridObject<{ ios: 'c++'; android: 'kotl
 
   // --- Convenience wrappers kept on the native side so routing decisions
   //     live in C++ (`docs/api.md` — Routing rules) rather than being split
-  //     between JS and C++. ----------------------------------------------
+  //     between JS and C++.
+  //
+  //     `onProgress` is only invoked on the transcode-fallback branch (stamp
+  //     with watermark today). Pure remux paths (trim, flip, metadata-only
+  //     stamp) complete fast enough that per-frame progress is not
+  //     meaningful and the callback is not invoked. -----------------------
   trim(
     uri: string,
     outPath: string,
@@ -558,9 +563,16 @@ export interface VideoPipeline extends HybridObject<{ ios: 'c++'; android: 'kotl
     durationSec: number,
     transform: ClipTransform | undefined,
     renderToken: string,
+    onProgress?: (p: Progress) => void,
   ): Promise<void>;
 
-  flip(uri: string, outPath: string, axis: FlipAxis, renderToken: string): Promise<void>;
+  flip(
+    uri: string,
+    outPath: string,
+    axis: FlipAxis,
+    renderToken: string,
+    onProgress?: (p: Progress) => void,
+  ): Promise<void>;
 
   stamp(
     uri: string,
@@ -568,6 +580,7 @@ export interface VideoPipeline extends HybridObject<{ ios: 'c++'; android: 'kotl
     watermark: NativeOverlay | undefined,
     metadata: MetadataSpec | undefined,
     renderToken: string,
+    onProgress?: (p: Progress) => void,
   ): Promise<void>;
 
   /**

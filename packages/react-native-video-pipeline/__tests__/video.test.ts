@@ -283,6 +283,19 @@ describe('Video.trim / flip / stamp', () => {
     expect(fake.stampCalls).toHaveLength(1);
   });
 
+  it('forwards onProgress to native stamp', async () => {
+    const onProgress = jest.fn();
+    await Video.stamp('in.mp4', {
+      outPath: '/tmp/out.mp4',
+      watermark: Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.2 } }),
+      onProgress,
+    });
+    expect(fake.stampCalls).toHaveLength(1);
+    // stamp's native signature is (uri, outPath, watermark, metadata, token, onProgress)
+    const args = fake.stampCalls[0] as unknown[];
+    expect(args[5]).toBe(onProgress);
+  });
+
   it('binds a VideoRenderController to a trim and reports done after success', async () => {
     const controller = new VideoRenderController();
     await Video.trim('in.mp4', {

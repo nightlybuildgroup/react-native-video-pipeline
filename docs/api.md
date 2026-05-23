@@ -395,6 +395,17 @@ interface Progress {
 }
 ```
 
+**When `onProgress` fires.** `Video.render`, `Video.compose`, and `Video.synthesize` always report progress when the operation decodes/encodes frames. For convenience methods, the rule is "transcode reports, remux doesn't":
+
+| Operation                             | Underlying path | Reports progress? |
+| ------------------------------------- | --------------- | ----------------- |
+| `Video.trim`                          | remux           | No                |
+| `Video.flip`                          | remux           | No (iOS); rejected with `InvalidSpec` on Android until the transcode fallback lands |
+| `Video.stamp` (metadata only)         | remux           | No                |
+| `Video.stamp` (with image watermark)  | transcode       | Yes               |
+
+Remux paths complete in seconds and don't decode/encode individual frames, so per-frame progress is not meaningful — `onProgress` is accepted on the type for API uniformity and silently not invoked. If you need progress on these paths, the operation completes fast enough that just awaiting the promise is the right pattern.
+
 ### `MetadataSpec`
 
 ```ts

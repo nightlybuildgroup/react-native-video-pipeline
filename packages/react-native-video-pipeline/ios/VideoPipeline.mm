@@ -88,6 +88,26 @@ RNVPProgressBlock progressBlockFromNitro(
   };
 }
 
+// Adapt the Nitro-generated onProgress std::function into the
+// RNVPExportSessionProgress signature used by `RNVPExportSession`. That
+// driver reports `(framesCompleted, nbFrames)` only — elapsedMs is
+// synthesized here from a captured start time so the public `Progress`
+// shape stays uniform across all paths.
+RNVPExportSessionProgress exportSessionProgressFromNitro(
+    const std::optional<std::function<void(const Progress&)>>& onProgress) {
+  if (!onProgress.has_value()) return nil;
+  auto callback = *onProgress;
+  const NSTimeInterval startSec = [[NSDate date] timeIntervalSince1970];
+  return ^(int32_t framesCompleted, int32_t nbFrames) {
+    Progress p;
+    p.framesCompleted = framesCompleted;
+    if (nbFrames > 0) p.nbFrames = nbFrames;
+    const NSTimeInterval nowSec = [[NSDate date] timeIntervalSince1970];
+    p.elapsedMs = (nowSec - startSec) * 1000.0;
+    callback(p);
+  };
+}
+
 NSURL* urlFromUri(const std::string& uri) {
   NSString* nsUri = [NSString stringWithUTF8String:uri.c_str()] ?: @"";
   if ([nsUri hasPrefix:@"file://"]) {
@@ -961,7 +981,11 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::trim(
     double startSec,
     double durationSec,
     const std::optional<ClipTransform>& transform,
-    const std::string& /*renderToken*/) {
+    const std::string& /*renderToken*/,
+    const std::optional<std::function<void(const Progress&)>>& /*onProgress*/) {
+  // Remux trim has no decode/encode loop to instrument — `onProgress` is
+  // accepted for API uniformity and ignored. See `docs/api.md` (Progress
+  // reporting on convenience methods) for the contract.
   // T027 scope: pure passthrough trim. Any non-empty transform (rotation,
   // flip, crop) routes through T028+ once those paths land. Surface that
   // explicitly instead of silently dropping the transform.
@@ -998,7 +1022,10 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::flip(
     const std::string& uri,
     const std::string& outPath,
     FlipAxis axis,
-    const std::string& /*renderToken*/) {
+    const std::string& /*renderToken*/,
+    const std::optional<std::function<void(const Progress&)>>& /*onProgress*/) {
+  // iOS flip is a rotation-flag remux (mp4 ↔ mov) — no decode/encode, no
+  // progress to report. Accepted for API uniformity; ignored.
   NSURL* sourceURL = urlFromUri(uri);
   NSURL* outputURL = urlFromUri(outPath);
   const RNVPFlipAxis nsAxis = (axis == FlipAxis::VERTICAL)
@@ -1023,7 +1050,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
     const std::string& outPath,
     const std::optional<std::variant<ImageOverlay, TextOverlay>>& watermark,
     const std::optional<MetadataSpec>& metadata,
-    const std::string& /*renderToken*/) {
+    const std::string& /*renderToken*/,
+    const std::optional<std::function<void(const Progress&)>>& onProgress) {
   RNVPStampMetadata* stampMetadata = buildStampMetadata(metadata);
   NSURL* sourceURL = urlFromUri(uri);
   NSURL* outputURL = urlFromUri(outPath);
@@ -1063,18 +1091,22 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
       [NSMutableArray arrayWithCapacity:1];
   appendNativeOverlay(nativeOverlays, *watermark);
 
+  RNVPExportSessionProgress stampProgressBlock =
+      exportSessionProgressFromNitro(onProgress);
+
   RNVPBackgroundTaskGuard* stampTranscodeGuard = [RNVPBackgroundTaskGuard
       beginWithTokenId:internalJournalToken("stamp-export-session")
             outputPath:stampOutputPath
              stopToken:nil];
   return Promise<void>::async(
       [sourceURL, outputURL, nativeOverlays, stampMetadata,
-       stampTranscodeGuard]() {
+       stampTranscodeGuard, stampProgressBlock]() {
     NSError* err = nil;
     const BOOL ok = [RNVPExportSessionStamp stampFromURL:sourceURL
                                                    toURL:outputURL
                                                 overlays:nativeOverlays
                                                 metadata:stampMetadata
+                                                progress:stampProgressBlock
                                                    error:&err];
     [stampTranscodeGuard end];
     if (!ok) {

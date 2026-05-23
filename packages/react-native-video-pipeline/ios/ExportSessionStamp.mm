@@ -73,6 +73,7 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
                toURL:(NSURL *)outputURL
             overlays:(NSArray *)overlays
             metadata:(RNVPStampMetadata *)metadata
+            progress:(RNVPExportSessionProgress)progress
                error:(NSError *__autoreleasing *)error {
   if (sourceURL == nil) {
     if (error)
@@ -141,7 +142,7 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
                                        metadata:mergedMetadata
                                        composer:composer
                                            stop:nil
-                                       progress:nil];
+                                       progress:progress];
 
   NSError *driverError = nil;
   const BOOL ok = [RNVPExportSession runRequest:request error:&driverError];

@@ -478,11 +478,15 @@ typedef NS_ERROR_ENUM(RNVPExportSessionStampErrorDomain,
   RNVPExportSessionStampErrorCodeImageLoadFailed = 4,
 };
 
+typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
+                                           int32_t nbFrames);
+
 @interface RNVPExportSessionStamp : NSObject
 + (BOOL)stampFromURL:(NSURL *)sourceURL
                toURL:(NSURL *)outputURL
             overlays:(NSArray *)overlays
             metadata:(nullable RNVPStampMetadata *)metadata
+            progress:(nullable RNVPExportSessionProgress)progress
                error:(NSError *_Nullable __autoreleasing *)error;
 @end
 
@@ -5144,6 +5148,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                                      toURL:[NSURL fileURLWithPath:outPath]
                                   overlays:@[ overlay ]
                                   metadata:nil
+                                  progress:nil
                                      error:&error];
   XCTAssertTrue(ok, @"export-session stamp failed: %@", error);
   XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
@@ -5247,6 +5252,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                                      toURL:[NSURL fileURLWithPath:outPath]
                                   overlays:@[ overlay ]
                                   metadata:metadata
+                                  progress:nil
                                      error:&error];
   XCTAssertTrue(ok, @"export-session stamp failed: %@", error);
 
@@ -5329,6 +5335,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                                      toURL:[NSURL fileURLWithPath:outPath]
                                   overlays:@[ overlay ]
                                   metadata:nil
+                                  progress:nil
                                      error:&stampError];
   XCTAssertTrue(ok, @"stamp failed: %@", stampError);
 
@@ -5420,6 +5427,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                                      toURL:[NSURL fileURLWithPath:outPath]
                                   overlays:@[ overlay ]
                                   metadata:nil
+                                  progress:nil
                                      error:&error];
   XCTAssertTrue(ok, @"export-session stamp failed: %@", error);
 
@@ -5537,6 +5545,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
              toURL:[NSURL fileURLWithPath:outPath]
           overlays:@[ overlay ]
           metadata:nil
+          progress:nil
              error:&stampError];
   XCTAssertTrue(ok, @"stamp failed: %@", stampError);
   XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
@@ -5729,6 +5738,7 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                                      toURL:[NSURL fileURLWithPath:outPath]
                                   overlays:@[]
                                   metadata:nil
+                                  progress:nil
                                      error:&error];
   XCTAssertFalse(ok);
   XCTAssertNotNil(error);

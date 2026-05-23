@@ -399,6 +399,7 @@ export const Video = {
         options.durationSec,
         options.transform,
         token,
+        options.onProgress,
       ),
     );
   },
@@ -407,7 +408,7 @@ export const Video = {
   flip(uri: string, options: FlipOptions): Promise<void> {
     validateOutputPath('flip', options.outPath);
     return withCancellation(options, (token) =>
-      getNativeVideoPipeline().flip(uri, options.outPath, options.axis, token),
+      getNativeVideoPipeline().flip(uri, options.outPath, options.axis, token, options.onProgress),
     );
   },
 
@@ -424,6 +425,7 @@ export const Video = {
         options.watermark,
         options.metadata,
         token,
+        options.onProgress,
       ),
     );
   },

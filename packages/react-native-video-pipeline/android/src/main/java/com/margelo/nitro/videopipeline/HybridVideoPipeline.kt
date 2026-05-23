@@ -478,7 +478,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     durationSec: Double,
     transform: ClipTransform?,
     renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
+    // Remux trim has no decode/encode loop to instrument — `onProgress` is
+    // accepted for API uniformity and ignored. See `docs/api.md`.
     if (transform != null && clipTransformIsNonEmpty(transform)) {
       return Promise.rejected(
         VideoPipelineInvalidSpecException(
@@ -503,6 +506,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     outPath: String,
     axis: FlipAxis,
     renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> = Promise.rejected(
     VideoPipelineInvalidSpecException(
       "flip: Android v0.1 does not support rotation-flag flip — MediaMuxer " +
@@ -518,6 +522,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     watermark: Variant_ImageOverlay_TextOverlay?,
     metadata: MetadataSpec?,
     renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
     if (watermark == null && metadata == null) {
       return Promise.rejected(
@@ -565,6 +570,18 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           cropWidth = 0.0,
           cropHeight = 0.0,
         )
+        val progressSink: Transcoder.ProgressSink? = onProgress?.let { cb ->
+          Transcoder.ProgressSink { framesCompleted, nbFrames, elapsedMs, etaMs ->
+            cb(
+              Progress(
+                framesCompleted = framesCompleted.toDouble(),
+                nbFrames = nbFrames?.toDouble(),
+                elapsedMs = elapsedMs,
+                estimatedRemainingMs = etaMs,
+              )
+            )
+          }
+        }
         val result = Transcoder.transcode(
           sourceUri = uri,
           outputPath = outPath,
@@ -572,7 +589,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           overlays = listOf(imageOverlay),
           metadata = metadata,
           stopToken = stopToken,
-          progress = null,
+          progress = progressSink,
         )
         if (result.aborted) throw VideoPipelineCancelledException()
         Unit

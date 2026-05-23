@@ -27,6 +27,8 @@
 
 #import <Foundation/Foundation.h>
 
+#import "ExportSession.h"
+
 @class RNVPStampMetadata;
 
 NS_ASSUME_NONNULL_BEGIN
@@ -60,6 +62,7 @@ typedef NS_ERROR_ENUM(RNVPExportSessionStampErrorDomain,
                toURL:(NSURL *)outputURL
             overlays:(NSArray *)overlays
             metadata:(nullable RNVPStampMetadata *)metadata
+            progress:(nullable RNVPExportSessionProgress)progress
                error:(NSError *_Nullable __autoreleasing *)error;
 
 @end
