@@ -153,7 +153,7 @@ VideoInfo buildVideoInfoFromDemuxer(RNVPAVDemuxer* demuxer, const std::string& u
     if (demuxer.hasLocationAltitude) {
       coord.altitude = demuxer.locationAltitude;
     }
-    info.gnss = coord;
+    info.location = coord;
   }
 
   NSString* description = demuxer.contentDescription;
@@ -505,13 +505,13 @@ RNVPStampMetadata* buildStampMetadata(
   double longitude = 0.0;
   BOOL hasGpsAltitude = NO;
   double altitude = 0.0;
-  if (m.gnss.has_value()) {
+  if (m.location.has_value()) {
     hasGps = YES;
-    latitude = m.gnss->latitude;
-    longitude = m.gnss->longitude;
-    if (m.gnss->altitude.has_value()) {
+    latitude = m.location->latitude;
+    longitude = m.location->longitude;
+    if (m.location->altitude.has_value()) {
       hasGpsAltitude = YES;
-      altitude = *m.gnss->altitude;
+      altitude = *m.location->altitude;
     }
   }
   NSString* software = nil;

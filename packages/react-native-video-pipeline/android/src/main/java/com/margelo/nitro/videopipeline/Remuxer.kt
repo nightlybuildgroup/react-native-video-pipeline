@@ -241,11 +241,12 @@ internal object Remuxer {
       val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
       try {
         propagateRotationHint(sourcePath, muxer)
-        // GNSS is the only metadata field MediaMuxer exposes natively on API 24+.
-        // Other fields in `metadata` are retained in the JS-side type system
-        // but silently dropped at the container level on Android v0.1.
-        if (metadata?.gnss != null) {
-          muxer.setLocation(metadata.gnss.latitude.toFloat(), metadata.gnss.longitude.toFloat())
+        // Geographic location is the only metadata field MediaMuxer exposes
+        // natively on API 24+. Other fields in `metadata` are retained in the
+        // JS-side type system but silently dropped at the container level on
+        // Android v0.1.
+        if (metadata?.location != null) {
+          muxer.setLocation(metadata.location.latitude.toFloat(), metadata.location.longitude.toFloat())
         }
         val outputTracks = addTracks(muxer, extractor, tracks)
         muxer.start()

@@ -39,7 +39,7 @@ import { Video } from 'react-native-video-pipeline';
 Video.info(uri: string): Promise<VideoInfo>
 ```
 
-Probe a video file. Returns container, codec, dimensions, frame rate, duration, audio presence, HDR, rotation, plus any `creationDate`, `gnss`, and `custom` metadata previously written by `Video.stamp` (or by another tool that wrote to the standard `udta` atoms).
+Probe a video file. Returns container, codec, dimensions, frame rate, duration, audio presence, HDR, rotation, plus any `creationDate`, `location`, and `custom` metadata previously written by `Video.stamp` (or by another tool that wrote to the standard `udta` atoms).
 
 `width` / `height` are the **displayed** dimensions — what a viewer sees, after the container's rotation metadata is applied. The pre-rotation pixel grid is exposed as `codedWidth` / `codedHeight` (matches `AVAssetTrack.naturalSize` on iOS and `MediaFormat.KEY_WIDTH/HEIGHT` on Android, and follows the WebCodecs `codedWidth` vs `displayWidth` naming convention). `ClipTransform.crop` is expressed in source-pixel coordinates (coded-space), so consumers building crops should reach for `codedWidth` / `codedHeight`; everything else (overlay sizing, aspect ratios, UI layout) wants `width` / `height`.
 
@@ -318,7 +318,7 @@ interface Progress {
 
 ```ts
 interface MetadataSpec {
-  gnss?: { latitude: number; longitude: number }; // WGS-84
+  location?: { latitude: number; longitude: number }; // WGS-84
   software?: string;
   creationDate?: Date;
   description?: string;
@@ -326,7 +326,7 @@ interface MetadataSpec {
 }
 ```
 
-`gnss` is named for the *datum* (WGS-84) rather than the sensor, so it accepts any GNSS source (GPS, GLONASS, Galileo, BeiDou, …) or a corrected non-satellite resolver. Container muxers serialize it to the standard `udta/©xyz` atom.
+`location` matches the standard media-metadata vocabulary (`AVMetadataCommonKeyLocation` on iOS, EXIF/IPTC GPSInfo, Photos.app UI). The TYPE is `WGS84Coordinate` to make the datum contract explicit — the source can be any GNSS constellation (GPS, GLONASS, Galileo, BeiDou, QZSS, …) or a non-satellite resolver corrected back to WGS-84. Container muxers serialize it to the standard `udta/©xyz` atom.
 
 `custom` keys round-trip through the library — caller owns the keys; no namespace prefix is added.
 

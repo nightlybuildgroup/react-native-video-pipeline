@@ -200,7 +200,7 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
 /// verbatim (so a narrow stamp does not erase creation date / location
 /// already on the source).
 ///
-/// Standard fields (GNSS, software, creationDate, description) are written
+/// Standard fields (location, software, creationDate, description) are written
 /// using the corresponding @c AVMetadataCommonIdentifier* so they round-trip
 /// through @c RNVPAVDemuxer. Custom string→string entries are authored under
 /// the @c mdta/<key> identifier namespace, with the caller-supplied key

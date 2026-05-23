@@ -12,14 +12,14 @@ await Video.stamp(sourceUri, {
   metadata: {
     software: 'MyApp 1.4',
     creationDate: new Date(),
-    gnss: { latitude: 52.5200, longitude: 13.4050 }, // WGS-84
+    location: { latitude: 52.5200, longitude: 13.4050 }, // WGS-84
     description: 'B-roll, take 3',
     custom: { sceneId: 'S07', cameraOp: 'KB' },
   },
 });
 ```
 
-`gnss` lands in the standard `udta/©xyz` atom; `creationDate` uses the container's native timestamp field; `custom` keys round-trip through `Video.info(uri).custom`. Caller owns the keys — the library doesn't add a namespace prefix.
+`location` lands in the standard `udta/©xyz` atom; `creationDate` uses the container's native timestamp field; `custom` keys round-trip through `Video.info(uri).custom`. Caller owns the keys — the library doesn't add a namespace prefix.
 
 ## Image watermark (transcode)
 

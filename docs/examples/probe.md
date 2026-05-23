@@ -20,12 +20,12 @@ const info = await Video.info(sourceUri);
 //   isHDR,
 //   rotation,     // 0 | 90 | 180 | 270
 //   creationDate, // optional
-//   gnss,         // optional WGS-84 coordinate
+//   location,     // optional WGS-84 coordinate
 //   custom,       // optional Record<string, string>
 // }
 ```
 
-`creationDate`, `gnss`, and `custom` round-trip with `Video.stamp` — anything you wrote on the way out reads back here.
+`creationDate`, `location`, and `custom` round-trip with `Video.stamp` — anything you wrote on the way out reads back here.
 
 ## Extract a thumbnail
 

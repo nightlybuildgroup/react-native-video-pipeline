@@ -62,8 +62,11 @@ function makeFakeNative(): FakeNative {
         durationSec: 1,
         width: 16,
         height: 9,
+        codedWidth: 16,
+        codedHeight: 9,
         fps: 30,
         bitRate: 1000,
+        fileSizeBytes: 0,
         codec: 'h264',
         container: 'mp4',
         hasAudio: false,
@@ -206,7 +209,7 @@ describe('Video.trim / flip / stamp', () => {
         anchor: 'br',
         size: { w: 120 },
       }),
-      metadata: { gnss: { latitude: 52.5, longitude: 13.4 }, software: 'MyApp 1.0' },
+      metadata: { location: { latitude: 52.5, longitude: 13.4 }, software: 'MyApp 1.0' },
     });
     expect(fake.stampCalls).toHaveLength(1);
     const [, , watermarkArg, metadataArg] = fake.stampCalls[0] as unknown[];

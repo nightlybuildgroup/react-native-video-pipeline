@@ -559,7 +559,7 @@ function App(): React.JSX.Element {
       const t3 = Date.now();
       await Video.stamp(`file://${srcPath}`, {
         outPath: stampPath,
-        metadata: { gnss: { latitude: 48.8584, longitude: 2.2945 } },
+        metadata: { location: { latitude: 48.8584, longitude: 2.2945 } },
       });
       const tStamp = Date.now() - t3;
 

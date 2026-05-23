@@ -263,10 +263,10 @@ internal object Transcoder {
     decoder.start()
 
     val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-    if (metadata?.gnss != null) {
+    if (metadata?.location != null) {
       muxer.setLocation(
-        metadata.gnss.latitude.toFloat(),
-        metadata.gnss.longitude.toFloat(),
+        metadata.location.latitude.toFloat(),
+        metadata.location.longitude.toFloat(),
       )
     }
 

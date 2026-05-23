@@ -80,7 +80,7 @@ internal object ProbeRunner {
       val creationDate = parseCreationDate(
         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
       )
-      val gnss = parseISO6709(
+      val location = parseISO6709(
         retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
       )
       // MediaMetadataRetriever exposes only a fixed set of well-known keys.
@@ -123,7 +123,7 @@ internal object ProbeRunner {
         isHDR = isHDR,
         rotation = rotation.toDouble(),
         creationDate = creationDate,
-        gnss = gnss,
+        location = location,
         // MediaMetadataRetriever has no DESCRIPTION key; surfacing this on
         // Android requires walking the MP4 box tree (`udta/©cmt` etc.).
         // Mirror the spec doc until that lands — iOS already populates it.

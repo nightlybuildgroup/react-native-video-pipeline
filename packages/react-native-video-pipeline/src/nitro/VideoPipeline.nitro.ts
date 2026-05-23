@@ -302,7 +302,7 @@ export interface AudioSpec {
 export type AudioMode = 'passthrough' | 'mute' | 'replace';
 
 export interface MetadataSpec {
-  gnss?: WGS84Coordinate;
+  location?: WGS84Coordinate;
   software?: string;
   creationDate?: Date;
   description?: string;
@@ -313,21 +313,22 @@ export interface MetadataSpec {
  * Geographic coordinate in the WGS-84 reference system. Container muxers
  * (iOS AVAssetWriter, Android MediaMuxer) serialise this as an ISO 6709
  * string in the file's `udta/©xyz` (or `udta/loci`) atom — the same format
- * every consumer device writes.
+ * every consumer device writes. The field is named `location` to match
+ * AVFoundation's `AVMetadataCommonKeyLocation` and the Photos / EXIF UI
+ * vocabulary every consumer already knows.
  *
- * Named after the *datum* (WGS-84) rather than the sensor (GPS / GNSS):
- * the type is a coordinate-system contract, not a hardware claim. The
- * `MetadataSpec.gnss` field name reflects that the source is any global
- * navigation satellite system (GPS, GLONASS, Galileo, BeiDou, QZSS, …),
- * or even a non-satellite resolver (cell, WiFi) that has been corrected
- * back to WGS-84.
+ * The TYPE keeps the `WGS84Coordinate` name because what's contractually
+ * promised is the datum (WGS-84), not the sensor: the source can be any
+ * GNSS constellation (GPS, GLONASS, Galileo, BeiDou, QZSS, …) or even a
+ * non-satellite resolver (cell, WiFi) that has been corrected back to
+ * WGS-84.
  */
 export interface WGS84Coordinate {
   latitude: number;
   longitude: number;
   /**
    * Altitude in metres above the WGS-84 ellipsoid. Optional — both writers
-   * (probe-callers writing via `MetadataSpec.gnss`) and probe consumers
+   * (probe-callers writing via `MetadataSpec.location`) and probe consumers
    * should treat its absence as "no altitude in source", not "altitude is
    * zero". The ISO 6709 short form serialised into the file's `udta/©xyz`
    * atom encodes altitude as an optional third token.
@@ -387,7 +388,7 @@ export interface VideoInfo {
   isHDR: boolean;
   rotation: Rotation;
   creationDate?: Date;
-  gnss?: WGS84Coordinate;
+  location?: WGS84Coordinate;
   /**
    * Container-level description (`AVMetadataCommonKeyDescription` on iOS,
    * `udta/©cmt`-equivalent on Android). Read symmetric with the write side
