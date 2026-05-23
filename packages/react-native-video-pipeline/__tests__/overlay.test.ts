@@ -66,17 +66,6 @@ describe('Overlay.Text', () => {
   });
 });
 
-describe('Overlay.Worklet', () => {
-  it('builds a worklet overlay with narrowed kind', () => {
-    const draw = (): void => {
-      /* would carry 'worklet' directive in real use */
-    };
-    const o = Overlay.Worklet({ draw });
-    expect(o.kind).toBe('worklet');
-    expect(o.draw).toBe(draw);
-  });
-});
-
 describe('discriminant round-trips through JSON', () => {
   it('image kind survives JSON round-trip', () => {
     const o = Overlay.Image({ uri: 'x', anchor: 'tl', size: { w: 1 } });
@@ -101,8 +90,6 @@ describe('discriminant round-trips through JSON', () => {
           return `image:${o.uri}`;
         case 'text':
           return `text:${o.text}`;
-        case 'worklet':
-          return 'worklet';
       }
     };
     expect(describe(Overlay.Image({ uri: 'u', anchor: 'tl', size: { w: 1 } }))).toBe('image:u');
@@ -115,6 +102,5 @@ describe('discriminant round-trips through JSON', () => {
         }),
       ),
     ).toBe('text:t');
-    expect(describe(Overlay.Worklet({ draw: () => {} }))).toBe('worklet');
   });
 });

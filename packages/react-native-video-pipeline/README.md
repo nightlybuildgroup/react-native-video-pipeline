@@ -86,7 +86,7 @@ const info = await Video.info(sourceUri);
 
 ## Setup: babel-plugin-video-pipeline (strongly recommended)
 
-`Video.compose`, `Video.synthesize`, and `Overlay.Worklet` accept a callback that runs on the Reanimated UI runtime. Reanimated requires every such function to begin with a `'worklet';` directive so it can be serialized onto the UI thread. Forgetting the directive produces a runtime crash on the first frame with an error that's hard to trace back to the call site.
+`Video.compose` and `Video.synthesize` accept a `drawFrame` callback that runs on the Reanimated UI runtime. Reanimated requires every such function to begin with a `'worklet';` directive so it can be serialized onto the UI thread. Forgetting the directive produces a runtime crash on the first frame with an error that's hard to trace back to the call site.
 
 `babel-plugin-video-pipeline` catches this at build time. Add it to your `babel.config.js`:
 
@@ -101,7 +101,7 @@ module.exports = {
 };
 ```
 
-The plugin inspects any inline function literal passed as `drawFrame` (to `Video.compose` / `Video.synthesize`) or `draw` (to `Overlay.Worklet`) and fails the bundle if the function body does not start with `'worklet';`. Passing a named identifier (e.g. `drawFrame: myDrawer`) is allowed — the plugin only checks inline literals. The library never runs the directive check at runtime; the guarantee is entirely build-time.
+The plugin inspects any inline function literal passed as `drawFrame` to `Video.compose` / `Video.synthesize` and fails the bundle if the function body does not start with `'worklet';`. Passing a named identifier (e.g. `drawFrame: myDrawer`) is allowed — the plugin only checks inline literals. The library never runs the directive check at runtime; the guarantee is entirely build-time.
 
 ## Docs
 

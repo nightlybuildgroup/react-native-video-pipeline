@@ -1,20 +1,17 @@
 import type {
   AnchorPoint,
   AnchorPreset,
-  FrameDrawer,
   ImageOverlay,
   Size,
   TextOverlay,
   TextStyle,
   TimeRange,
-  WorkletOverlay,
 } from './nitro/VideoPipeline.nitro';
 
 export type ImageOverlayValue = Omit<ImageOverlay, 'kind'> & { kind: 'image' };
 export type TextOverlayValue = Omit<TextOverlay, 'kind'> & { kind: 'text' };
-export type WorkletOverlayValue = Omit<WorkletOverlay, 'kind'> & { kind: 'worklet' };
 
-export type OverlayValue = ImageOverlayValue | TextOverlayValue | WorkletOverlayValue;
+export type OverlayValue = ImageOverlayValue | TextOverlayValue;
 
 const ANCHOR_PRESETS: Record<AnchorPreset, AnchorPoint> = {
   tl: { x: 0, y: 0 },
@@ -46,11 +43,6 @@ export interface TextOverlayInput {
   timeRange?: TimeRange;
 }
 
-export interface WorkletOverlayInput {
-  draw: FrameDrawer;
-  timeRange?: TimeRange;
-}
-
 function image(input: ImageOverlayInput): ImageOverlayValue {
   return {
     kind: 'image',
@@ -72,16 +64,7 @@ function text(input: TextOverlayInput): TextOverlayValue {
   };
 }
 
-function worklet(input: WorkletOverlayInput): WorkletOverlayValue {
-  return {
-    kind: 'worklet',
-    draw: input.draw,
-    ...(input.timeRange !== undefined ? { timeRange: input.timeRange } : {}),
-  };
-}
-
 export const Overlay = {
   Image: image,
   Text: text,
-  Worklet: worklet,
 } as const;

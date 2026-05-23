@@ -6,6 +6,7 @@ For runnable scenarios see [`docs/examples/`](./examples/). For architectural de
 
 ## Contents
 
+- [Choosing a method](#choosing-a-method) — decision tree, when to use each entry point
 - [`Video`](#video) — top-level operations
   - [`Video.info`](#videoinfo)
   - [`Video.thumbnail`](#videothumbnail)
@@ -22,6 +23,58 @@ For runnable scenarios see [`docs/examples/`](./examples/). For architectural de
 - [Errors](#errors) — `VideoPipelineError` and subclasses
 - [Types](#types) — specs, options, frame contexts
 - [Routing rules](#routing-rules) — when each execution path is used
+
+---
+
+## Choosing a method
+
+Start here. The decision tree is shallow:
+
+**1. Probing or reading metadata?** → `Video.info`, `Video.thumbnail`, `Video.capabilities`.
+
+**2. Editing video?** Ask: *am I writing pixels from JavaScript?*
+
+- **No** — the operation can be expressed as "the native side does X to this clip":
+  - Single-clip trim, optionally with a transform → `Video.trim`.
+  - Single-clip horizontal/vertical flip → `Video.flip`.
+  - Add a watermark image/text and/or write metadata onto one clip → `Video.stamp`.
+  - **Anything more complex** — multiple clips concatenated, multiple overlays, custom output codec/bitrate/dimensions, mixed transforms, audio replacement — → `Video.render` with a full `VideoSpec`.
+- **Yes**, I want a worklet drawing on every frame:
+  - Drawing *on top of* one or more source clips → `Video.compose`.
+  - Generating frames from scratch with no source → `Video.synthesize`.
+
+### Sugar vs `Video.render`
+
+`Video.trim` / `Video.flip` / `Video.stamp` are fixed-signature sugar for the common single-clip cases. They exist because `Video.render({ clips: [{ uri, startSec, durationSec }], output: { ... } })` is verbose when all you want is one trim.
+
+Use `Video.render` directly the moment your spec needs *anything* the sugar doesn't carry:
+
+```ts
+// Concat three clips, two overlays, custom output codec — only `render` does this.
+await Video.render({
+  clips: [
+    { uri: 'intro.mp4', startSec: 0, durationSec: 2 },
+    { uri: 'main.mp4', startSec: 5, durationSec: 30, transform: { crop: { x: 0, y: 0, w: 1920, h: 1080 } } },
+    { uri: 'outro.mp4', startSec: 0, durationSec: 3 },
+  ],
+  overlays: [
+    Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.15 } }),
+    Overlay.Text({ text: '@username', anchor: 'br', style: { fontSize: 24, color: '#fff' } }),
+  ],
+  audio: { mode: 'replace', replaceUri: 'soundtrack.m4a' },
+  output: { path: '/tmp/out.mp4', width: 1920, height: 1080, fps: 30, codec: 'h264', bitrate: 8_000_000 },
+});
+```
+
+Chaining `trim` → `stamp` → `render` through temp files would re-encode at every step (slow + lossy). One `Video.render` call decodes and encodes exactly once.
+
+### `render` vs `compose`/`synthesize`
+
+`Video.render` covers **remux and transcode** — the native side decodes/encodes (or passthrough-copies) frames without ever calling back into JavaScript. Overlays on this path are native (`CIFilter` + `CATextLayer` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android).
+
+`Video.compose` and `Video.synthesize` are the **only** entry points where your JS worklet draws into each frame. The native pump invokes `drawFrame` per frame with a live `FrameTarget`. That has different cost (per-frame JS overhead), different requirements (worklet directive, see [`babel-plugin-video-pipeline`](#worklet-directive-enforcement)), and different capabilities (arbitrary drawing via plain RGBA, Skia, or Metal texture blit) than the native overlay path.
+
+If you need pixels drawn from JS, you must use `compose` or `synthesize`. There is no way to inject a worklet into `Video.render` — that's a deliberate split, not an oversight.
 
 ---
 
@@ -91,13 +144,12 @@ Add a watermark and/or write metadata. Metadata-only stamps remux (fast); a `wat
 Video.render(spec: VideoSpec, options?: RenderOptions): Promise<void>
 ```
 
-The single source of truth for trim / transcode / compose. The native side picks the cheapest path based on `spec`:
+The full-spec native editing entry point — multi-clip concat, multiple overlays, custom encoder settings, mixed per-clip transforms, audio replacement, all in one decode/encode pass. The native side picks the cheapest path based on `spec`:
 
 - All-passthrough spec (no overlays, no transforms beyond rotation flags) → **remux**
-- Native-overlay or transform spec → **transcode**
-- Worklet overlay or null-input synthesis → **compose**
+- Native-overlay or pixel-altering transform → **transcode**
 
-Worklet overlays added via `Overlay.Worklet(...)` are stripped before crossing Nitro and dispatched through the worklet runtime. Prefer the dedicated [`Video.compose`](#videocompose) / [`Video.synthesize`](#videosynthesize) sugar when you have a `drawFrame` — it skips the overlay-list round-trip and gives clearer types.
+`Video.render` does **not** do compose. To draw pixels from JS, use [`Video.compose`](#videocompose) (with source clips) or [`Video.synthesize`](#videosynthesize) (from scratch). See [Choosing a method](#choosing-a-method).
 
 ### `Video.compose`
 
@@ -109,7 +161,7 @@ Per-frame worklet drawing on top of source clips. The `options.drawFrame` callba
 
 `drawFrame` must be a worklet. The recommended way to enforce this is the build-time [`babel-plugin-video-pipeline`](#worklet-directive-enforcement) check; without it, the first frame crashes at runtime with a directive-missing error.
 
-`spec.overlays` must not contain a worklet overlay when calling `Video.compose` directly — that would double-dispatch. Mix native overlays freely; they composite under your `drawFrame` output.
+Mix native overlays (`Overlay.Image`, `Overlay.Text`) freely on `spec.overlays`; they composite under your `drawFrame` output.
 
 ### `Video.synthesize`
 
@@ -129,19 +181,18 @@ Null-input compose: no source clips, the entire frame stream comes from `options
 import { Overlay } from 'react-native-video-pipeline';
 ```
 
-Builder functions for the three overlay variants. They normalize `anchor` presets (`'tl' | 'tr' | 'bl' | 'br' | 'center'`) into normalized `{ x, y }` points before crossing the Nitro boundary, which is why they exist as functions rather than plain object literals.
+Builder functions for the two overlay variants. They normalize `anchor` presets (`'tl' | 'tr' | 'bl' | 'br' | 'center'`) into normalized `{ x, y }` points before crossing the Nitro boundary, which is why they exist as functions rather than plain object literals.
 
 The normalized anchor is a **slot position within the free space** (output frame minus overlay): `(0, 0)` aligns the overlay's top-left with the frame's top-left; `(1, 1)` aligns its bottom-right with the frame's; `(0.5, 0.5)` centers it. Anchors always align corresponding edges — they do not address an arbitrary point on the overlay. Pixel-from-edge layouts can be expressed as `anchor.x = inset / (outputW - overlayW)`.
 
 ```ts
 Overlay.Image({ uri, anchor, size, opacity?, timeRange? }): ImageOverlayValue
 Overlay.Text({ text, style, anchor, timeRange? }): TextOverlayValue
-Overlay.Worklet({ draw, timeRange? }): WorkletOverlayValue
 ```
 
-`Overlay.Image` and `Overlay.Text` are rendered natively (`CIFilter` + `CATextLayer` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android). Advanced typography is intentionally out of scope; if you need pixel-identical cross-platform text, rasterize a PNG and use `Overlay.Image`.
+Both variants are rendered natively (`CIFilter` + `CATextLayer` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android). Advanced typography is intentionally out of scope; if you need pixel-identical cross-platform text, rasterize a PNG and use `Overlay.Image`.
 
-`Overlay.Worklet` enters the compose path. Prefer `Video.compose({ drawFrame })` over a single worklet overlay — it has clearer semantics and skips one indirection.
+For per-frame JS drawing, use [`Video.compose`](#videocompose) / [`Video.synthesize`](#videosynthesize) — they take `drawFrame` as a first-class argument, not as an overlay.
 
 ---
 
@@ -397,7 +448,7 @@ The `Video.trim` / `Video.flip` / `Video.stamp` convenience wrappers exist so th
 
 ## Worklet directive enforcement
 
-`Video.compose` and `Video.synthesize` (and `Overlay.Worklet`) accept callbacks that run on the Reanimated UI runtime. Reanimated requires every such function to begin with `'worklet';` so it can be lifted to the UI thread.
+`Video.compose` and `Video.synthesize` accept callbacks that run on the Reanimated UI runtime. Reanimated requires every such function to begin with `'worklet';` so it can be lifted to the UI thread.
 
 `babel-plugin-video-pipeline` enforces this **at build time**:
 

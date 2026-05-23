@@ -43,10 +43,10 @@ describe('babel-plugin-video-pipeline', () => {
       expect(() => transform(code)).not.toThrow();
     });
 
-    it('accepts Overlay.Worklet with a method-shorthand containing a worklet directive', () => {
+    it('accepts Video.compose with a method-shorthand containing a worklet directive', () => {
       const code = `
-        Overlay.Worklet({
-          draw(ctx) {
+        Video.compose(spec, {
+          drawFrame(ctx) {
             'worklet';
             ctx.canvas.drawColor(0xff00ff00);
           },
@@ -79,15 +79,15 @@ describe('babel-plugin-video-pipeline', () => {
       expectThrows(code, /Video\.compose.*'worklet'/s);
     });
 
-    it('rejects Overlay.Worklet with a method-shorthand missing the directive', () => {
+    it('rejects Video.compose with a method-shorthand missing the directive', () => {
       const code = `
-        Overlay.Worklet({
-          draw(ctx) {
+        Video.compose(spec, {
+          drawFrame(ctx) {
             ctx.canvas.drawColor(0);
           },
         });
       `;
-      expectThrows(code, /Overlay\.Worklet.*'worklet'/s);
+      expectThrows(code, /Video\.compose.*'worklet'/s);
     });
 
     it('includes the file name in the error (via buildCodeFrameError)', () => {
@@ -184,15 +184,6 @@ describe('babel-plugin-video-pipeline', () => {
         });
       `;
       expect(() => transform(code)).not.toThrow();
-    });
-
-    it('Overlay.Worklet with missing directive uses "draw" property name (not drawFrame)', () => {
-      const code = `
-        Overlay.Worklet({
-          draw: (ctx) => { ctx.canvas.drawColor(0); },
-        });
-      `;
-      expectThrows(code, /Overlay\.Worklet.*`draw`/s);
     });
   });
 });

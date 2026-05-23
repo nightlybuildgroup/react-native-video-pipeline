@@ -49,7 +49,6 @@ export type {
   VideoPipelineErrorCode,
   VideoPipelineErrorShape,
   WGS84Coordinate,
-  WorkletOverlay,
 } from './nitro/VideoPipeline.nitro';
 export * from './overlay';
 export * from './video';

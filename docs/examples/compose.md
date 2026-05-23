@@ -71,11 +71,11 @@ await Video.compose(
 );
 ```
 
-`spec.overlays` must **not** contain a worklet overlay when you also pass a `drawFrame` — that would double-dispatch. Pick one.
+`spec.overlays` may mix native overlays (`Overlay.Image` / `Overlay.Text`) freely; they composite under your `drawFrame` output. JS-side per-frame drawing only happens through `drawFrame`, never through `spec.overlays`.
 
 ## Errors
 
-- `InvalidSpecError` — `drawFrame` missing, or `spec.overlays` contains a worklet
+- `InvalidSpecError` — `drawFrame` missing
 - Worklet-directive crash on first frame — install `babel-plugin-video-pipeline`
 
 ## See also

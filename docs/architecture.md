@@ -142,13 +142,12 @@ react-native-video-pipeline/                          # repo root (yarn workspac
 | `Video.trim`             | Convenience → remux               | Time-range trim, passthrough; transcodes when transform has crop/flip                                                                    |
 | `Video.flip`             | Convenience → remux/transcode     | Rotation-flag flip in mp4/mov; transcodes otherwise                                                                                      |
 | `Video.stamp`            | Convenience → transcode/remux     | Watermark + metadata; metadata-only stamps remux                                                                                         |
-| `Video.render`           | Core                              | Accepts `VideoSpec`, auto-routes to remux / transcode / compose                                                                          |
-| `Video.compose`          | Convenience → compose             | Sugar over `render` with a `drawFrame` worklet                                                                                           |
-| `Video.synthesize`       | Convenience → compose (null-input) | Sugar for zero-clip specs: render from a `drawFrame` worklet, with fixed or open-ended duration                                          |
+| `Video.render`           | Core                              | Full-spec native editing entry point — auto-routes between remux and transcode based on `VideoSpec`                                      |
+| `Video.compose`          | Worklet path (over source clips)  | Per-frame `drawFrame` worklet over decoded source frames                                                                                 |
+| `Video.synthesize`       | Worklet path (no source clips)    | Per-frame `drawFrame` worklet from scratch; fixed or open-ended duration                                                                 |
 | `VideoRenderController`  | Control surface                   | `abort()` (discard) + `finish()` (graceful) + progress observable                                                                        |
 | `Overlay.Image`          | Spec primitive                    | Static image overlay; rendered natively via CIFilter (iOS) / Media3 `BitmapOverlay` (Android). Pixel-hash-parity target across platforms. |
 | `Overlay.Text`           | Spec primitive                    | Static text overlay; rendered via CATextLayer / Media3 `TextOverlay`. **Visually similar, not pixel-identical** across platforms.        |
-| `Overlay.Worklet`        | Spec primitive                    | Worklet escape hatch; consumer brings `@shopify/react-native-skia`. Only path that can achieve pixel-identical custom text.              |
 | `drawWithRGBA`           | Worklet helper                    | Plain `(pixels, ctx) => void` callback; allocates a `Uint8Array`, swizzles to BGRA on iOS                                                |
 | `Errors.*`               | Error types                       | `UnsupportedCodec`, `DeviceCapabilityExceeded`, `SourceCorrupted`, `Cancelled`, `IOError`, `EncoderFailure`, `InvalidSpec`               |
 | `expo-plugin`            | Config plugin                     | Adds iOS Info.plist keys, Android permissions, Podfile/Gradle tweaks during `expo prebuild`                                              |
@@ -173,7 +172,7 @@ react-native-video-pipeline/                          # repo root (yarn workspac
 These are decisions that have been made and should not be re-litigated without a strong reason.
 
 - **Pacing — no realtime mode.** The library is strictly offline; the encoder advances at whatever speed the hardware delivers, PTS is always `frameIndex / fps`. No `options.pacing: 'accurate' | 'realtime'` knob.
-- **Worklet directive enforcement — Babel plugin, build-time only.** No runtime fallback. Applies uniformly to `Video.compose`, `Video.synthesize`, and `Overlay.Worklet`. Published as a separate workspace package `babel-plugin-video-pipeline`.
+- **Worklet directive enforcement — Babel plugin, build-time only.** No runtime fallback. Applies uniformly to `Video.compose` and `Video.synthesize`. Published as a separate workspace package `babel-plugin-video-pipeline`.
 - **Wall-clock exposure to worklets — yes.** `ctx.elapsedMs` is part of `FrameDrawerContext`. Useful for open-ended renders that want a "stop after N real seconds" rule independent of output fps.
 - **Skia — zero in the library.** Neither C++ nor JS. Static image/text overlays use platform-native primitives (CIFilter / CATextLayer on iOS, Media3 `BitmapOverlay` / `TextOverlay` on Android). Skia enters only when a consumer opts into the compose worklet path and brings in `@shopify/react-native-skia` themselves.
 - **Pixel-hash parity scope.** Remux, transcode, and image-overlay paths target ≥ 99% cross-platform pixel-hash match. Text overlays and worklet content are explicitly out of scope — platform text shaping differs and no library-level fix is worth the cost.

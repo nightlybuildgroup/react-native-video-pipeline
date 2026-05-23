@@ -13,24 +13,14 @@ import type {
   FrameTarget,
   MetadataSpec,
   NativeOverlay,
-  VideoSpec as NativeVideoSpec,
   OutputSpec,
   RenderOptions,
   ThumbnailOptions,
   VideoInfo,
+  VideoSpec,
 } from './nitro/VideoPipeline.nitro';
-import type { OverlayValue, WorkletOverlayValue } from './overlay';
 
-/**
- * Public render spec. Mirrors the Nitro `VideoSpec` but accepts the wider
- * `OverlayValue[]` so that worklet overlays from `Overlay.Worklet(...)` are
- * representable on the JS side. The wrapper strips worklets before crossing
- * Nitro — the worklet data path is wired separately by the compose tasks
- * (T019 / T020 / T041).
- */
-export interface VideoSpec extends Omit<NativeVideoSpec, 'overlays'> {
-  overlays?: OverlayValue[];
-}
+export type { VideoSpec };
 
 export interface TrimOptions {
   startSec: number;
@@ -46,7 +36,7 @@ export interface FlipOptions {
 
 export interface StampOptions {
   outPath: string;
-  watermark?: OverlayValue;
+  watermark?: NativeOverlay;
   metadata?: MetadataSpec;
 }
 
@@ -105,24 +95,17 @@ function isSynthesized(spec: VideoSpec): boolean {
   return spec.clips === undefined || spec.clips.length === 0;
 }
 
-function hasWorkletOverlay(spec: VideoSpec): boolean {
-  return spec.overlays?.some((o) => o.kind === 'worklet') ?? false;
-}
-
 function validateRenderSpec(
   spec: VideoSpec,
   options: RenderOptions | undefined,
-  { drawFrameIsArgument = false }: { drawFrameIsArgument?: boolean } = {},
+  { allowSynthesized = false }: { allowSynthesized?: boolean } = {},
 ): void {
   const synth = isSynthesized(spec);
 
   if (synth) {
-    // When `drawFrame` crosses the Nitro boundary as a separate argument
-    // (runCompose path), the spec doesn't need a worklet overlay — the
-    // drawFrame is dispatched by the native pump directly.
-    if (!drawFrameIsArgument && !hasWorkletOverlay(spec)) {
+    if (!allowSynthesized) {
       fail(
-        'render: synthesized specs (no clips) require a worklet overlay — pass one via Overlay.Worklet or use Video.synthesize / Video.compose',
+        'render: synthesized specs (no clips) must go through Video.synthesize — Video.render only handles remux/transcode of source clips',
       );
     }
     if (spec.duration === undefined) {
@@ -144,31 +127,15 @@ function validateRenderSpec(
   validateAudio(spec.audio);
 }
 
-function toNativeSpec(spec: VideoSpec): NativeVideoSpec {
-  const native: NativeVideoSpec = { output: spec.output };
-  if (spec.clips !== undefined) native.clips = spec.clips;
-  if (spec.audio !== undefined) native.audio = spec.audio;
-  if (spec.metadata !== undefined) native.metadata = spec.metadata;
-  if (spec.duration !== undefined) native.duration = spec.duration;
-  if (spec.overlays !== undefined) {
-    const filtered = spec.overlays.filter(
-      (o): o is Exclude<OverlayValue, WorkletOverlayValue> => o.kind !== 'worklet',
-    );
-    if (filtered.length > 0) native.overlays = filtered as NativeOverlay[];
-  }
-  return native;
-}
-
 async function runCompose(
   spec: VideoSpec,
   drawFrame: FrameDrawer,
   options: RenderOptions | undefined,
 ): Promise<void> {
-  validateRenderSpec(spec, options, { drawFrameIsArgument: true });
+  validateRenderSpec(spec, options, { allowSynthesized: true });
 
   const native = getNativeVideoPipeline();
   const token = nextRenderToken();
-  const nativeSpec = toNativeSpec(spec);
 
   const controller = options?.controller;
   if (controller !== undefined) {
@@ -229,7 +196,7 @@ async function runCompose(
   };
 
   try {
-    await native.renderCompose(nativeSpec, token, wrapped, options?.onProgress);
+    await native.renderCompose(spec, token, wrapped, options?.onProgress);
     if (controller !== undefined) (controller as VideoRenderController)._markDone();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -253,7 +220,6 @@ async function runRender(spec: VideoSpec, options: RenderOptions | undefined): P
 
   const native = getNativeVideoPipeline();
   const token = nextRenderToken();
-  const nativeSpec = toNativeSpec(spec);
 
   const controller = options?.controller;
   if (controller !== undefined) {
@@ -279,7 +245,7 @@ async function runRender(spec: VideoSpec, options: RenderOptions | undefined): P
   }
 
   try {
-    await native.render(nativeSpec, token, options?.onProgress);
+    await native.render(spec, token, options?.onProgress);
     if (controller !== undefined) (controller as VideoRenderController)._markDone();
   } catch (err) {
     // Any of three paths surface a Cancelled rejection from native:
@@ -355,17 +321,10 @@ export const Video = {
     if (options.watermark === undefined && options.metadata === undefined) {
       fail('stamp: at least one of `watermark` or `metadata` must be provided');
     }
-    if (options.watermark?.kind === 'worklet') {
-      fail(
-        'stamp: watermark must be Overlay.Image or Overlay.Text — worklet overlays go through Video.compose',
-      );
-    }
-    const watermark =
-      options.watermark !== undefined ? (options.watermark as NativeOverlay) : undefined;
     return getNativeVideoPipeline().stamp(
       uri,
       options.outPath,
-      watermark,
+      options.watermark,
       options.metadata,
       nextRenderToken(),
     );
@@ -379,15 +338,9 @@ export const Video = {
   /**
    * Sugar for the worklet `compose` path: the `drawFrame` you pass crosses
    * the Nitro boundary as a callback and is invoked by the native pump per
-   * frame with a live `FrameTarget` HybridObject. `drawFrame` must NOT also
-   * appear as a worklet overlay on the spec (would double-dispatch).
+   * frame with a live `FrameTarget` HybridObject.
    */
   compose(spec: VideoSpec, options: ComposeOptions): Promise<void> {
-    if (hasWorkletOverlay(spec)) {
-      fail(
-        'compose: spec.overlays must not contain a worklet overlay — pass it as drawFrame instead',
-      );
-    }
     if (typeof options.drawFrame !== 'function') {
       fail('compose: drawFrame is required and must be a function');
     }

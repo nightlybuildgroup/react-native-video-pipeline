@@ -1,6 +1,6 @@
 {
   "name": "react-native-video-pipeline-skia",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Skia helper for react-native-video-pipeline — wraps Skia offscreen surface + readPixels/writeBytes in a single drawWithSkia() callback so consumer code stays Skia-boilerplate-free while the main library keeps zero Skia dependency.",
   "author": "Sebastian Biallas <sb@biallas.net>",
   "license": "MIT",

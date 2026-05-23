@@ -16,9 +16,6 @@ const TARGETS: Record<string, Record<string, Target>> = {
     compose: { argIndex: 1, propName: 'drawFrame', label: 'Video.compose' },
     synthesize: { argIndex: 0, propName: 'drawFrame', label: 'Video.synthesize' },
   },
-  Overlay: {
-    Worklet: { argIndex: 0, propName: 'draw', label: 'Overlay.Worklet' },
-  },
 };
 
 function matchTarget(callee: t.Expression | t.V8IntrinsicIdentifier | t.Super): Target | null {

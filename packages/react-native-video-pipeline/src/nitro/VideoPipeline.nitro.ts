@@ -102,14 +102,9 @@ export interface FrameTarget extends HybridObject<{ ios: 'c++'; android: 'kotlin
 
 export interface VideoSpec {
   output: OutputSpec;
-  /** Omit or empty → synthesized (requires a worklet overlay or drawFrame). */
+  /** Omit or empty → synthesized (only valid via `Video.synthesize`, which carries `drawFrame` as a Nitro arg, not as an overlay). */
   clips?: Clip[];
-  /**
-   * Image + text overlays only at the native boundary. Worklet overlays are
-   * dispatched through `Video.compose` on the JS side (Reanimated worklet
-   * runtime + consumer-side Skia) and never cross Nitro — see `docs/api.md`
-   * routing rules.
-   */
+  /** Native overlays — image + text. JS-side per-frame drawing goes through `Video.compose` / `Video.synthesize`, never through this list. */
   overlays?: NativeOverlay[];
   audio?: AudioSpec;
   metadata?: MetadataSpec;
@@ -184,18 +179,18 @@ export interface CropRect {
   h: number;
 }
 
-/** Public overlay union — includes worklet, which never crosses Nitro. */
-export type Overlay = ImageOverlay | TextOverlay | WorkletOverlay;
+/** Overlay union — image + text. JS-drawn frames go through `renderCompose`, not through this list. */
+export type Overlay = ImageOverlay | TextOverlay;
 
-/** Native-boundary overlay union — image + text only. */
-export type NativeOverlay = ImageOverlay | TextOverlay;
+/** Alias retained for clarity at the native boundary; identical to `Overlay`. */
+export type NativeOverlay = Overlay;
 
 /**
  * Shared discriminant for `Overlay`. Same rationale as `DurationMode` — the
  * native boundary sees `kind` as a named enum, and the public-API wrapper
  * narrows it per-variant.
  */
-export type OverlayKind = 'image' | 'text' | 'worklet';
+export type OverlayKind = 'image' | 'text';
 
 export interface ImageOverlay {
   kind: OverlayKind;
@@ -211,12 +206,6 @@ export interface TextOverlay {
   text: string;
   style: TextStyle;
   anchor: Anchor;
-  timeRange?: TimeRange;
-}
-
-export interface WorkletOverlay {
-  kind: OverlayKind;
-  draw: FrameDrawer;
   timeRange?: TimeRange;
 }
 

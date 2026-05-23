@@ -220,62 +220,16 @@ describe('Video.trim / flip / stamp', () => {
   it('rejects stamp with neither watermark nor metadata', () => {
     expect(() => Video.stamp('in.mp4', { outPath: '/tmp/out.mp4' })).toThrow(InvalidSpecError);
   });
-
-  it('rejects stamp with a worklet watermark', () => {
-    const worklet = Overlay.Worklet({ draw: () => undefined });
-    expect(() => Video.stamp('in.mp4', { outPath: '/tmp/out.mp4', watermark: worklet })).toThrow(
-      InvalidSpecError,
-    );
-  });
 });
 
 describe('Video.render — validation (§9 routing rules)', () => {
-  it('rejects synthesized spec without a worklet overlay', async () => {
+  it('rejects synthesized specs — those must go through Video.synthesize', async () => {
     await expect(
       Video.render({
         output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
         duration: { mode: 'fixed', seconds: 1 },
       }),
     ).rejects.toBeInstanceOf(InvalidSpecError);
-  });
-
-  it('rejects synthesized spec missing output.width/height/fps', async () => {
-    const drawFrame = () => undefined;
-    await expect(
-      Video.render({
-        output: { path: '/tmp/out.mp4', width: 16, height: 9 }, // no fps
-        duration: { mode: 'fixed', seconds: 1 },
-        overlays: [Overlay.Worklet({ draw: drawFrame })],
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
-  });
-
-  it('rejects open-ended duration without signal or controller', async () => {
-    const drawFrame = () => undefined;
-    await expect(
-      Video.render({
-        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
-        duration: { mode: 'open' },
-        overlays: [Overlay.Worklet({ draw: drawFrame })],
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
-  });
-
-  it('accepts open-ended duration when controller is provided', async () => {
-    const drawFrame = () => undefined;
-    const controller = new VideoRenderController();
-    const promise = Video.render(
-      {
-        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
-        duration: { mode: 'open' },
-        overlays: [Overlay.Worklet({ draw: drawFrame })],
-      },
-      { controller },
-    );
-    expect(fake.renderCalls).toHaveLength(1);
-    fake.renderCalls[0]?.resolve();
-    await promise;
-    expect(controller.state).toBe('done');
   });
 
   it('rejects duration set with non-empty clips', async () => {
@@ -304,14 +258,10 @@ describe('Video.render — validation (§9 routing rules)', () => {
     await promise;
   });
 
-  it('strips worklet overlays before crossing the Nitro boundary', async () => {
-    const drawFrame = () => undefined;
+  it('forwards native overlays unchanged to native', async () => {
     const promise = Video.render({
       ...baseClipSpec,
-      overlays: [
-        Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.2 } }),
-        Overlay.Worklet({ draw: drawFrame }),
-      ],
+      overlays: [Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.2 } })],
     });
     expect(fake.renderCalls).toHaveLength(1);
     const passed = fake.renderCalls[0]?.spec as { overlays?: Array<{ kind: string }> };
@@ -354,14 +304,12 @@ describe('Video.render — cancellation and progress', () => {
   it('controller.abort() cancels the native render', async () => {
     const drawFrame = () => undefined;
     const controller = new VideoRenderController();
-    const promise = Video.render(
-      {
-        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
-        duration: { mode: 'open' },
-        overlays: [Overlay.Worklet({ draw: drawFrame })],
-      },
-      { controller },
-    );
+    const promise = Video.synthesize({
+      output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
+      duration: { mode: 'open' },
+      drawFrame,
+      controller,
+    });
     const token = fake.renderCalls[0]?.token;
     controller.abort();
     await expect(promise).rejects.toBeInstanceOf(CancelledError);
@@ -372,14 +320,12 @@ describe('Video.render — cancellation and progress', () => {
   it('controller.finish() on open-ended renders calls finishRender', async () => {
     const drawFrame = () => undefined;
     const controller = new VideoRenderController();
-    const promise = Video.render(
-      {
-        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
-        duration: { mode: 'open' },
-        overlays: [Overlay.Worklet({ draw: drawFrame })],
-      },
-      { controller },
-    );
+    const promise = Video.synthesize({
+      output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
+      duration: { mode: 'open' },
+      drawFrame,
+      controller,
+    });
     const token = fake.renderCalls[0]?.token;
     controller.finish();
     expect(fake.finished).toContain(token);
@@ -390,25 +336,12 @@ describe('Video.render — cancellation and progress', () => {
 });
 
 describe('Video.compose', () => {
-  it('attaches drawFrame as a worklet overlay and forwards to render', async () => {
+  it('forwards drawFrame to native renderCompose', async () => {
     const drawFrame = () => undefined;
     const promise = Video.compose(baseClipSpec, { drawFrame });
     expect(fake.renderCalls).toHaveLength(1);
     fake.renderCalls[0]?.resolve();
     await promise;
-  });
-
-  it('rejects when the spec already contains a worklet overlay', () => {
-    const drawFrame = () => undefined;
-    expect(() =>
-      Video.compose(
-        {
-          ...baseClipSpec,
-          overlays: [Overlay.Worklet({ draw: drawFrame })],
-        },
-        { drawFrame },
-      ),
-    ).toThrow(InvalidSpecError);
   });
 });
 
