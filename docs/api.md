@@ -329,6 +329,19 @@ type SynthesizeOutputSpec = OutputSpec & {
 
 `Video.synthesize` requires `SynthesizeOutputSpec`; the three required fields are enforced at compile time.
 
+#### Output file semantics
+
+`path` is the on-disk destination for every operation that writes a file (`trim`, `flip`, `stamp`, `render`, `compose`, `synthesize`, `thumbnail`). The contract:
+
+- **Form.** Must be a non-empty filesystem path or a `file://` URI. Other schemes (`http://`, `content://`, `data:`, …) are rejected at the JS boundary. Plain absolute paths and `file:///…` URIs are equivalent.
+- **Overwrite.** If a file already exists at `path`, it is deleted before the new file is written. There is no `overwrite: false` option.
+- **Parent directories.** Are **not** created automatically. The caller is responsible for ensuring the directory exists (e.g. via React Native's `RNFS.mkdir` or `expo-file-system`'s `makeDirectoryAsync`). Writing to a non-existent directory rejects with `IOError`.
+- **Atomicity.** Writes are **not** atomic. While the operation is in flight, `path` may exist as a partial / not-yet-finalized file. Readers that observe the path mid-render will see incomplete data.
+- **Failure / cancellation.** On rejection (any cause — `InvalidSpec`, `EncoderFailure`, `Cancelled`, …), the partial output at `path` is best-effort deleted by the native side. Don't rely on a partial file being present after a failed render.
+- **Container vs. extension.** The output container is determined by `output.container` if provided, otherwise inferred from the file extension. There is no enforcement that `path`'s extension matches `output.container` — providing `path: 'out.mov'` with `container: 'mp4'` is accepted and produces an MP4 inside a `.mov` filename. Avoid relying on the extension alone for downstream tooling.
+
+These semantics apply uniformly across iOS (AVFoundation) and Android (Media3 Transformer).
+
 ### `Clip` and `ClipTransform`
 
 ```ts
@@ -438,11 +451,23 @@ The `target` and `source` HybridObjects are **valid only during the enclosing `d
 
 ### `FrameTarget` / `FrameSource`
 
-Pixel-buffer handles backed by `CVPixelBuffer` (iOS) or `AHardwareBuffer` (Android). Both expose `bufferAddr: bigint`, `width`, `height`, and `format: 'bgra8888' | 'rgba8888'`.
+Pixel-buffer handles backed by `CVPixelBuffer` (iOS) or `AHardwareBuffer` (Android). Both expose `width`, `height`, and `format: 'bgra8888' | 'rgba8888'`.
 
-- `target.writeBytes(bytes: ArrayBuffer)` — stable path, memcpy `width * height * 4` bytes
-- `target.blitFromNativeTexture(mtlTexturePtr: bigint)` — iOS GPU fast path, zero-copy from a Metal texture
-- `source.readBytes(): ArrayBuffer` — fresh RGBA8888 copy; raster fallback when `bufferAddr` is not directly mappable
+**Most consumers should not touch these directly.** Use one of the high-level helpers instead:
+
+- `drawWithRGBA(draw)` — plain `Uint8Array` pixel writing. Stable, CPU-only, cross-platform.
+- `drawWithSkia(draw)` (from `react-native-video-pipeline-skia`) — Skia drawing with automatic feature detection of the iOS Metal fast path. This is the recommended worklet entry point for anything beyond raw RGBA.
+
+The remaining members of `FrameTarget` / `FrameSource` are advanced escape hatches:
+
+| Member                                          | Stability    | Purpose                                                                                                                    |
+| ----------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `target.writeBytes(bytes)`                      | **Stable**   | `memcpy` of `width * height * 4` bytes into the target. Reached transparently by `drawWithRGBA`.                           |
+| `target.bufferAddr` / `source.bufferAddr`       | Experimental | Raw native pointer (`bigint`). Used by `drawWithSkia` to hand the buffer to Skia. Pointer semantics are platform-specific. |
+| `target.blitFromNativeTexture(mtlTexturePtr)`   | Experimental | iOS-only Metal-to-buffer fast path. `drawWithSkia` feature-detects this and falls back to `writeBytes` on Android.         |
+| `source.readBytes()`                            | Stable       | Fresh RGBA8888 copy of the current source frame.                                                                           |
+
+The experimental APIs may change shape (renames, namespacing under `target.unsafe.*`, removal in favor of a more portable signature) before v1.0. Building consumer code on top of them is supported but unstable; prefer the helpers.
 
 ### `EncoderCaps`
 

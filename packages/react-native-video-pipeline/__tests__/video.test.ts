@@ -223,6 +223,77 @@ describe('Video.trim / flip / stamp', () => {
       Video.stamp('in.mp4', { outPath: '/tmp/out.mp4' }),
     ).toThrow(InvalidSpecError);
   });
+
+  it('a pre-aborted signal on trim short-circuits with CancelledError', async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    await expect(
+      Video.trim('in.mp4', {
+        startSec: 0,
+        durationSec: 1,
+        outPath: '/tmp/out.mp4',
+        signal: ctl.signal,
+      }),
+    ).rejects.toBeInstanceOf(CancelledError);
+    expect(fake.cancelled).toHaveLength(1);
+    expect(fake.trimCalls).toHaveLength(0);
+  });
+
+  it('a pre-aborted signal on flip short-circuits with CancelledError', async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    await expect(
+      Video.flip('in.mp4', { outPath: '/tmp/out.mp4', axis: 'horizontal', signal: ctl.signal }),
+    ).rejects.toBeInstanceOf(CancelledError);
+    expect(fake.cancelled).toHaveLength(1);
+    expect(fake.flipCalls).toHaveLength(0);
+  });
+
+  it('a pre-aborted signal on stamp short-circuits with CancelledError', async () => {
+    const ctl = new AbortController();
+    ctl.abort();
+    await expect(
+      Video.stamp('in.mp4', {
+        outPath: '/tmp/out.mp4',
+        metadata: { software: 'rnvp' },
+        signal: ctl.signal,
+      }),
+    ).rejects.toBeInstanceOf(CancelledError);
+    expect(fake.cancelled).toHaveLength(1);
+    expect(fake.stampCalls).toHaveLength(0);
+  });
+
+  it('rejects empty outPath on trim', () => {
+    expect(() => Video.trim('in.mp4', { startSec: 0, durationSec: 1, outPath: '' })).toThrow(
+      InvalidSpecError,
+    );
+  });
+
+  it('rejects http:// scheme on flip outPath', () => {
+    expect(() =>
+      Video.flip('in.mp4', { outPath: 'http://example.com/out.mp4', axis: 'horizontal' }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('accepts file:// URI on stamp outPath', async () => {
+    await Video.stamp('in.mp4', {
+      outPath: 'file:///tmp/out.mp4',
+      metadata: { software: 'rnvp' },
+    });
+    expect(fake.stampCalls).toHaveLength(1);
+  });
+
+  it('binds a VideoRenderController to a trim and reports done after success', async () => {
+    const controller = new VideoRenderController();
+    await Video.trim('in.mp4', {
+      startSec: 0,
+      durationSec: 1,
+      outPath: '/tmp/out.mp4',
+      controller,
+    });
+    expect(fake.trimCalls).toHaveLength(1);
+    expect(controller.state).toBe('done');
+  });
 });
 
 describe('Video.render — validation (§9 routing rules)', () => {

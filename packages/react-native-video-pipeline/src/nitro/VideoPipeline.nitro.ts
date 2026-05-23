@@ -70,28 +70,48 @@ export interface FrameSource extends HybridObject<{ ios: 'c++'; android: 'kotlin
  * one HybridObject per frame, hands it to the worklet, and invalidates it
  * when the worklet returns — calling either method on an invalidated handle
  * throws `InvalidSpec`.
+ *
+ * **Stability:** `width`, `height`, `format` are stable. `writeBytes` is the
+ * stable CPU-write path. `bufferAddr` and `blitFromNativeTexture` are
+ * **EXPERIMENTAL** advanced escape hatches — raw native pointers, platform-
+ * conditional, may change shape across versions. Prefer the high-level
+ * helpers:
+ *
+ * - `drawWithRGBA` (this package) — CPU pixel writing via `Uint8Array`.
+ * - `drawWithSkia` (`react-native-video-pipeline-skia`) — Skia drawing,
+ *   feature-detects the Metal blit path on iOS, falls back to CPU on
+ *   Android. Most users should reach for this, not for `bufferAddr` /
+ *   `blitFromNativeTexture` directly.
  */
 export interface FrameTarget extends HybridObject<{ ios: 'c++'; android: 'kotlin' }> {
-  /** Native handle to the target pixel buffer; pointer-width UInt64. */
+  /**
+   * **EXPERIMENTAL — advanced.** Native pointer to the target pixel buffer,
+   * encoded as `UInt64`. Used by `drawWithSkia` to hand the buffer to Skia
+   * without a copy. Prefer the high-level helpers; pointer semantics here
+   * are platform-conditional and may change across versions.
+   */
   readonly bufferAddr: UInt64;
   readonly width: number;
   readonly height: number;
   readonly format: PixelFormat;
   /**
-   * Stable path: memcpy `bytes` into the target buffer. Length must match
-   * `width * height * 4`; layout must match `format`.
+   * Stable CPU path: memcpy `bytes` into the target buffer. Length must match
+   * `width * height * 4`; layout must match `format`. Most consumers reach
+   * this via `drawWithRGBA` rather than calling it directly.
    */
   writeBytes(bytes: ArrayBuffer): void;
   /**
-   * iOS GPU fast path (T053b). Caller passes an `id<MTLTexture>` pointer
-   * obtained via Skia's `getNativeTextureUnstable()`; the native pump uses
-   * `CVMetalTextureCacheCreateTextureFromImage` to wrap this `FrameTarget`'s
-   * backing `CVPixelBuffer` as a second `MTLTexture` on the same system
-   * device Skia uses, then issues an `MTLBlitCommandEncoder
-   * copyFromTexture:toTexture:` — zero CPU readback. The worklet-side helper
-   * `drawWithSkia` feature-detects this method and falls back to
-   * `writeBytes` on platforms where the pump has not implemented the fast
-   * path (Android today; future native targets without Metal).
+   * **EXPERIMENTAL — iOS Metal fast path.** Caller passes an `id<MTLTexture>`
+   * pointer obtained via Skia's `getNativeTextureUnstable()`; the native
+   * pump uses `CVMetalTextureCacheCreateTextureFromImage` to wrap this
+   * `FrameTarget`'s backing `CVPixelBuffer` as a second `MTLTexture` on the
+   * same system device Skia uses, then issues an `MTLBlitCommandEncoder
+   * copyFromTexture:toTexture:` — zero CPU readback.
+   *
+   * The worklet-side helper `drawWithSkia` feature-detects this method and
+   * falls back to `writeBytes` on platforms where the pump has not
+   * implemented the fast path (Android today; future native targets without
+   * Metal). Most consumers should call `drawWithSkia`, not this directly.
    */
   blitFromNativeTexture(mtlTexturePtr: UInt64): void;
 }

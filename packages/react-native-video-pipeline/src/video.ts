@@ -33,23 +33,24 @@ export interface VideoSpec {
   duration?: DurationSpec;
 }
 
-export interface TrimOptions {
+export interface TrimOptions extends RenderOptions {
   startSec: number;
   durationSec: number;
   outPath: string;
   transform?: ClipTransform;
 }
 
-export interface FlipOptions {
+export interface FlipOptions extends RenderOptions {
   outPath: string;
   axis: FlipAxis;
 }
 
 /** At least one of `watermark` or `metadata` is required. */
-export type StampOptions = { outPath: string } & (
-  | { watermark: Overlay; metadata?: MetadataSpec }
-  | { watermark?: Overlay; metadata: MetadataSpec }
-);
+export type StampOptions = { outPath: string } & RenderOptions &
+  (
+    | { watermark: Overlay; metadata?: MetadataSpec }
+    | { watermark?: Overlay; metadata: MetadataSpec }
+  );
 
 export interface ComposeOptions extends RenderOptions {
   drawFrame: FrameDrawer;
@@ -86,6 +87,26 @@ function requirePositive(name: string, value: number): void {
   }
 }
 
+/**
+ * Output paths must be a non-empty filesystem path or a `file://` URI. Other
+ * URI schemes (http://, https://, content://, data:, …) would silently
+ * confuse the native URL parsers — reject them at the JS boundary instead.
+ */
+function validateOutputPath(name: string, path: string): void {
+  if (path.length === 0 || path.trim() === '') {
+    fail(`${name}: outPath must be a non-empty filesystem path`);
+  }
+  // Match a leading `scheme:` (RFC 3986 syntax). file:// is allowed; anything
+  // else with a scheme is rejected. Plain absolute filesystem paths fall
+  // through (the slash in `/tmp/...` is not a scheme delimiter).
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path) && !path.startsWith('file://')) {
+    fail(
+      `${name}: outPath must be a filesystem path or a file:// URI — got an unsupported scheme`,
+      { path },
+    );
+  }
+}
+
 function validateOutputForSynthesis(output: OutputSpec): void {
   if (output.width === undefined)
     fail('synthesize: output.width is required when there are no clips');
@@ -111,6 +132,7 @@ function validateRenderSpec(
   options: RenderOptions | undefined,
   { allowSynthesized = false }: { allowSynthesized?: boolean } = {},
 ): void {
+  validateOutputPath('render', spec.output.path);
   const synth = isSynthesized(spec);
 
   if (synth) {
@@ -291,6 +313,61 @@ function pickRenderOptions(opts: RenderOptions): RenderOptions {
   return out;
 }
 
+/**
+ * Wraps a native call (trim/flip/stamp) with the same cancellation plumbing
+ * `runRender` uses: signal listener calls `cancelRender(token)`, controller
+ * binds to the token for `abort()`. These are fixed-duration ops, so
+ * `controller.finish()` is a no-op (matches `Video.render`'s contract).
+ * `onProgress` is accepted but not yet routed to native for these methods.
+ */
+async function withCancellation(
+  options: RenderOptions | undefined,
+  invoke: (token: string) => Promise<void>,
+): Promise<void> {
+  const native = getNativeVideoPipeline();
+  const token = nextRenderToken();
+  const controller = options?.controller;
+  if (controller !== undefined) {
+    (controller as VideoRenderController)._bind({
+      durationMode: 'fixed',
+      finishRender: () => native.finishRender(token),
+      cancelRender: () => native.cancelRender(token),
+    });
+  }
+
+  const signal = options?.signal;
+  let onAbort: (() => void) | undefined;
+  if (signal !== undefined) {
+    if (signal.aborted) {
+      native.cancelRender(token);
+      throw new CancelledError({ message: 'operation aborted before it started' });
+    }
+    onAbort = () => {
+      native.cancelRender(token);
+    };
+    signal.addEventListener('abort', onAbort);
+  }
+
+  try {
+    await invoke(token);
+    if (controller !== undefined) (controller as VideoRenderController)._markDone();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      signal?.aborted === true ||
+      controller?.state === 'aborted' ||
+      message.includes('VideoPipeline.render: Cancelled')
+    ) {
+      throw new CancelledError({ message: 'operation aborted', cause: err });
+    }
+    throw err;
+  } finally {
+    if (signal !== undefined && onAbort !== undefined) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+}
+
 export const Video = {
   /** Probe a video and return its container/codec/dimension metadata. */
   info(uri: string): Promise<VideoInfo> {
@@ -300,6 +377,7 @@ export const Video = {
   /** Extract a single JPEG frame at `atSec` and write it to `outPath`. */
   thumbnail(uri: string, options: ThumbnailOptions): Promise<string> {
     requireNonNeg('thumbnail.atSec', options.atSec);
+    validateOutputPath('thumbnail', options.outPath);
     return getNativeVideoPipeline().thumbnail(uri, options);
   },
 
@@ -312,19 +390,25 @@ export const Video = {
   trim(uri: string, options: TrimOptions): Promise<void> {
     requireNonNeg('trim.startSec', options.startSec);
     requirePositive('trim.durationSec', options.durationSec);
-    return getNativeVideoPipeline().trim(
-      uri,
-      options.outPath,
-      options.startSec,
-      options.durationSec,
-      options.transform,
-      nextRenderToken(),
+    validateOutputPath('trim', options.outPath);
+    return withCancellation(options, (token) =>
+      getNativeVideoPipeline().trim(
+        uri,
+        options.outPath,
+        options.startSec,
+        options.durationSec,
+        options.transform,
+        token,
+      ),
     );
   },
 
   /** Rotation-flag remux when the container supports it; transcode fallback otherwise. */
   flip(uri: string, options: FlipOptions): Promise<void> {
-    return getNativeVideoPipeline().flip(uri, options.outPath, options.axis, nextRenderToken());
+    validateOutputPath('flip', options.outPath);
+    return withCancellation(options, (token) =>
+      getNativeVideoPipeline().flip(uri, options.outPath, options.axis, token),
+    );
   },
 
   /** Auto-routed: metadata-only stamp uses remux; watermark falls into transcode. */
@@ -332,12 +416,15 @@ export const Video = {
     if (options.watermark === undefined && options.metadata === undefined) {
       fail('stamp: at least one of `watermark` or `metadata` must be provided');
     }
-    return getNativeVideoPipeline().stamp(
-      uri,
-      options.outPath,
-      options.watermark,
-      options.metadata,
-      nextRenderToken(),
+    validateOutputPath('stamp', options.outPath);
+    return withCancellation(options, (token) =>
+      getNativeVideoPipeline().stamp(
+        uri,
+        options.outPath,
+        options.watermark,
+        options.metadata,
+        token,
+      ),
     );
   },
 

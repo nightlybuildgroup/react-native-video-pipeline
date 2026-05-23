@@ -1,7 +1,7 @@
 {
   "name": "react-native-video-pipeline-monorepo",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Offline video editing Nitro Module for React Native (iOS + Android). Monorepo root.",
   "license": "MIT",
   "packageManager": "yarn@4.13.0",
