@@ -218,7 +218,10 @@ describe('Video.trim / flip / stamp', () => {
   });
 
   it('rejects stamp with neither watermark nor metadata', () => {
-    expect(() => Video.stamp('in.mp4', { outPath: '/tmp/out.mp4' })).toThrow(InvalidSpecError);
+    expect(() =>
+      // @ts-expect-error — StampOptions requires at least one of watermark/metadata at compile time; this exercises the runtime guard for consumers who bypass types.
+      Video.stamp('in.mp4', { outPath: '/tmp/out.mp4' }),
+    ).toThrow(InvalidSpecError);
   });
 });
 
@@ -245,6 +248,7 @@ describe('Video.render — validation (§9 routing rules)', () => {
     await expect(
       Video.render({
         ...baseClipSpec,
+        // @ts-expect-error — AudioSpec requires replaceUri on 'replace' at compile time; this exercises the runtime guard.
         audio: { mode: 'replace' },
       }),
     ).rejects.toBeInstanceOf(InvalidSpecError);
@@ -358,10 +362,13 @@ describe('Video.synthesize', () => {
     await promise;
   });
 
+  // SynthesizeOutputSpec now requires width/height/fps at compile time; the
+  // runtime guard below exists for consumers who bypass types.
   it('rejects synthesize without output.width', async () => {
     const drawFrame = () => undefined;
     await expect(
       Video.synthesize({
+        // @ts-expect-error — width required at compile time
         output: { path: '/tmp/out.mp4', height: 9, fps: 30 },
         duration: { mode: 'fixed', seconds: 1 },
         drawFrame,
@@ -373,6 +380,7 @@ describe('Video.synthesize', () => {
     const drawFrame = () => undefined;
     await expect(
       Video.synthesize({
+        // @ts-expect-error — height required at compile time
         output: { path: '/tmp/out.mp4', width: 16, fps: 30 },
         duration: { mode: 'fixed', seconds: 1 },
         drawFrame,
@@ -384,6 +392,7 @@ describe('Video.synthesize', () => {
     const drawFrame = () => undefined;
     await expect(
       Video.synthesize({
+        // @ts-expect-error — fps required at compile time
         output: { path: '/tmp/out.mp4', width: 16, height: 9 },
         duration: { mode: 'fixed', seconds: 1 },
         drawFrame,

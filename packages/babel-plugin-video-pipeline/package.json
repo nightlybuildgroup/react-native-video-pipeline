@@ -1,6 +1,6 @@
 {
   "name": "babel-plugin-video-pipeline",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Babel plugin that enforces 'worklet'; directives on callbacks passed to react-native-video-pipeline APIs.",
   "author": "Sebastian Biallas <sb@biallas.net>",
   "license": "MIT",

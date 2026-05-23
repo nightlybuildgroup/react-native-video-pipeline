@@ -1,4 +1,4 @@
-import { Overlay, type OverlayValue } from '../src/overlay';
+import { Overlay } from '../src/overlay';
 
 describe('Overlay.Image', () => {
   it('builds an image overlay with narrowed kind', () => {
@@ -69,7 +69,7 @@ describe('Overlay.Text', () => {
 describe('discriminant round-trips through JSON', () => {
   it('image kind survives JSON round-trip', () => {
     const o = Overlay.Image({ uri: 'x', anchor: 'tl', size: { w: 1 } });
-    const round = JSON.parse(JSON.stringify(o)) as OverlayValue;
+    const round = JSON.parse(JSON.stringify(o)) as Overlay;
     expect(round.kind).toBe('image');
   });
 
@@ -79,12 +79,12 @@ describe('discriminant round-trips through JSON', () => {
       style: { fontSize: 12, color: '#000' },
       anchor: 'center',
     });
-    const round = JSON.parse(JSON.stringify(o)) as OverlayValue;
+    const round = JSON.parse(JSON.stringify(o)) as Overlay;
     expect(round.kind).toBe('text');
   });
 
   it('switching on kind is exhaustive', () => {
-    const describe = (o: OverlayValue): string => {
+    const describe = (o: Overlay): string => {
       switch (o.kind) {
         case 'image':
           return `image:${o.uri}`;

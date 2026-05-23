@@ -1,6 +1,6 @@
 {
   "name": "react-native-video-pipeline",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Offline video editing Nitro Module for React Native (iOS + Android). Trim, flip, stamp, compose, synthesize, probe.",
   "author": "Sebastian Biallas <sb@biallas.net>",
   "license": "MIT",

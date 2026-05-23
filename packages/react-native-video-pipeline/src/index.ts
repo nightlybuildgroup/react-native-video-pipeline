@@ -2,53 +2,42 @@ export * from './bootstrap-pattern';
 export * from './controller';
 export * from './drawWithRGBA';
 export * from './errors';
-// Re-export the shared types from the Nitro spec so consumers don't have to
-// reach into `./nitro/...` themselves.
+// Re-export the shared Nitro types that don't need a public facade.
+// Types with discriminants (DurationSpec, AudioSpec, Overlay) and runtime
+// invariants (Size, SynthesizeOutputSpec, StampOptions) are exported from
+// `./types`, `./overlay`, and `./video` with literal-narrowed / refined
+// public facades instead.
 export type {
   Anchor,
   AnchorPoint,
   AnchorPreset,
-  AudioMode,
-  AudioSpec,
   Clip,
   ClipTransform,
   CropRect,
-  DurationMode,
-  DurationSpec,
   EncoderCaps,
-  FixedDuration,
   FlipAxis,
   FontWeight,
   FrameDrawer,
   FrameDrawerContext,
   FrameSource,
   FrameTarget,
-  ImageOverlay,
   MetadataSpec,
-  NativeOverlay,
-  OpenDuration,
-  OutputSpec,
-  Overlay,
-  OverlayKind,
   PixelFormat,
   Progress,
   RenderControllerState,
   RenderOptions,
   RenderPriority,
   Rotation,
-  Size,
   TextAlign,
-  TextOverlay,
   TextShadow,
   TextStyle,
   ThumbnailOptions,
-  TimeRange,
   VideoCodec,
   VideoContainer,
   VideoInfo,
   VideoPipelineErrorCode,
   VideoPipelineErrorShape,
-  WGS84Coordinate,
 } from './nitro/VideoPipeline.nitro';
 export * from './overlay';
+export * from './types';
 export * from './video';

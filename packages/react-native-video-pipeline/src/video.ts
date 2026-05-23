@@ -2,9 +2,8 @@ import type { VideoRenderController } from './controller';
 import { CancelledError, InvalidSpecError } from './errors';
 import { getNativeVideoPipeline } from './native';
 import type {
-  AudioSpec,
+  Clip,
   ClipTransform,
-  DurationSpec,
   EncoderCaps,
   FlipAxis,
   FrameDrawer,
@@ -12,15 +11,27 @@ import type {
   FrameSource,
   FrameTarget,
   MetadataSpec,
-  NativeOverlay,
-  OutputSpec,
   RenderOptions,
   ThumbnailOptions,
   VideoInfo,
-  VideoSpec,
 } from './nitro/VideoPipeline.nitro';
+import type { Overlay } from './overlay';
+import type { AudioSpec, DurationSpec, OutputSpec, SynthesizeOutputSpec } from './types';
 
-export type { VideoSpec };
+/**
+ * Public render spec. Uses literal-discriminant facades from `./types` and
+ * `./overlay` so consumer narrowing (`if (audio.mode === 'replace') …`)
+ * works. The shape is a structural subtype of the Nitro `VideoSpec`, so
+ * passing one across the Nitro boundary needs no runtime conversion.
+ */
+export interface VideoSpec {
+  output: OutputSpec;
+  clips?: Clip[];
+  overlays?: Overlay[];
+  audio?: AudioSpec;
+  metadata?: MetadataSpec;
+  duration?: DurationSpec;
+}
 
 export interface TrimOptions {
   startSec: number;
@@ -34,18 +45,18 @@ export interface FlipOptions {
   axis: FlipAxis;
 }
 
-export interface StampOptions {
-  outPath: string;
-  watermark?: NativeOverlay;
-  metadata?: MetadataSpec;
-}
+/** At least one of `watermark` or `metadata` is required. */
+export type StampOptions = { outPath: string } & (
+  | { watermark: Overlay; metadata?: MetadataSpec }
+  | { watermark?: Overlay; metadata: MetadataSpec }
+);
 
 export interface ComposeOptions extends RenderOptions {
   drawFrame: FrameDrawer;
 }
 
 export interface SynthesizeOptions extends RenderOptions {
-  output: OutputSpec;
+  output: SynthesizeOutputSpec;
   duration: DurationSpec;
   drawFrame: FrameDrawer;
   audio?: AudioSpec;

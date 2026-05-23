@@ -1,17 +1,19 @@
 import type {
   AnchorPoint,
   AnchorPreset,
-  ImageOverlay,
-  Size,
-  TextOverlay,
+  ImageOverlay as NativeImageOverlay,
+  TextOverlay as NativeTextOverlay,
   TextStyle,
-  TimeRange,
 } from './nitro/VideoPipeline.nitro';
+import type { Size, TimeRange } from './types';
 
-export type ImageOverlayValue = Omit<ImageOverlay, 'kind'> & { kind: 'image' };
-export type TextOverlayValue = Omit<TextOverlay, 'kind'> & { kind: 'text' };
+export type ImageOverlay = Omit<NativeImageOverlay, 'kind' | 'size'> & {
+  kind: 'image';
+  size: Size;
+};
+export type TextOverlay = Omit<NativeTextOverlay, 'kind'> & { kind: 'text' };
 
-export type OverlayValue = ImageOverlayValue | TextOverlayValue;
+export type Overlay = ImageOverlay | TextOverlay;
 
 const ANCHOR_PRESETS: Record<AnchorPreset, AnchorPoint> = {
   tl: { x: 0, y: 0 },
@@ -43,7 +45,7 @@ export interface TextOverlayInput {
   timeRange?: TimeRange;
 }
 
-function image(input: ImageOverlayInput): ImageOverlayValue {
+function image(input: ImageOverlayInput): ImageOverlay {
   return {
     kind: 'image',
     uri: input.uri,
@@ -54,7 +56,7 @@ function image(input: ImageOverlayInput): ImageOverlayValue {
   };
 }
 
-function text(input: TextOverlayInput): TextOverlayValue {
+function text(input: TextOverlayInput): TextOverlay {
   return {
     kind: 'text',
     text: input.text,

@@ -136,7 +136,14 @@ Flip horizontally or vertically. Uses a rotation-flag remux when the container s
 Video.stamp(uri: string, options: StampOptions): Promise<void>
 ```
 
-Add a watermark and/or write metadata. Metadata-only stamps remux (fast); a `watermark` of kind `'image'` or `'text'` falls into transcode. Worklet watermarks are not allowed here — pass them through `Video.compose`. Either `watermark` or `metadata` must be provided.
+Add a watermark and/or write metadata. Metadata-only stamps remux (fast); a `watermark` falls into transcode. `StampOptions` is typed so that at least one of `watermark` or `metadata` is required at compile time:
+
+```ts
+type StampOptions = { outPath: string } & (
+  | { watermark: Overlay; metadata?: MetadataSpec }
+  | { watermark?: Overlay; metadata: MetadataSpec }
+);
+```
 
 ### `Video.render`
 
@@ -186,8 +193,8 @@ Builder functions for the two overlay variants. They normalize `anchor` presets 
 The normalized anchor is a **slot position within the free space** (output frame minus overlay): `(0, 0)` aligns the overlay's top-left with the frame's top-left; `(1, 1)` aligns its bottom-right with the frame's; `(0.5, 0.5)` centers it. Anchors always align corresponding edges — they do not address an arbitrary point on the overlay. Pixel-from-edge layouts can be expressed as `anchor.x = inset / (outputW - overlayW)`.
 
 ```ts
-Overlay.Image({ uri, anchor, size, opacity?, timeRange? }): ImageOverlayValue
-Overlay.Text({ text, style, anchor, timeRange? }): TextOverlayValue
+Overlay.Image({ uri, anchor, size, opacity?, timeRange? }): ImageOverlay
+Overlay.Text({ text, style, anchor, timeRange? }): TextOverlay
 ```
 
 Both variants are rendered natively (`CIFilter` + `CATextLayer` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android). Advanced typography is intentionally out of scope; if you need pixel-identical cross-platform text, rasterize a PNG and use `Overlay.Image`.
@@ -290,27 +297,37 @@ The full type list is exported from the package root and re-exported from the Ni
 ```ts
 interface VideoSpec {
   output: OutputSpec;
-  clips?: Clip[];           // omit/empty → synthesize path; requires duration + worklet
-  overlays?: OverlayValue[]; // image / text / worklet
+  clips?: Clip[];
+  overlays?: Overlay[];     // Overlay.Image | Overlay.Text
   audio?: AudioSpec;
   metadata?: MetadataSpec;
-  duration?: DurationSpec;  // required when clips is omitted
+  duration?: DurationSpec;  // ignored when clips is non-empty
 }
 ```
 
-### `OutputSpec`
+Synthesized specs (no clips) must go through `Video.synthesize`, which uses the stricter `SynthesizeOutputSpec` below. `Video.render` rejects clip-less specs at runtime.
+
+### `OutputSpec` and `SynthesizeOutputSpec`
 
 ```ts
 interface OutputSpec {
   path: string;
-  width?: number;     // required when clips is empty
-  height?: number;    // required when clips is empty
-  fps?: number;       // required when clips is empty
-  bitrate?: number;   // bits per second
-  codec?: VideoCodec; // 'h264' | 'hevc'; default 'h264'
+  width?: number;
+  height?: number;
+  fps?: number;
+  bitrate?: number;           // bits per second
+  codec?: VideoCodec;         // 'h264' | 'hevc'; default 'h264'
   container?: VideoContainer; // 'mp4' | 'mov'
 }
+
+type SynthesizeOutputSpec = OutputSpec & {
+  width: number;
+  height: number;
+  fps: number;
+};
 ```
+
+`Video.synthesize` requires `SynthesizeOutputSpec`; the three required fields are enforced at compile time.
 
 ### `Clip` and `ClipTransform`
 
@@ -384,11 +401,21 @@ interface MetadataSpec {
 ### `AudioSpec`
 
 ```ts
-interface AudioSpec {
-  mode: 'passthrough' | 'mute' | 'replace';
-  replaceUri?: string; // required when mode === 'replace'
-}
+type AudioSpec =
+  | { mode: 'passthrough' }
+  | { mode: 'mute' }
+  | { mode: 'replace'; replaceUri: string };
 ```
+
+Discriminated by `mode`, so `replaceUri` is required at compile time when (and only when) `mode === 'replace'`.
+
+### `Size`
+
+```ts
+type Size = { w: number; h?: number } | { w?: number; h: number };
+```
+
+Used by `Overlay.Image`. At least one of `w` / `h` is required; the other scales proportionally.
 
 ### `FrameDrawerContext`
 
