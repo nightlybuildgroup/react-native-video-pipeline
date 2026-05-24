@@ -33,7 +33,10 @@ describe('VideoPipelineError subclasses', () => {
     expect(err).toBeInstanceOf(VideoPipelineError);
     expect(err).toBeInstanceOf(Error);
     expect(err.message).toBe(`test ${code}`);
-    expect(err.name).toBe('VideoPipelineError');
+    // Subclass name flows through `new.target.name` so stack traces and
+    // log lines show the concrete class (`InvalidSpecError`) rather than
+    // the base. The programmatic discriminant remains `code`.
+    expect(err.name).toBe(Ctor.name);
   });
 
   it('preserves details', () => {

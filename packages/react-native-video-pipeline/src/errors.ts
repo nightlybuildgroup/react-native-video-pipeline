@@ -12,7 +12,10 @@ export abstract class VideoPipelineError extends Error {
 
   constructor(options?: VideoPipelineErrorOptions) {
     super(options?.message, options?.cause !== undefined ? { cause: options.cause } : undefined);
-    this.name = 'VideoPipelineError';
+    // `new.target` is the concrete subclass being constructed, so logs show
+    // `CancelledError`, `InvalidSpecError`, etc. — the discriminant in `code`
+    // is still the supported programmatic discriminant.
+    this.name = new.target.name;
     if (options?.details !== undefined) {
       this.details = options.details;
     }

@@ -380,7 +380,6 @@ interface RenderOptions {
   signal?: AbortSignal;
   controller?: VideoRenderController;
   onProgress?: (p: Progress) => void;
-  priority?: 'interactive' | 'background'; // default 'interactive'
 }
 ```
 
@@ -474,11 +473,11 @@ The remaining members of `FrameTarget` / `FrameSource` are advanced escape hatch
 | Member                                          | Stability    | Purpose                                                                                                                    |
 | ----------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------- |
 | `target.writeBytes(bytes)`                      | **Stable**   | `memcpy` of `width * height * 4` bytes into the target. Reached transparently by `drawWithRGBA`.                           |
-| `target.bufferAddr` / `source.bufferAddr`       | Experimental | Raw native pointer (`bigint`). Used by `drawWithSkia` to hand the buffer to Skia. Pointer semantics are platform-specific. |
-| `target.blitFromNativeTexture(mtlTexturePtr)`   | Experimental | iOS-only Metal-to-buffer fast path. `drawWithSkia` feature-detects this and falls back to `writeBytes` on Android.         |
-| `source.readBytes()`                            | Stable       | Fresh RGBA8888 copy of the current source frame.                                                                           |
+| `target.unstable_bufferAddr` / `source.unstable_bufferAddr`       | Unstable | Raw native pointer (`bigint`). Used by `drawWithSkia` to hand the buffer to Skia. Pointer semantics are platform-specific.   |
+| `target.unstable_blitFromNativeTexture(mtlTexturePtr)`            | Unstable | iOS-only Metal-to-buffer fast path. `drawWithSkia` feature-detects this and falls back to `writeBytes` on Android.           |
+| `source.readBytes()`                                              | Stable   | Fresh RGBA8888 copy of the current source frame.                                                                             |
 
-The experimental APIs may change shape (renames, namespacing under `target.unsafe.*`, removal in favor of a more portable signature) before v1.0. Building consumer code on top of them is supported but unstable; prefer the helpers.
+The `unstable_` prefix is the stability signal: those members are not covered by the v1.0 stability contract — pointer ABI may change, names may be moved under a dedicated namespace, or the surface may be removed in favor of a more portable signature. Building consumer code on top of them is supported, but prefer the high-level helpers (`drawWithRGBA`, `drawWithSkia`) so a future ABI change is invisible to your code.
 
 ### `EncoderCaps`
 

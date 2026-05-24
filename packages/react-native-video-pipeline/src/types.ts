@@ -7,8 +7,10 @@
  * runtime conversion is required at the boundary.
  */
 
+import type { VideoRenderController } from './controller';
 import type {
   OutputSpec as NativeOutputSpec,
+  Progress,
   TimeRange,
   WGS84Coordinate,
 } from './nitro/VideoPipeline.nitro';
@@ -55,6 +57,25 @@ export type SynthesizeOutputSpec = OutputSpec & {
   height: number;
   fps: number;
 };
+
+// ---------------------------------------------------------------------------
+// Render options — public facade.
+// ---------------------------------------------------------------------------
+
+/**
+ * Options accepted by every `Video.*` method that runs an asynchronous
+ * render. `controller` is typed as the concrete exported
+ * `VideoRenderController` class (not a structural interface): the
+ * implementation calls internal `_bind` / `_markDone` methods on it that a
+ * hand-rolled object would not satisfy at runtime.
+ */
+export interface RenderOptions {
+  /** Abort → discard output and reject with `Cancelled`. */
+  signal?: AbortSignal;
+  /** Graceful finish for open-ended renders; see `VideoRenderController`. */
+  controller?: VideoRenderController;
+  onProgress?: (p: Progress) => void;
+}
 
 // ---------------------------------------------------------------------------
 // Re-export passthrough types that don't need a facade.

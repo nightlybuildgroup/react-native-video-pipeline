@@ -20,8 +20,8 @@ export type SkiaDrawCallback = (canvas: SkCanvas, ctx: FrameDrawerContext) => vo
  *
  *   - **GPU fast path (T053b, iOS):** when `surface.getNativeTextureUnstable`
  *     is available and returns a usable `bigint` pointer, call
- *     `ctx.target.blitFromNativeTexture(ptr)`. Zero CPU readback — the
- *     native pump `MTLBlit`s Skia's backing texture straight into the
+ *     `ctx.target.unstable_blitFromNativeTexture(ptr)`. Zero CPU readback —
+ *     the native pump `MTLBlit`s Skia's backing texture straight into the
  *     IOSurface-backed `CVPixelBuffer` that the encoder will append.
  *   - **CPU readback path (T053, any platform):** `makeImageSnapshot()` →
  *     `readPixels()` → `ctx.target.writeBytes(bytes)`. Stable, portable.
@@ -102,11 +102,12 @@ export function drawWithSkia(draw: SkiaDrawCallback): (ctx: FrameDrawerContext) 
 /**
  * Build an SkImage for the current source frame. Two paths:
  *
- *   - **Native-buffer path** (iOS, optimal): Skia reinterprets `bufferAddr`
- *     as a `CVPixelBufferRef` and reads format/dims off the wrapper. Zero-
- *     copy — the SkImage references the IOSurface directly.
- *   - **Raster fallback** (Android, today): `bufferAddr === 0` indicates
- *     the platform doesn't expose a Skia-friendly native handle; pull
+ *   - **Native-buffer path** (iOS, optimal): Skia reinterprets
+ *     `unstable_bufferAddr` as a `CVPixelBufferRef` and reads format/dims
+ *     off the wrapper. Zero-copy — the SkImage references the IOSurface
+ *     directly.
+ *   - **Raster fallback** (Android, today): `unstable_bufferAddr === 0`
+ *     indicates the platform doesn't expose a Skia-friendly native handle; pull
  *     RGBA bytes via `readBytes()` and build a raster SkImage with
  *     `Skia.Image.MakeImage(info, data, stride)`. One memcpy per frame.
  *
@@ -115,7 +116,7 @@ export function drawWithSkia(draw: SkiaDrawCallback): (ctx: FrameDrawerContext) 
 // biome-ignore lint/suspicious/noExplicitAny: FrameSource is a Nitro HybridObject — its dynamic shape is platform-specific.
 function makeSourceImage(source: any): SkImage | null {
   'worklet';
-  if (typeof source.bufferAddr === 'bigint' && source.bufferAddr !== 0n) {
+  if (typeof source.unstable_bufferAddr === 'bigint' && source.unstable_bufferAddr !== 0n) {
     // The native side returns a signed 64-bit Long. Skia's
     // `MakeImageFromNativeBuffer` calls `asUint64` and rejects negative
     // BigInts ("Lossy truncation"), which trips on Android AHardwareBuffer
@@ -123,7 +124,7 @@ function makeSourceImage(source: any): SkImage | null {
     // negative when interpreted signed). `asUintN(64, …)` reinterprets the
     // bits as unsigned without changing the underlying pointer value, so
     // this is a no-op for iOS CVPixelBufferRefs that already fit in 63 bits.
-    return Skia.Image.MakeImageFromNativeBuffer(BigInt.asUintN(64, source.bufferAddr));
+    return Skia.Image.MakeImageFromNativeBuffer(BigInt.asUintN(64, source.unstable_bufferAddr));
   }
   if (typeof source.readBytes !== 'function') return null;
   const bytes = source.readBytes();
@@ -189,7 +190,7 @@ function tryBlitFromSkiaTexture(surface: SkSurface, ctx: FrameDrawerContext): bo
     return false;
   }
   const getTex = surface.getNativeTextureUnstable;
-  const blit = ctx.target.blitFromNativeTexture;
+  const blit = ctx.target.unstable_blitFromNativeTexture;
   if (typeof getTex !== 'function' || typeof blit !== 'function') {
     return false;
   }
@@ -213,7 +214,7 @@ function tryBlitFromSkiaTexture(surface: SkSurface, ctx: FrameDrawerContext): bo
     return true;
   } catch (err) {
     warnOnce(
-      'drawWithSkia: FrameTarget.blitFromNativeTexture threw; falling back to CPU readback. ' +
+      'drawWithSkia: FrameTarget.unstable_blitFromNativeTexture threw; falling back to CPU readback. ' +
         String(err),
     );
     return false;

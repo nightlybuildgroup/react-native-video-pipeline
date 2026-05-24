@@ -26,14 +26,14 @@ void throwIfInvalid(bool invalidated) {
 
 }  // namespace
 
-uint64_t HybridFrameTarget::getBufferAddr() {
+uint64_t HybridFrameTarget::getUnstable_bufferAddr() {
   throwIfInvalid(invalidated_);
   if (pixelBuffer_ == nullptr) return 0;
-  // The JS-visible bufferAddr is the IOSurface-backed base address. We
-  // expose it read-only to consumers that want to read pixels (e.g. Skia's
-  // MakeImageFromNativeBuffer); writes must go through writeBytes /
-  // blitFromNativeTexture so lock/unlock stays balanced. Callers never
-  // dereference this pointer directly from JS.
+  // The JS-visible unstable_bufferAddr is the IOSurface-backed base address.
+  // We expose it read-only to consumers that want to read pixels (e.g.
+  // Skia's MakeImageFromNativeBuffer); writes must go through writeBytes /
+  // unstable_blitFromNativeTexture so lock/unlock stays balanced. Callers
+  // never dereference this pointer directly from JS.
   return reinterpret_cast<uint64_t>(CVPixelBufferGetBaseAddress(pixelBuffer_));
 }
 
@@ -106,12 +106,12 @@ void HybridFrameTarget::writeBytes(const std::shared_ptr<ArrayBuffer>& bytes) {
   CVPixelBufferUnlockBaseAddress(pixelBuffer_, 0);
 }
 
-void HybridFrameTarget::blitFromNativeTexture(uint64_t mtlTexturePtr) {
+void HybridFrameTarget::unstable_blitFromNativeTexture(uint64_t mtlTexturePtr) {
   throwIfInvalid(invalidated_);
   if (pixelBuffer_ == nullptr) {
     throw std::runtime_error(
-        "VideoPipeline.FrameTarget.blitFromNativeTexture: InvalidSpec — "
-        "null buffer");
+        "VideoPipeline.FrameTarget.unstable_blitFromNativeTexture: "
+        "InvalidSpec — null buffer");
   }
 
   NSError* error = nil;
@@ -123,7 +123,7 @@ void HybridFrameTarget::blitFromNativeTexture(uint64_t mtlTexturePtr) {
   if (!ok) {
     const char* desc = error.localizedDescription.UTF8String ?: "(nil)";
     throw std::runtime_error(
-        std::string("VideoPipeline.FrameTarget.blitFromNativeTexture: ") +
+        std::string("VideoPipeline.FrameTarget.unstable_blitFromNativeTexture: ") +
         desc);
   }
 }

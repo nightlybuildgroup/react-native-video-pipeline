@@ -97,7 +97,7 @@ Code locations:
 - JS feature-detect + dispatch: `packages/react-native-video-pipeline-skia/src/drawWithSkia.ts:tryBlitFromSkiaTexture` (≈ line 179)
 - Texture-info shape extraction: `extractMtlTexturePtr` (≈ line 215). Skia's `getNativeTextureUnstable` now returns a `TextureInfo` object with the Metal pointer at `.mtlTexture`; older versions returned the bigint directly. We accept either.
 - The native blit: `packages/react-native-video-pipeline/ios/MetalBlit.mm`
-- Frame-target → blit dispatch: `HybridFrameTarget.mm:blitFromNativeTexture`
+- Frame-target → blit dispatch: `HybridFrameTarget.mm:unstable_blitFromNativeTexture`
 
 Per-frame data flow at 1080p:
 
@@ -105,7 +105,7 @@ Per-frame data flow at 1080p:
 |---|---|---|
 | Skia draw commands | rendered on GPU | 0 |
 | `getNativeTextureUnstable()` | returns `TextureInfo` object; we extract the bigint | 0 |
-| `target.blitFromNativeTexture(ptr)` | crosses Nitro as `bigint` | 0 |
+| `target.unstable_blitFromNativeTexture(ptr)` | crosses Nitro as `bigint` | 0 |
 | `MetalBlit blitFromMetalTexturePtr:toPixelBuffer:` | GPU-to-GPU copy via `MTLBlitCommandEncoder` | 0 (GPU-local) |
 | `appendPixelBuffer` | refcount only | 0 |
 
@@ -127,14 +127,14 @@ Compose-on-clip — decoded source frames + JS Skia draw — uses
 decoded `CVPixelBuffer` is wrapped in a `HybridFrameSource` (read-only,
 non-owning view) and handed to the JS worklet via the `source` argument
 to `drawFrame`. Skia builds an `SkImage` from it directly via
-`Skia.Image.MakeImageFromNativeBuffer(source.bufferAddr)` — Skia
+`Skia.Image.MakeImageFromNativeBuffer(source.unstable_bufferAddr)` — Skia
 reinterprets the bigint as a `CVPixelBufferRef` and reads format / width
 / height off the wrapper. Zero copy.
 
 Code locations:
 - Reader setup + per-frame pump: `packages/react-native-video-pipeline/ios/VideoPipeline.mm:renderCompose` compose-on-clip branch
 - Source wrapper: `packages/react-native-video-pipeline/ios/HybridFrameSource.{h,mm}`
-- JS-side Skia integration: `packages/react-native-video-pipeline-skia/src/drawWithSkia.ts:makeSourceImage` — picks the native-buffer path when `bufferAddr !== 0n`
+- JS-side Skia integration: `packages/react-native-video-pipeline-skia/src/drawWithSkia.ts:makeSourceImage` — picks the native-buffer path when `unstable_bufferAddr !== 0n`
 
 Combined with path 3 (GPU output), the entire compose-on-clip flow runs
 without a single full-frame `memcpy` on iOS. The encoder, decoder, and

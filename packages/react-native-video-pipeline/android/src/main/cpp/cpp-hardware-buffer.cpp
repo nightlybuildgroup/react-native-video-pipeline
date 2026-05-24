@@ -4,8 +4,9 @@
 /// JNI helper that converts a Java `android.hardware.HardwareBuffer` to its
 /// underlying `AHardwareBuffer*` pointer via the NDK's
 /// `AHardwareBuffer_fromHardwareBuffer`. Returned as a `jlong` so the Kotlin
-/// side can pass it across Nitro as a `bigint` (`HybridFrameSource.bufferAddr`)
-/// straight into Skia's `MakeImageFromNativeBuffer`. Same pattern as
+/// side can pass it across Nitro as a `bigint`
+/// (`HybridFrameSource.unstable_bufferAddr`) straight into Skia's
+/// `MakeImageFromNativeBuffer`. Same pattern as
 /// `react-native-skia`'s RNSkAndroidVideo bridge.
 ///
 /// `AHardwareBuffer_fromHardwareBuffer` is API 26+; this lib's

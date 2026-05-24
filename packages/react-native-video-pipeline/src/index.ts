@@ -25,8 +25,6 @@ export type {
   PixelFormat,
   Progress,
   RenderControllerState,
-  RenderOptions,
-  RenderPriority,
   Rotation,
   TextAlign,
   TextShadow,

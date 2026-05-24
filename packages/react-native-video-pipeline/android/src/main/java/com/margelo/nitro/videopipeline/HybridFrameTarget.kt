@@ -15,10 +15,10 @@
 ///   3. Pump calls `invalidate()`; further JS calls throw InvalidSpec.
 ///   4. Pump uploads the ByteBuffer to GL + draws to the encoder surface.
 ///
-/// `blitFromNativeTexture` is the iOS Metal fast path; on Android we don't
-/// have an equivalent in this slice (Skia GPU export to MediaCodec needs
-/// AHardwareBuffer + ImageWriter plumbing — separate task), so the method
-/// throws and `drawWithSkia` falls back to its CPU-readback path.
+/// `unstable_blitFromNativeTexture` is the iOS Metal fast path; on Android
+/// we don't have an equivalent in this slice (Skia GPU export to MediaCodec
+/// needs AHardwareBuffer + ImageWriter plumbing — separate task), so the
+/// method throws and `drawWithSkia` falls back to its CPU-readback path.
 ///
 
 package com.margelo.nitro.videopipeline
@@ -35,7 +35,7 @@ internal class HybridFrameTarget(
   @Volatile
   private var invalidated = false
 
-  override val bufferAddr: Long
+  override val unstable_bufferAddr: Long
     get() {
       throwIfInvalid()
       // The address is unused by drawWithSkia's writeBytes path on Android;
@@ -76,12 +76,13 @@ internal class HybridFrameTarget(
     backing.position(0)
   }
 
-  override fun blitFromNativeTexture(mtlTexturePtr: Long) {
+  override fun unstable_blitFromNativeTexture(mtlTexturePtr: Long) {
     throwIfInvalid()
     throw UnsupportedOperationException(
-      "VideoPipeline.FrameTarget.blitFromNativeTexture: GPU fast path is " +
-        "iOS-only in this slice. Android falls back via drawWithSkia's CPU " +
-        "readback (writeBytes); this method should not be reached."
+      "VideoPipeline.FrameTarget.unstable_blitFromNativeTexture: GPU fast " +
+        "path is iOS-only in this slice. Android falls back via " +
+        "drawWithSkia's CPU readback (writeBytes); this method should not " +
+        "be reached."
     )
   }
 

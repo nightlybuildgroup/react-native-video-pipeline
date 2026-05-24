@@ -50,7 +50,7 @@ drawFrame: drawWithRGBA((pixels, ctx) => {
 }),
 ```
 
-On iOS, `ctx.source.bufferAddr` is a non-zero `bigint` you can pass to Skia for zero-copy sampling — see [`compose-skia.md`](./compose-skia.md).
+On iOS, `ctx.source.unstable_bufferAddr` is a non-zero `bigint` you can pass to Skia for zero-copy sampling — see [`compose-skia.md`](./compose-skia.md).
 
 ## Mixing with native overlays
 

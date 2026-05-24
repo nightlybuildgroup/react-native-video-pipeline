@@ -39,12 +39,16 @@ export type PixelFormat = 'bgra8888' | 'rgba8888';
  */
 export interface FrameSource extends HybridObject<{ ios: 'c++'; android: 'kotlin' }> {
   /**
-   * Native handle to an IOSurface-backed (iOS) or AHardwareBuffer-backed
-   * (Android, future) pixel buffer; pointer-width UInt64. On Android the
-   * bare-example currently exposes 0 — consumers read pixels via `readBytes`
-   * instead until the AHardwareBuffer + ImageReader plumbing lands.
+   * **UNSTABLE — advanced.** Native handle to an IOSurface-backed (iOS) or
+   * AHardwareBuffer-backed (Android, future) pixel buffer; pointer-width
+   * UInt64. On Android the bare-example currently exposes 0 — consumers
+   * read pixels via `readBytes` instead until the AHardwareBuffer +
+   * ImageReader plumbing lands. The `unstable_` prefix signals that
+   * pointer semantics are platform-conditional and may change across
+   * versions; prefer the sibling `react-native-video-pipeline-skia`
+   * package over reaching for this directly.
    */
-  readonly bufferAddr: UInt64;
+  readonly unstable_bufferAddr: UInt64;
   readonly width: number;
   readonly height: number;
   readonly format: PixelFormat;
@@ -72,25 +76,26 @@ export interface FrameSource extends HybridObject<{ ios: 'c++'; android: 'kotlin
  * throws `InvalidSpec`.
  *
  * **Stability:** `width`, `height`, `format` are stable. `writeBytes` is the
- * stable CPU-write path. `bufferAddr` and `blitFromNativeTexture` are
- * **EXPERIMENTAL** advanced escape hatches — raw native pointers, platform-
- * conditional, may change shape across versions. Prefer the high-level
- * helpers:
+ * stable CPU-write path. `unstable_bufferAddr` and
+ * `unstable_blitFromNativeTexture` are advanced escape hatches — raw native
+ * pointers, platform-conditional, may change shape across versions. The
+ * `unstable_` prefix is the signal that those members are not covered by
+ * the library's stability contract. Prefer the high-level helpers:
  *
  * - `drawWithRGBA` (this package) — CPU pixel writing via `Uint8Array`.
  * - `drawWithSkia` (`react-native-video-pipeline-skia`) — Skia drawing,
  *   feature-detects the Metal blit path on iOS, falls back to CPU on
- *   Android. Most users should reach for this, not for `bufferAddr` /
- *   `blitFromNativeTexture` directly.
+ *   Android. Most users should reach for this, not for `unstable_bufferAddr`
+ *   / `unstable_blitFromNativeTexture` directly.
  */
 export interface FrameTarget extends HybridObject<{ ios: 'c++'; android: 'kotlin' }> {
   /**
-   * **EXPERIMENTAL — advanced.** Native pointer to the target pixel buffer,
+   * **UNSTABLE — advanced.** Native pointer to the target pixel buffer,
    * encoded as `UInt64`. Used by `drawWithSkia` to hand the buffer to Skia
    * without a copy. Prefer the high-level helpers; pointer semantics here
    * are platform-conditional and may change across versions.
    */
-  readonly bufferAddr: UInt64;
+  readonly unstable_bufferAddr: UInt64;
   readonly width: number;
   readonly height: number;
   readonly format: PixelFormat;
@@ -101,7 +106,7 @@ export interface FrameTarget extends HybridObject<{ ios: 'c++'; android: 'kotlin
    */
   writeBytes(bytes: ArrayBuffer): void;
   /**
-   * **EXPERIMENTAL — iOS Metal fast path.** Caller passes an `id<MTLTexture>`
+   * **UNSTABLE — iOS Metal fast path.** Caller passes an `id<MTLTexture>`
    * pointer obtained via Skia's `getNativeTextureUnstable()`; the native
    * pump uses `CVMetalTextureCacheCreateTextureFromImage` to wrap this
    * `FrameTarget`'s backing `CVPixelBuffer` as a second `MTLTexture` on the
@@ -113,7 +118,7 @@ export interface FrameTarget extends HybridObject<{ ios: 'c++'; android: 'kotlin
    * implemented the fast path (Android today; future native targets without
    * Metal). Most consumers should call `drawWithSkia`, not this directly.
    */
-  blitFromNativeTexture(mtlTexturePtr: UInt64): void;
+  unstable_blitFromNativeTexture(mtlTexturePtr: UInt64): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -430,17 +435,13 @@ export interface ThumbnailOptions {
 // Control surfaces
 // ---------------------------------------------------------------------------
 
-export interface RenderOptions {
-  /** Abort → discard output and reject with `Cancelled`. */
-  signal?: AbortSignal;
-  /** Graceful finish for open-ended renders; see `VideoRenderController`. */
-  controller?: VideoRenderController;
-  onProgress?: (p: Progress) => void;
-  /** default: `'interactive'`. */
-  priority?: RenderPriority;
-}
-
-export type RenderPriority = 'interactive' | 'background';
+/**
+ * `RenderOptions` is intentionally NOT declared at the Nitro boundary. The
+ * Nitro HybridObject methods take a flat `renderToken: string` plus a raw
+ * `onProgress` callback; the JS-side `Video.*` wrapper translates the
+ * consumer-facing `RenderOptions` (`AbortSignal`, `VideoRenderController`)
+ * into that primitive shape. See `src/types.ts` for the public type.
+ */
 
 /**
  * Handle for graceful end-of-stream on open-ended renders.
@@ -515,7 +516,12 @@ export type VideoPipelineErrorCode =
   | 'InvalidSpec';
 
 export interface VideoPipelineErrorShape {
-  name: 'VideoPipelineError';
+  /**
+   * Subclass `name` (`'CancelledError'`, `'InvalidSpecError'`, …). The
+   * supported programmatic discriminant is `code`; `name` is best-effort
+   * and intended for logs.
+   */
+  name: string;
   code: VideoPipelineErrorCode;
   message: string;
   details?: Record<string, unknown>;

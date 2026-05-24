@@ -2,13 +2,13 @@
 /// HybridFrameSource.h — concrete iOS subclass of the Nitro-generated
 /// `HybridFrameSourceSpec`. Read-only view onto the current source frame
 /// (compose-on-clip path); the worklet typically passes
-/// `bufferAddr` to `Skia.Image.MakeImageFromNativeBuffer` to draw the
-/// source image before laying its own work on top.
+/// `unstable_bufferAddr` to `Skia.Image.MakeImageFromNativeBuffer` to draw
+/// the source image before laying its own work on top.
 ///
 /// Lifetime — one instance per output frame:
 ///   1. Native pump pulls a decoded CVPixelBuffer from the AVAssetReader,
 ///      constructs this wrapper, hands the shared_ptr to the worklet.
-///   2. Worklet reads `bufferAddr` (and width/height/format).
+///   2. Worklet reads `unstable_bufferAddr` (and width/height/format).
 ///   3. Native pump calls `invalidate` after the worklet returns. Any later
 ///      JS-side method call throws `InvalidSpec` so a stale handle cannot
 ///      reach into a recycled buffer.
@@ -32,7 +32,7 @@ class HybridFrameSource : public HybridFrameSourceSpec {
       : HybridObject(TAG), pixelBuffer_(pixelBuffer), format_(format) {}
 
   // Properties
-  uint64_t getBufferAddr() override;
+  uint64_t getUnstable_bufferAddr() override;
   double getWidth() override;
   double getHeight() override;
   PixelFormat getFormat() override;

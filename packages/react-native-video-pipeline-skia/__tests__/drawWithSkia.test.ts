@@ -8,7 +8,7 @@
 //   - reads pixels with the platform-correct color type (CPU fallback)
 //   - forwards pixels to `ctx.target.writeBytes` as an ArrayBuffer (CPU)
 //   - takes the GPU fast path when `getNativeTextureUnstable` is available
-//     and returns a usable bigint, routing through blitFromNativeTexture
+//     and returns a usable bigint, routing through unstable_blitFromNativeTexture
 //   - falls back to CPU on shape drift (non-bigint, zero, or throw) with a
 //     single console.warn per process
 //   - disposes every Skia handle in `finally` even if the callback throws
@@ -96,12 +96,12 @@ function makeTarget(
   blitImpl?: (mtlTexturePtr: bigint) => void,
 ): FrameTarget {
   return {
-    bufferAddr: 0xdeadbeefn,
+    unstable_bufferAddr: 0xdeadbeefn,
     width: w,
     height: h,
     format,
     writeBytes: jest.fn(),
-    blitFromNativeTexture: jest.fn(blitImpl ?? (() => {})),
+    unstable_blitFromNativeTexture: jest.fn(blitImpl ?? (() => {})),
   };
 }
 
@@ -165,7 +165,7 @@ describe('drawWithSkia', () => {
 
   it('pre-draws ctx.source onto the canvas when provided (compose-on-clip path)', () => {
     const source: FrameSource = {
-      bufferAddr: 0x1234n,
+      unstable_bufferAddr: 0x1234n,
       width: 4,
       height: 4,
       format: 'bgra8888',
@@ -193,7 +193,7 @@ describe('drawWithSkia', () => {
 
   it('disposes the surface, snapshot, and source image even when the callback throws', () => {
     const source: FrameSource = {
-      bufferAddr: 0x1n,
+      unstable_bufferAddr: 0x1n,
       width: 4,
       height: 4,
       format: 'bgra8888',
@@ -267,7 +267,7 @@ describe('drawWithSkia', () => {
     drawWithSkia(() => {})(ctx);
 
     expect(getNativeTextureUnstable).toHaveBeenCalledTimes(1);
-    expect(target.blitFromNativeTexture).toHaveBeenCalledWith(texPtr);
+    expect(target.unstable_blitFromNativeTexture).toHaveBeenCalledWith(texPtr);
     // GPU path skips snapshot + readPixels + writeBytes entirely.
     expect(latestSnapshot?.readPixels).not.toHaveBeenCalled();
     expect(target.writeBytes).not.toHaveBeenCalled();
@@ -296,7 +296,7 @@ describe('drawWithSkia', () => {
       const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
       drawWithSkia(() => {})(ctx);
 
-      expect(target.blitFromNativeTexture).not.toHaveBeenCalled();
+      expect(target.unstable_blitFromNativeTexture).not.toHaveBeenCalled();
       expect(target.writeBytes).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalled();
       const firstCall = warn.mock.calls[0]?.[0];
@@ -329,14 +329,14 @@ describe('drawWithSkia', () => {
       const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
       drawWithSkia(() => {})(ctx);
 
-      expect(target.blitFromNativeTexture).not.toHaveBeenCalled();
+      expect(target.unstable_blitFromNativeTexture).not.toHaveBeenCalled();
       expect(target.writeBytes).toHaveBeenCalledTimes(1);
     } finally {
       warn.mockRestore();
     }
   });
 
-  it('falls back to CPU path when blitFromNativeTexture throws', () => {
+  it('falls back to CPU path when unstable_blitFromNativeTexture throws', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const texPtr = 0x1n;
@@ -362,7 +362,7 @@ describe('drawWithSkia', () => {
       const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
       drawWithSkia(() => {})(ctx);
 
-      expect(target.blitFromNativeTexture).toHaveBeenCalledWith(texPtr);
+      expect(target.unstable_blitFromNativeTexture).toHaveBeenCalledWith(texPtr);
       // Fallback CPU write happens after the blit throw.
       expect(target.writeBytes).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalled();
@@ -378,7 +378,7 @@ describe('drawWithSkia', () => {
     const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
     drawWithSkia(() => {})(ctx);
 
-    expect(target.blitFromNativeTexture).not.toHaveBeenCalled();
+    expect(target.unstable_blitFromNativeTexture).not.toHaveBeenCalled();
     expect(target.writeBytes).toHaveBeenCalledTimes(1);
   });
 
@@ -426,7 +426,7 @@ describe('drawWithSkia', () => {
       drawWithSkia(() => {})(ctx);
 
       expect(getTex).not.toHaveBeenCalled();
-      expect(target.blitFromNativeTexture).not.toHaveBeenCalled();
+      expect(target.unstable_blitFromNativeTexture).not.toHaveBeenCalled();
       expect(target.writeBytes).toHaveBeenCalledTimes(1);
     });
 
@@ -443,7 +443,7 @@ describe('drawWithSkia', () => {
       const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
       drawWithSkia(() => {})(ctx);
 
-      expect(target.blitFromNativeTexture).toHaveBeenCalledTimes(1);
+      expect(target.unstable_blitFromNativeTexture).toHaveBeenCalledTimes(1);
       expect(target.writeBytes).not.toHaveBeenCalled();
     });
   });

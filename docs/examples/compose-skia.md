@@ -43,7 +43,7 @@ await Video.compose(
 
 ## Sampling the source frame
 
-On iOS, `ctx.source.bufferAddr` is a non-zero `bigint` — pass it to `Skia.Image.MakeImageFromNativeBuffer(bufferAddr)` for zero-copy sampling. On Android (today), use `Skia.Image.MakeImage(info, ctx.source.readBytes(), stride)` — the helper handles the platform check for you when you go through `drawWithSkia`.
+On iOS, `ctx.source.unstable_bufferAddr` is a non-zero `bigint` — pass it to `Skia.Image.MakeImageFromNativeBuffer(unstable_bufferAddr)` for zero-copy sampling. On Android (today), use `Skia.Image.MakeImage(info, ctx.source.readBytes(), stride)` — the helper handles the platform check for you when you go through `drawWithSkia`.
 
 ```ts
 drawFrame: drawWithSkia((canvas, ctx) => {

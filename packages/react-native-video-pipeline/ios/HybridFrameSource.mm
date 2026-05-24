@@ -22,7 +22,7 @@ void throwIfInvalid(bool invalidated) {
 
 }  // namespace
 
-uint64_t HybridFrameSource::getBufferAddr() {
+uint64_t HybridFrameSource::getUnstable_bufferAddr() {
   throwIfInvalid(invalidated_);
   // Skia's `MakeImageFromNativeBuffer` reinterprets this bigint as a
   // CVPixelBufferRef and reads format/dimensions off the wrapper itself —

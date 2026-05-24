@@ -2,13 +2,14 @@
 /// HybridFrameTarget.h — concrete iOS subclass of the Nitro-generated
 /// `HybridFrameTargetSpec`. Wraps a per-frame `CVPixelBuffer` and exposes
 /// the write paths the worklet calls: `writeBytes` (CPU memcpy into the
-/// locked base address) and `blitFromNativeTexture` (iOS GPU fast path via
-/// `RNVPMetalBlit` from T053b).
+/// locked base address) and `unstable_blitFromNativeTexture` (iOS GPU fast
+/// path via `RNVPMetalBlit` from T053b — `unstable_` prefix because the
+/// pointer ABI may change).
 ///
 /// Lifecycle — one instance per frame:
 ///   1. Native pump allocates an IOSurface-backed CVPixelBuffer, constructs
 ///      this wrapper, hands the shared_ptr to the worklet callback.
-///   2. Worklet writes via `writeBytes` or `blitFromNativeTexture`.
+///   2. Worklet writes via `writeBytes` or `unstable_blitFromNativeTexture`.
 ///   3. Native pump calls `invalidate` after the worklet returns — any
 ///      further JS-side method call throws `InvalidSpec` so a stale
 ///      reference can't corrupt a later frame's buffer.
@@ -35,14 +36,14 @@ class HybridFrameTarget : public HybridFrameTargetSpec {
       : HybridObject(TAG), pixelBuffer_(pixelBuffer), format_(format) {}
 
   // Properties
-  uint64_t getBufferAddr() override;
+  uint64_t getUnstable_bufferAddr() override;
   double getWidth() override;
   double getHeight() override;
   PixelFormat getFormat() override;
 
   // Methods
   void writeBytes(const std::shared_ptr<ArrayBuffer>& bytes) override;
-  void blitFromNativeTexture(uint64_t mtlTexturePtr) override;
+  void unstable_blitFromNativeTexture(uint64_t mtlTexturePtr) override;
 
   /// Mark the wrapper as stale; further calls from JS throw InvalidSpec.
   void invalidate() { invalidated_ = true; }

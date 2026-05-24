@@ -1,4 +1,3 @@
-import type { VideoRenderController } from './controller';
 import { CancelledError, InvalidSpecError } from './errors';
 import { getNativeVideoPipeline } from './native';
 import type {
@@ -11,12 +10,17 @@ import type {
   FrameSource,
   FrameTarget,
   MetadataSpec,
-  RenderOptions,
   ThumbnailOptions,
   VideoInfo,
 } from './nitro/VideoPipeline.nitro';
 import type { Overlay } from './overlay';
-import type { AudioSpec, DurationSpec, OutputSpec, SynthesizeOutputSpec } from './types';
+import type {
+  AudioSpec,
+  DurationSpec,
+  OutputSpec,
+  RenderOptions,
+  SynthesizeOutputSpec,
+} from './types';
 
 /**
  * Public render spec. Uses literal-discriminant facades from `./types` and
@@ -173,7 +177,7 @@ async function runCompose(
   const controller = options?.controller;
   if (controller !== undefined) {
     const durationMode = spec.duration?.mode ?? 'fixed';
-    (controller as VideoRenderController)._bind({
+    controller._bind({
       durationMode,
       finishRender: () => native.finishRender(token),
       cancelRender: () => native.cancelRender(token),
@@ -216,7 +220,7 @@ async function runCompose(
       height: target.height,
       finish: () => {
         if (controller !== undefined) {
-          (controller as VideoRenderController).finish();
+          controller.finish();
         }
       },
     };
@@ -230,7 +234,7 @@ async function runCompose(
 
   try {
     await native.renderCompose(spec, token, wrapped, options?.onProgress);
-    if (controller !== undefined) (controller as VideoRenderController)._markDone();
+    if (controller !== undefined) controller._markDone();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (
@@ -257,7 +261,7 @@ async function runRender(spec: VideoSpec, options: RenderOptions | undefined): P
   const controller = options?.controller;
   if (controller !== undefined) {
     const durationMode = spec.duration?.mode ?? 'fixed';
-    (controller as VideoRenderController)._bind({
+    controller._bind({
       durationMode,
       finishRender: () => native.finishRender(token),
       cancelRender: () => native.cancelRender(token),
@@ -279,7 +283,7 @@ async function runRender(spec: VideoSpec, options: RenderOptions | undefined): P
 
   try {
     await native.render(spec, token, options?.onProgress);
-    if (controller !== undefined) (controller as VideoRenderController)._markDone();
+    if (controller !== undefined) controller._markDone();
   } catch (err) {
     // Any of three paths surface a Cancelled rejection from native:
     //  - AbortSignal fired → JS called native.cancelRender, native throws.
@@ -309,7 +313,6 @@ function pickRenderOptions(opts: RenderOptions): RenderOptions {
   if (opts.signal !== undefined) out.signal = opts.signal;
   if (opts.controller !== undefined) out.controller = opts.controller;
   if (opts.onProgress !== undefined) out.onProgress = opts.onProgress;
-  if (opts.priority !== undefined) out.priority = opts.priority;
   return out;
 }
 
@@ -328,7 +331,7 @@ async function withCancellation(
   const token = nextRenderToken();
   const controller = options?.controller;
   if (controller !== undefined) {
-    (controller as VideoRenderController)._bind({
+    controller._bind({
       durationMode: 'fixed',
       finishRender: () => native.finishRender(token),
       cancelRender: () => native.cancelRender(token),
@@ -350,7 +353,7 @@ async function withCancellation(
 
   try {
     await invoke(token);
-    if (controller !== undefined) (controller as VideoRenderController)._markDone();
+    if (controller !== undefined) controller._markDone();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (

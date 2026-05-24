@@ -83,8 +83,8 @@ into the worklet without ever touching CPU pixels:
 3. `AHardwareBufferBridge.nativePtr(hwb)` resolves the JNI shim
    (`AHardwareBuffer_fromHardwareBuffer` via `dlsym`) and returns the
    raw `AHardwareBuffer*` as a `Long`. We expose it on `HybridFrameSource`
-   as `bufferAddr` (a `bigint` across Nitro). On the Skia side,
-   `Skia.Image.MakeImageFromNativeBuffer(BigInt.asUintN(64, bufferAddr))`
+   as `unstable_bufferAddr` (a `bigint` across Nitro). On the Skia side,
+   `Skia.Image.MakeImageFromNativeBuffer(BigInt.asUintN(64, unstable_bufferAddr))`
    wraps the AHardwareBuffer in an `SkImage` via
    `eglCreateImageKHR(EGL_NATIVE_BUFFER_ANDROID)` — Skia's EGLImage
    refcount keeps the buffer alive across the worklet body. After the
