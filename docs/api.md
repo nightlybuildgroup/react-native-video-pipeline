@@ -38,7 +38,7 @@ Start here. The decision tree is shallow:
   - Single-clip trim, optionally with a transform → `Video.trim`.
   - Single-clip horizontal/vertical flip → `Video.flip`.
   - Add a watermark image/text and/or write metadata onto one clip → `Video.stamp`.
-  - **Anything more complex** — multiple clips concatenated, multiple overlays, custom output codec/bitrate/dimensions, mixed transforms, audio replacement — → `Video.render` with a full `VideoSpec`.
+  - **Anything more complex** — multiple clips concatenated, multiple overlays, custom output codec/bitrate/dimensions, mixed transforms, audio replacement — → `Video.render` with a full `RenderSpec`.
 - **Yes**, I want a worklet drawing on every frame:
   - Drawing *on top of* one or more source clips → `Video.compose`.
   - Generating frames from scratch with no source → `Video.synthesize`.
@@ -148,7 +148,7 @@ type StampOptions = { outPath: string } & (
 ### `Video.render`
 
 ```ts
-Video.render(spec: VideoSpec, options?: RenderOptions): Promise<void>
+Video.render(spec: RenderSpec, options?: RenderOptions): Promise<void>
 ```
 
 The full-spec native editing entry point — multi-clip concat, multiple overlays, custom encoder settings, mixed per-clip transforms, audio replacement, all in one decode/encode pass. The native side picks the cheapest path based on `spec`:
@@ -156,12 +156,14 @@ The full-spec native editing entry point — multi-clip concat, multiple overlay
 - All-passthrough spec (no overlays, no transforms beyond rotation flags) → **remux**
 - Native-overlay or pixel-altering transform → **transcode**
 
+`RenderSpec` requires a non-empty `clips` array at compile time — synthesized renders go through [`Video.synthesize`](#videosynthesize) instead.
+
 `Video.render` does **not** do compose. To draw pixels from JS, use [`Video.compose`](#videocompose) (with source clips) or [`Video.synthesize`](#videosynthesize) (from scratch). See [Choosing a method](#choosing-a-method).
 
 ### `Video.compose`
 
 ```ts
-Video.compose(spec: VideoSpec, options: ComposeOptions): Promise<void>
+Video.compose(spec: ComposeSpec, options: ComposeOptions): Promise<void>
 ```
 
 Per-frame worklet drawing on top of source clips. The `options.drawFrame` callback runs on the Reanimated UI runtime once per output frame and writes pixels into a pre-allocated `FrameTarget`. The same `CVPixelBuffer` (iOS) / `AHardwareBuffer` (Android) is then handed to the encoder — no intermediate copy.
@@ -280,7 +282,7 @@ import {
 | `Cancelled`                | `CancelledError`                | `AbortSignal.abort()` or `VideoRenderController.abort()`            |
 | `IOError`                  | `IOError`                       | Read / write failed (path missing, permissions, disk full)          |
 | `EncoderFailure`           | `EncoderFailureError`           | Native encoder error not classifiable as one of the above           |
-| `InvalidSpec`              | `InvalidSpecError`              | The `VideoSpec` / options object failed JS-side or native-side validation |
+| `InvalidSpec`              | `InvalidSpecError`              | The spec or options object failed JS-side or native-side validation       |
 
 `errorForCode(code, options?)` constructs the right subclass for a code — useful when relaying an error across boundaries.
 
@@ -292,20 +294,31 @@ import {
 
 The full type list is exported from the package root and re-exported from the Nitro spec. The most load-bearing ones:
 
-### `VideoSpec`
+### `RenderSpec` and `ComposeSpec`
 
 ```ts
-interface VideoSpec {
+type NonEmptyArray<T> = [T, ...T[]];
+
+interface RenderSpec {
   output: OutputSpec;
-  clips?: Clip[];
+  clips: NonEmptyArray<Clip>;
   overlays?: Overlay[];     // Overlay.Image | Overlay.Text
   audio?: AudioSpec;
   metadata?: MetadataSpec;
-  duration?: DurationSpec;  // ignored when clips is non-empty
+}
+
+interface ComposeSpec {
+  output: OutputSpec;
+  clips: NonEmptyArray<Clip>;
+  overlays?: Overlay[];
+  audio?: AudioSpec;
+  metadata?: MetadataSpec;
 }
 ```
 
-Synthesized specs (no clips) must go through `Video.synthesize`, which uses the stricter `SynthesizeOutputSpec` below. `Video.render` rejects clip-less specs at runtime.
+Both facades require at least one clip at the type level — `Video.render` and `Video.compose` will not accept a clip-less spec. Synthesized renders (no clips, an explicit `duration`) go through `Video.synthesize` with its own [`SynthesizeOptions`](#videosynthesize) shape and the stricter `SynthesizeOutputSpec` below.
+
+`RenderSpec` and `ComposeSpec` are structurally identical today. They are kept as distinct types so consumer code documents which execution path it targets — the underlying engines (native remux/transcode vs. the worklet compose pump) differ, and their public surfaces are free to diverge.
 
 ### `OutputSpec` and `SynthesizeOutputSpec`
 
@@ -496,7 +509,7 @@ interface EncoderCaps {
 
 ## Routing rules
 
-Each top-level operation maps to one of three internal execution paths. The decision is made on the native side from the `VideoSpec` shape:
+Each top-level operation maps to one of three internal execution paths. The decision is made on the native side from the (loose) Nitro `VideoSpec` shape that crosses the boundary:
 
 | Path        | When                                                                                | Speed   |
 | ----------- | ----------------------------------------------------------------------------------- | ------- |

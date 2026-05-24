@@ -9,11 +9,14 @@
 
 import type { VideoRenderController } from './controller';
 import type {
+  Clip,
+  MetadataSpec,
   OutputSpec as NativeOutputSpec,
   Progress,
   TimeRange,
   WGS84Coordinate,
 } from './nitro/VideoPipeline.nitro';
+import type { Overlay } from './overlay';
 
 // ---------------------------------------------------------------------------
 // Duration
@@ -57,6 +60,51 @@ export type SynthesizeOutputSpec = OutputSpec & {
   height: number;
   fps: number;
 };
+
+// ---------------------------------------------------------------------------
+// Spec facades — narrower than the Nitro `VideoSpec` so the type system
+// distinguishes the three public entry points (`render`, `compose`,
+// `synthesize`) instead of relying on runtime rejection.
+// ---------------------------------------------------------------------------
+
+/**
+ * Compile-time non-empty array. Used by `RenderSpec.clips` and
+ * `ComposeSpec.clips` so callers cannot construct a clip-less spec at the
+ * type level — the equivalent runtime check used to reject those at
+ * `Video.render` / `Video.compose`. Built as a tuple so element access at
+ * index `0` is `T`, not `T | undefined` under `noUncheckedIndexedAccess`.
+ */
+export type NonEmptyArray<T> = [T, ...T[]];
+
+/**
+ * Public spec accepted by `Video.render`. Structurally compatible with the
+ * Nitro `VideoSpec` — every field is a subtype of the boundary type, so
+ * the wrapper hands it across without a runtime conversion. The shape
+ * intentionally omits `duration`: clip-backed renders always derive
+ * duration from `clips`, and synthesized renders go through
+ * `Video.synthesize` with a `SynthesizeOptions` instead.
+ */
+export interface RenderSpec {
+  output: OutputSpec;
+  clips: NonEmptyArray<Clip>;
+  overlays?: Overlay[];
+  audio?: AudioSpec;
+  metadata?: MetadataSpec;
+}
+
+/**
+ * Public spec accepted by `Video.compose`. Same shape as `RenderSpec` —
+ * separate name because the underlying execution path is the worklet
+ * compose-on-clip path, not native remux/transcode, and a future change
+ * to either may diverge their public types (e.g. compose-only knobs).
+ */
+export interface ComposeSpec {
+  output: OutputSpec;
+  clips: NonEmptyArray<Clip>;
+  overlays?: Overlay[];
+  audio?: AudioSpec;
+  metadata?: MetadataSpec;
+}
 
 // ---------------------------------------------------------------------------
 // Render options — public facade.

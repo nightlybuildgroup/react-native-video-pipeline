@@ -1,7 +1,6 @@
 import { CancelledError, InvalidSpecError } from './errors';
 import { getNativeVideoPipeline } from './native';
 import type {
-  Clip,
   ClipTransform,
   EncoderCaps,
   FlipAxis,
@@ -10,32 +9,20 @@ import type {
   FrameSource,
   FrameTarget,
   MetadataSpec,
+  VideoSpec as NativeVideoSpec,
   ThumbnailOptions,
   VideoInfo,
 } from './nitro/VideoPipeline.nitro';
 import type { Overlay } from './overlay';
 import type {
   AudioSpec,
+  ComposeSpec,
   DurationSpec,
   OutputSpec,
   RenderOptions,
+  RenderSpec,
   SynthesizeOutputSpec,
 } from './types';
-
-/**
- * Public render spec. Uses literal-discriminant facades from `./types` and
- * `./overlay` so consumer narrowing (`if (audio.mode === 'replace') …`)
- * works. The shape is a structural subtype of the Nitro `VideoSpec`, so
- * passing one across the Nitro boundary needs no runtime conversion.
- */
-export interface VideoSpec {
-  output: OutputSpec;
-  clips?: Clip[];
-  overlays?: Overlay[];
-  audio?: AudioSpec;
-  metadata?: MetadataSpec;
-  duration?: DurationSpec;
-}
 
 export interface TrimOptions extends RenderOptions {
   startSec: number;
@@ -119,7 +106,7 @@ function validateOutputForSynthesis(output: OutputSpec): void {
   if (output.fps === undefined) fail('synthesize: output.fps is required when there are no clips');
 }
 
-function validateAudio(audio: AudioSpec | undefined): void {
+function validateAudio(audio: NativeVideoSpec['audio']): void {
   if (audio?.mode === 'replace') {
     if (audio.replaceUri === undefined || audio.replaceUri === '') {
       fail("audio.mode='replace' requires a non-empty replaceUri");
@@ -127,24 +114,22 @@ function validateAudio(audio: AudioSpec | undefined): void {
   }
 }
 
-function isSynthesized(spec: VideoSpec): boolean {
-  return spec.clips === undefined || spec.clips.length === 0;
-}
-
-function validateRenderSpec(
-  spec: VideoSpec,
-  options: RenderOptions | undefined,
-  { allowSynthesized = false }: { allowSynthesized?: boolean } = {},
-): void {
+/**
+ * Internal validation for the loose Nitro `VideoSpec`. The public
+ * `RenderSpec` / `ComposeSpec` facades already encode "clips is non-empty"
+ * at the type level — this function only fires when:
+ *
+ *  - `Video.synthesize` constructs a clip-less spec internally (and supplies
+ *    its own `duration`), so we still verify the synth-output invariants.
+ *  - Audio is `'replace'` and `replaceUri` is empty at runtime despite the
+ *    discriminated-union type.
+ *  - An open-ended duration was set without a way to stop it.
+ */
+function validateNativeSpec(spec: NativeVideoSpec, options: RenderOptions | undefined): void {
   validateOutputPath('render', spec.output.path);
-  const synth = isSynthesized(spec);
 
+  const synth = spec.clips === undefined || spec.clips.length === 0;
   if (synth) {
-    if (!allowSynthesized) {
-      fail(
-        'render: synthesized specs (no clips) must go through Video.synthesize — Video.render only handles remux/transcode of source clips',
-      );
-    }
     if (spec.duration === undefined) {
       fail('render: synthesized specs require a duration');
     }
@@ -165,11 +150,11 @@ function validateRenderSpec(
 }
 
 async function runCompose(
-  spec: VideoSpec,
+  spec: NativeVideoSpec,
   drawFrame: FrameDrawer,
   options: RenderOptions | undefined,
 ): Promise<void> {
-  validateRenderSpec(spec, options, { allowSynthesized: true });
+  validateNativeSpec(spec, options);
 
   const native = getNativeVideoPipeline();
   const token = nextRenderToken();
@@ -252,8 +237,8 @@ async function runCompose(
   }
 }
 
-async function runRender(spec: VideoSpec, options: RenderOptions | undefined): Promise<void> {
-  validateRenderSpec(spec, options);
+async function runRender(spec: NativeVideoSpec, options: RenderOptions | undefined): Promise<void> {
+  validateNativeSpec(spec, options);
 
   const native = getNativeVideoPipeline();
   const token = nextRenderToken();
@@ -433,8 +418,8 @@ export const Video = {
     );
   },
 
-  /** Single source of truth for trim / transcode / compose — auto-routed natively. */
-  render(spec: VideoSpec, options?: RenderOptions): Promise<void> {
+  /** Single source of truth for native remux / transcode — auto-routed natively. */
+  render(spec: RenderSpec, options?: RenderOptions): Promise<void> {
     return runRender(spec, options);
   },
 
@@ -443,7 +428,7 @@ export const Video = {
    * the Nitro boundary as a callback and is invoked by the native pump per
    * frame with a live `FrameTarget` HybridObject.
    */
-  compose(spec: VideoSpec, options: ComposeOptions): Promise<void> {
+  compose(spec: ComposeSpec, options: ComposeOptions): Promise<void> {
     if (typeof options.drawFrame !== 'function') {
       fail('compose: drawFrame is required and must be a function');
     }
@@ -459,7 +444,7 @@ export const Video = {
     if (typeof options.drawFrame !== 'function') {
       fail('synthesize: drawFrame is required and must be a function');
     }
-    const spec: VideoSpec = {
+    const spec: NativeVideoSpec = {
       output: options.output,
       duration: options.duration,
       ...(options.audio !== undefined ? { audio: options.audio } : {}),

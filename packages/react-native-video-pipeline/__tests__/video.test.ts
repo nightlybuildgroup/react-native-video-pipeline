@@ -8,7 +8,8 @@ import type {
   VideoPipeline,
 } from '../src/nitro/VideoPipeline.nitro';
 import { Overlay } from '../src/overlay';
-import { Video, type VideoSpec } from '../src/video';
+import type { RenderSpec } from '../src/types';
+import { Video } from '../src/video';
 
 interface RenderCall {
   spec: unknown;
@@ -142,7 +143,7 @@ afterEach(() => {
   __setNativeVideoPipelineForTesting(undefined);
 });
 
-const baseClipSpec: VideoSpec = {
+const baseClipSpec: RenderSpec = {
   output: { path: '/tmp/out.mp4' },
   clips: [{ uri: 'in.mp4', sourceStart: 0, sourceDuration: 1, outputStart: 0 }],
 };
@@ -309,31 +310,21 @@ describe('Video.trim / flip / stamp', () => {
   });
 });
 
-describe('Video.render — validation (§9 routing rules)', () => {
-  it('rejects synthesized specs — those must go through Video.synthesize', async () => {
-    await expect(
-      Video.render({
-        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30 },
-        duration: { mode: 'fixed', seconds: 1 },
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
-  });
-
-  it('rejects duration set with non-empty clips', async () => {
-    await expect(
-      Video.render({
-        ...baseClipSpec,
-        duration: { mode: 'fixed', seconds: 1 },
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
-  });
+describe('Video.render — validation', () => {
+  // Synthesized specs and `duration` on clip-backed renders are rejected
+  // at compile time by the `RenderSpec` facade (clips: NonEmptyArray<Clip>,
+  // no `duration` field) — the corresponding runtime guards still exist in
+  // `validateNativeSpec` for the `Video.synthesize` internal path but are
+  // unreachable from the public `Video.render` surface.
 
   it("rejects audio.mode='replace' without replaceUri", async () => {
     await expect(
       Video.render({
         ...baseClipSpec,
-        // @ts-expect-error — AudioSpec requires replaceUri on 'replace' at compile time; this exercises the runtime guard.
-        audio: { mode: 'replace' },
+        // Cast through `unknown` — the public discriminated `AudioSpec`
+        // requires `replaceUri` on `'replace'` at compile time. The native
+        // boundary is structurally laxer, so we still defend at runtime.
+        audio: { mode: 'replace' } as unknown as RenderSpec['audio'],
       }),
     ).rejects.toBeInstanceOf(InvalidSpecError);
   });
