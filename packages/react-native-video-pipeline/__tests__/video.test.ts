@@ -145,7 +145,7 @@ afterEach(() => {
 
 const baseClipSpec: RenderSpec = {
   output: { path: '/tmp/out.mp4' },
-  clips: [{ uri: 'in.mp4', sourceStart: 0, sourceDuration: 1, outputStart: 0 }],
+  clips: [{ uri: 'in.mp4', startSec: 0, durationSec: 1 }],
 };
 
 describe('Video.info / thumbnail / capabilities', () => {
@@ -346,6 +346,56 @@ describe('Video.render — validation', () => {
     const passed = fake.renderCalls[0]?.spec as { overlays?: Array<{ kind: string }> };
     expect(passed.overlays).toHaveLength(1);
     expect(passed.overlays?.[0]?.kind).toBe('image');
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it('normalizes ClipInput concat shape into Nitro Clip with cumulative outputStart', async () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'a.mp4', startSec: 2, durationSec: 3 },
+        { uri: 'b.mp4', durationSec: 4 },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as {
+      clips: Array<{
+        uri: string;
+        sourceStart: number;
+        sourceDuration: number;
+        outputStart: number;
+      }>;
+    };
+    expect(passed.clips).toEqual([
+      { uri: 'a.mp4', sourceStart: 2, sourceDuration: 3, outputStart: 0 },
+      { uri: 'b.mp4', sourceStart: 0, sourceDuration: 4, outputStart: 3 },
+    ]);
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it('probes missing durationSec via Video.info and uses the remaining source duration', async () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [{ uri: 'probe.mp4', startSec: 0.5 }],
+    });
+    // Sync check on renderCalls is intentionally skipped — probing introduces
+    // microtasks (info() → Promise.all → .then(normalize) → runRender) before
+    // native.render fires. Yield a few ticks so the chain settles.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    expect(fake.infoCalls).toContain('probe.mp4');
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as {
+      clips: Array<{ sourceStart: number; sourceDuration: number; outputStart: number }>;
+    };
+    // The fake's info() returns durationSec: 1; startSec is 0.5 → remaining 0.5.
+    expect(passed.clips[0]).toEqual({
+      uri: 'probe.mp4',
+      sourceStart: 0.5,
+      sourceDuration: 0.5,
+      outputStart: 0,
+    });
     fake.renderCalls[0]?.resolve();
     await promise;
   });

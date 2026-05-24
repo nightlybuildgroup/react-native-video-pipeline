@@ -120,7 +120,7 @@ Video.trim(uri: string, options: TrimOptions): Promise<void>
 
 Trim a clip. Always remuxes (passthrough — no re-encode) when `options.transform` is `undefined` or rotation-only; transcodes when `transform.crop`, `flipH`, or `flipV` is present. See [Routing rules](#routing-rules).
 
-End-past-EOF requests (`startSec + durationSec > sourceDuration`) are silently clamped to the source's actual duration — matches `AVAssetExportSession` and ffmpeg leniency. This absorbs muxer-vs-encoder rounding drift (e.g. recorders that report a target duration ~10ms shorter than the bytes they actually wrote). Only `startSec` past EOF rejects with `InvalidSpec`.
+End-past-EOF requests (`startSec + durationSec > source duration`) are silently clamped to the source's actual duration — matches `AVAssetExportSession` and ffmpeg leniency. This absorbs muxer-vs-encoder rounding drift (e.g. recorders that report a target duration ~10ms shorter than the bytes they actually wrote). Only `startSec` past EOF rejects with `InvalidSpec`.
 
 ### `Video.flip`
 
@@ -301,7 +301,7 @@ type NonEmptyArray<T> = [T, ...T[]];
 
 interface RenderSpec {
   output: OutputSpec;
-  clips: NonEmptyArray<Clip>;
+  clips: NonEmptyArray<ClipInput>;
   overlays?: Overlay[];     // Overlay.Image | Overlay.Text
   audio?: AudioSpec;
   metadata?: MetadataSpec;
@@ -309,7 +309,7 @@ interface RenderSpec {
 
 interface ComposeSpec {
   output: OutputSpec;
-  clips: NonEmptyArray<Clip>;
+  clips: NonEmptyArray<ClipInput>;
   overlays?: Overlay[];
   audio?: AudioSpec;
   metadata?: MetadataSpec;
@@ -355,14 +355,13 @@ type SynthesizeOutputSpec = OutputSpec & {
 
 These semantics apply uniformly across iOS (AVFoundation) and Android (Media3 Transformer).
 
-### `Clip` and `ClipTransform`
+### `ClipInput` and `ClipTransform`
 
 ```ts
-interface Clip {
+interface ClipInput {
   uri: string;
-  sourceStart: number;     // seconds into source
-  sourceDuration: number;
-  outputStart: number;     // seconds on output timeline
+  startSec?: number;       // seconds into source; default 0
+  durationSec?: number;    // seconds of source to use; default "rest of source"
   transform?: ClipTransform;
 }
 
@@ -373,6 +372,12 @@ interface ClipTransform {
   crop?: { x: number; y: number; w: number; h: number }; // source-pixel coords
 }
 ```
+
+The timeline model is **concat-only**: clips are stitched end-to-end in array order. The first clip starts at output time `0`, the next picks up where it ended, and so on. There are no gaps and no overlaps; if you need either, render the segments separately and concat them.
+
+When `durationSec` is omitted, the library calls `Video.info(uri)` to probe the source duration and uses `sourceDuration - startSec`. Provide `durationSec` explicitly to skip the probe.
+
+The native Nitro boundary still receives `{ sourceStart, sourceDuration, outputStart }` — the library normalizes `ClipInput[]` into that shape before crossing. Direct consumers of the Nitro spec see the underlying form.
 
 A `transform` of rotation-only stays in remux. Any of `flipH`, `flipV`, or `crop` forces transcode.
 

@@ -23,7 +23,7 @@ import { Skia } from '@shopify/react-native-skia';
 await Video.compose(
   {
     output: { path: `${dir}/skia.mp4` },
-    clips: [{ uri: sourceUri, sourceStart: 0, sourceDuration: 5, outputStart: 0 }],
+    clips: [{ uri: sourceUri, startSec: 0, durationSec: 5 }],
   },
   {
     drawFrame: drawWithSkia((canvas, ctx) => {

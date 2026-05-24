@@ -1,6 +1,7 @@
 import { CancelledError, InvalidSpecError } from './errors';
 import { getNativeVideoPipeline } from './native';
 import type {
+  Clip,
   ClipTransform,
   EncoderCaps,
   FlipAxis,
@@ -16,8 +17,10 @@ import type {
 import type { Overlay } from './overlay';
 import type {
   AudioSpec,
+  ClipInput,
   ComposeSpec,
   DurationSpec,
+  NonEmptyArray,
   OutputSpec,
   RenderOptions,
   RenderSpec,
@@ -104,6 +107,78 @@ function validateOutputForSynthesis(output: OutputSpec): void {
   if (output.height === undefined)
     fail('synthesize: output.height is required when there are no clips');
   if (output.fps === undefined) fail('synthesize: output.fps is required when there are no clips');
+}
+
+/**
+ * Convert concat-style `ClipInput[]` into the Nitro boundary `Clip[]`
+ * shape (cumulative `outputStart`, default `sourceStart = 0`). Returns a
+ * `Clip[]` synchronously when every input supplies `durationSec`;
+ * otherwise returns a `Promise<Clip[]>` that probes the missing
+ * durations via `Video.info`. The sync path is preserved so callers that
+ * already know their slice durations don't pay a microtask penalty (and
+ * the existing test pattern that checks `native.render` was invoked
+ * before awaiting the return promise keeps working).
+ */
+function normalizeClips(
+  inputs: NonEmptyArray<ClipInput>,
+): NonEmptyArray<Clip> | Promise<NonEmptyArray<Clip>> {
+  const needsProbe = inputs.some((c) => c.durationSec === undefined);
+  if (!needsProbe) {
+    return finalizeClips(
+      inputs.map((c) => ({ input: c, sourceDuration: c.durationSec as number })),
+    );
+  }
+  const native = getNativeVideoPipeline();
+  return Promise.all(
+    inputs.map(async (c) => {
+      if (c.durationSec !== undefined) return { input: c, sourceDuration: c.durationSec };
+      const info = await native.info(c.uri);
+      const sourceStart = c.startSec ?? 0;
+      const remaining = info.durationSec - sourceStart;
+      if (!(remaining > 0)) {
+        fail(
+          `clip: probed source duration ${info.durationSec}s is <= startSec ${sourceStart}s — provide an explicit durationSec`,
+          { uri: c.uri, sourceStart, sourceDurationSec: info.durationSec },
+        );
+      }
+      return { input: c, sourceDuration: remaining };
+    }),
+  ).then(finalizeClips);
+}
+
+function finalizeClips(
+  resolved: ReadonlyArray<{ input: ClipInput; sourceDuration: number }>,
+): NonEmptyArray<Clip> {
+  const out: Clip[] = [];
+  let outputStart = 0;
+  for (const { input, sourceDuration } of resolved) {
+    const sourceStart = input.startSec ?? 0;
+    requireNonNeg('clip.startSec', sourceStart);
+    requirePositive('clip.durationSec', sourceDuration);
+    out.push({
+      uri: input.uri,
+      sourceStart,
+      sourceDuration,
+      outputStart,
+      ...(input.transform !== undefined ? { transform: input.transform } : {}),
+    });
+    outputStart += sourceDuration;
+  }
+  // `inputs` came in as `NonEmptyArray<ClipInput>`, so `out` has length >= 1.
+  return out as NonEmptyArray<Clip>;
+}
+
+function buildNativeSpecFromClipped(
+  spec: RenderSpec | ComposeSpec,
+  clips: NonEmptyArray<Clip>,
+): NativeVideoSpec {
+  return {
+    output: spec.output,
+    clips,
+    ...(spec.overlays !== undefined ? { overlays: spec.overlays } : {}),
+    ...(spec.audio !== undefined ? { audio: spec.audio } : {}),
+    ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
+  };
 }
 
 function validateAudio(audio: NativeVideoSpec['audio']): void {
@@ -420,7 +495,11 @@ export const Video = {
 
   /** Single source of truth for native remux / transcode — auto-routed natively. */
   render(spec: RenderSpec, options?: RenderOptions): Promise<void> {
-    return runRender(spec, options);
+    const clips = normalizeClips(spec.clips);
+    if (clips instanceof Promise) {
+      return clips.then((c) => runRender(buildNativeSpecFromClipped(spec, c), options));
+    }
+    return runRender(buildNativeSpecFromClipped(spec, clips), options);
   },
 
   /**
@@ -432,7 +511,14 @@ export const Video = {
     if (typeof options.drawFrame !== 'function') {
       fail('compose: drawFrame is required and must be a function');
     }
-    return runCompose(spec, options.drawFrame, pickRenderOptions(options));
+    const composeOpts = pickRenderOptions(options);
+    const clips = normalizeClips(spec.clips);
+    if (clips instanceof Promise) {
+      return clips.then((c) =>
+        runCompose(buildNativeSpecFromClipped(spec, c), options.drawFrame, composeOpts),
+      );
+    }
+    return runCompose(buildNativeSpecFromClipped(spec, clips), options.drawFrame, composeOpts);
   },
 
   /**

@@ -9,7 +9,7 @@
 
 import type { VideoRenderController } from './controller';
 import type {
-  Clip,
+  ClipTransform,
   MetadataSpec,
   OutputSpec as NativeOutputSpec,
   Progress,
@@ -77,16 +77,37 @@ export type SynthesizeOutputSpec = OutputSpec & {
 export type NonEmptyArray<T> = [T, ...T[]];
 
 /**
- * Public spec accepted by `Video.render`. Structurally compatible with the
- * Nitro `VideoSpec` — every field is a subtype of the boundary type, so
- * the wrapper hands it across without a runtime conversion. The shape
- * intentionally omits `duration`: clip-backed renders always derive
- * duration from `clips`, and synthesized renders go through
- * `Video.synthesize` with a `SynthesizeOptions` instead.
+ * Concat-style clip input. Clips are stitched end-to-end in array order:
+ * the first clip starts at output time `0`, the next picks up where the
+ * previous one ended, and so on. The library normalizes `ClipInput[]`
+ * into the Nitro boundary shape (`sourceStart`, `sourceDuration`,
+ * `outputStart`) at the JS layer.
+ *
+ * - `startSec` defaults to `0` — start at the beginning of the source.
+ * - `durationSec` defaults to "remaining source duration", which the
+ *   library resolves by probing the source via `Video.info`. Provide it
+ *   explicitly to skip the probe.
+ */
+export interface ClipInput {
+  uri: string;
+  /** Seconds into the source. Defaults to `0`. */
+  startSec?: number;
+  /** Seconds of source to include. Defaults to "rest of source". */
+  durationSec?: number;
+  transform?: ClipTransform;
+}
+
+/**
+ * Public spec accepted by `Video.render`. The library normalizes
+ * `clips` (concat-style `ClipInput`s) into the Nitro `VideoSpec` shape
+ * before crossing the boundary. The shape intentionally omits
+ * `duration`: clip-backed renders always derive duration from `clips`,
+ * and synthesized renders go through `Video.synthesize` with a
+ * `SynthesizeOptions` instead.
  */
 export interface RenderSpec {
   output: OutputSpec;
-  clips: NonEmptyArray<Clip>;
+  clips: NonEmptyArray<ClipInput>;
   overlays?: Overlay[];
   audio?: AudioSpec;
   metadata?: MetadataSpec;
@@ -100,7 +121,7 @@ export interface RenderSpec {
  */
 export interface ComposeSpec {
   output: OutputSpec;
-  clips: NonEmptyArray<Clip>;
+  clips: NonEmptyArray<ClipInput>;
   overlays?: Overlay[];
   audio?: AudioSpec;
   metadata?: MetadataSpec;

@@ -443,7 +443,8 @@ function App(): React.JSX.Element {
       await Video.compose(
         {
           output: { path: outPath },
-          clips: [{ uri: sourceUri, sourceStart: 0, sourceDuration: 0, outputStart: 0 }],
+          // No `durationSec` → library probes and uses the rest of the source.
+          clips: [{ uri: sourceUri, startSec: 0 }],
           metadata: {
             software: 'bare-example/rnvp v0.1',
             custom: {
@@ -538,18 +539,8 @@ function App(): React.JSX.Element {
         {
           output: { path: concatPath },
           clips: [
-            {
-              uri: `file://${srcPath}`,
-              sourceStart: 0,
-              sourceDuration: 2.0,
-              outputStart: 0,
-            },
-            {
-              uri: `file://${srcPath}`,
-              sourceStart: 0,
-              sourceDuration: 2.0,
-              outputStart: 2.0,
-            },
+            { uri: `file://${srcPath}`, startSec: 0, durationSec: 2.0 },
+            { uri: `file://${srcPath}`, startSec: 0, durationSec: 2.0 },
           ],
         },
         {},

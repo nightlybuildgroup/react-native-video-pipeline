@@ -15,7 +15,7 @@ await Video.compose(
   {
     output: { path: `${dir}/composed.mp4` },
     clips: [
-      { uri: sourceUri, sourceStart: 0, sourceDuration: 5, outputStart: 0 },
+      { uri: sourceUri, startSec: 0, durationSec: 5 },
     ],
   },
   {
@@ -60,7 +60,7 @@ Native overlays composite **under** your `drawFrame` output. Useful for "Skia ov
 await Video.compose(
   {
     output: { path: `${dir}/composed.mp4` },
-    clips: [{ uri: sourceUri, sourceStart: 0, sourceDuration: 5, outputStart: 0 }],
+    clips: [{ uri: sourceUri, startSec: 0, durationSec: 5 }],
     overlays: [
       Overlay.Image({ uri: logoUri, anchor: 'br', size: { w: 0.2 } }),
     ],
