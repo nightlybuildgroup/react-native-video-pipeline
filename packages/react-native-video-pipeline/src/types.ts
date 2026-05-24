@@ -44,10 +44,30 @@ export type AudioSpec =
   | { mode: 'replace'; replaceUri: string };
 
 // ---------------------------------------------------------------------------
-// Size — at least one of `w`/`h` required.
+// Size — at least one of `w`/`h` required. Pixel-only; used by
+// `ThumbnailOptions.resizeTo`. Overlay sizing uses the richer
+// `OverlaySize` (tagged px/ratio) below.
 // ---------------------------------------------------------------------------
 
 export type Size = { w: number; h?: number } | { w?: number; h: number };
+
+// ---------------------------------------------------------------------------
+// OverlaySize — tagged units for ImageOverlay sizing. Each axis carries
+// an explicit unit so callers don't have to guess whether the library
+// reads numbers as pixels or as ratios.
+// ---------------------------------------------------------------------------
+
+/** One dimension expressed as either absolute output pixels or a fraction
+ *  of the corresponding output canvas dimension. */
+export type Dim = { unit: 'px'; value: number } | { unit: 'ratio'; value: number };
+
+/**
+ * Width/height for `Overlay.Image.size`. Public-facade keys are
+ * `width`/`height` (matching CSS-style vocabulary); the builder in
+ * `./overlay` normalizes these into the Nitro `{ w, h }` boundary shape.
+ * At least one axis must be provided.
+ */
+export type OverlaySize = { width: Dim; height?: Dim } | { width?: Dim; height: Dim };
 
 // ---------------------------------------------------------------------------
 // Output — stricter variant for synthesize where w/h/fps are mandatory.

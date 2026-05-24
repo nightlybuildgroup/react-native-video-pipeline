@@ -62,7 +62,11 @@ await Video.compose(
     output: { path: `${dir}/composed.mp4` },
     clips: [{ uri: sourceUri, startSec: 0, durationSec: 5 }],
     overlays: [
-      Overlay.Image({ uri: logoUri, anchor: 'br', size: { w: 0.2 } }),
+      Overlay.Image({
+        uri: logoUri,
+        anchor: 'br',
+        size: { width: { unit: 'ratio', value: 0.2 } },
+      }),
     ],
   },
   {

@@ -208,7 +208,7 @@ describe('Video.trim / flip / stamp', () => {
       watermark: Overlay.Image({
         uri: 'file:///logo.png',
         anchor: 'br',
-        size: { w: 120 },
+        size: { width: { unit: 'px', value: 120 } },
       }),
       metadata: { location: { latitude: 52.5, longitude: 13.4 }, software: 'MyApp 1.0' },
     });
@@ -288,7 +288,11 @@ describe('Video.trim / flip / stamp', () => {
     const onProgress = jest.fn();
     await Video.stamp('in.mp4', {
       outPath: '/tmp/out.mp4',
-      watermark: Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.2 } }),
+      watermark: Overlay.Image({
+        uri: 'logo.png',
+        anchor: 'tl',
+        size: { width: { unit: 'ratio', value: 0.2 } },
+      }),
       onProgress,
     });
     expect(fake.stampCalls).toHaveLength(1);
@@ -340,7 +344,13 @@ describe('Video.render — validation', () => {
   it('forwards native overlays unchanged to native', async () => {
     const promise = Video.render({
       ...baseClipSpec,
-      overlays: [Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.2 } })],
+      overlays: [
+        Overlay.Image({
+          uri: 'logo.png',
+          anchor: 'tl',
+          size: { width: { unit: 'ratio', value: 0.2 } },
+        }),
+      ],
     });
     expect(fake.renderCalls).toHaveLength(1);
     const passed = fake.renderCalls[0]?.spec as { overlays?: Array<{ kind: string }> };

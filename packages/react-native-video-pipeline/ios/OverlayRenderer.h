@@ -55,16 +55,23 @@ typedef NS_ENUM(NSInteger, RNVPTextAlignment) {
   RNVPTextAlignmentRight = 2,
 };
 
-/// One static image overlay. All parameters correspond 1:1 to the JS
-/// @c ImageOverlay type; the 0.0 sentinel on size fields matches the JS
-/// "missing dimension" contract (at least one must be > 0).
+/// One static image overlay. Parameters correspond 1:1 to the JS
+/// @c ImageOverlay type. The @c hasSizeW / @c hasSizeH flags carry the
+/// "missing dimension scales proportionally" contract — at least one must
+/// be YES. Each provided dimension is tagged @c sizeWIsRatio /
+/// @c sizeHIsRatio; ratio values are resolved against the renderer's
+/// @c targetSize at apply time, so the bridge does not need to know the
+/// output canvas dimensions.
 @interface RNVPImageOverlay : NSObject
 @property(nonatomic, readonly) NSURL *imageURL;
 @property(nonatomic, readonly) double anchorX;
 @property(nonatomic, readonly) double anchorY;
-/// 0.0 → scale proportionally from the other dimension.
-@property(nonatomic, readonly) double sizeW;
-@property(nonatomic, readonly) double sizeH;
+@property(nonatomic, readonly) BOOL hasSizeW;
+@property(nonatomic, readonly) BOOL sizeWIsRatio;
+@property(nonatomic, readonly) double sizeWValue;
+@property(nonatomic, readonly) BOOL hasSizeH;
+@property(nonatomic, readonly) BOOL sizeHIsRatio;
+@property(nonatomic, readonly) double sizeHValue;
 /// 1.0 default; clamped to [0, 1] at render time.
 @property(nonatomic, readonly) double opacity;
 @property(nonatomic, readonly) BOOL hasTimeRange;
@@ -74,8 +81,12 @@ typedef NS_ENUM(NSInteger, RNVPTextAlignment) {
 - (instancetype)initWithImageURL:(NSURL *)imageURL
                          anchorX:(double)anchorX
                          anchorY:(double)anchorY
-                           sizeW:(double)sizeW
-                           sizeH:(double)sizeH
+                        hasSizeW:(BOOL)hasSizeW
+                    sizeWIsRatio:(BOOL)sizeWIsRatio
+                      sizeWValue:(double)sizeWValue
+                        hasSizeH:(BOOL)hasSizeH
+                    sizeHIsRatio:(BOOL)sizeHIsRatio
+                      sizeHValue:(double)sizeHValue
                          opacity:(double)opacity
                     hasTimeRange:(BOOL)hasTimeRange
                         startSec:(double)startSec

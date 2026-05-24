@@ -221,9 +221,32 @@ export interface ImageOverlay {
   kind: OverlayKind;
   uri: string;
   anchor: Anchor;
-  size: Size;
+  size: ImageOverlaySize;
   opacity?: number;
   timeRange?: TimeRange;
+}
+
+/**
+ * Tagged dimension used by overlay sizing. `'px'` is absolute output
+ * pixels; `'ratio'` is a fraction of the corresponding output canvas
+ * dimension (e.g. `{ unit: 'ratio', value: 0.15 }` on `w` means 15% of
+ * the output frame width). Native resolves ratio → px at apply time so
+ * inherited / synthesized output dimensions are honored.
+ */
+export type SizeUnit = 'px' | 'ratio';
+
+export interface Dim {
+  unit: SizeUnit;
+  value: number;
+}
+
+/**
+ * At least one of `w`/`h` must be provided; the missing axis scales
+ * proportionally from the overlay image's natural aspect ratio.
+ */
+export interface ImageOverlaySize {
+  w?: Dim;
+  h?: Dim;
 }
 
 export interface TextOverlay {

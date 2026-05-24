@@ -246,7 +246,7 @@ function describeShape(raw: unknown): string {
   if (typeof raw !== 'object') return typeof raw;
   // List the keys so a future shape-drift surfaces in the warning message.
   // biome-ignore lint/suspicious/noExplicitAny: TextureInfo is untyped — Object.keys is the diagnostic primitive here.
-  return 'object{' + Object.keys(raw as any).join(',') + '}';
+  return `object{${Object.keys(raw as any).join(',')}}`;
 }
 
 /**

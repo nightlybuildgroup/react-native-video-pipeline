@@ -374,8 +374,12 @@ typedef NS_ENUM(NSInteger, RNVPTextAlignment) {
 @property(nonatomic, readonly) NSURL *imageURL;
 @property(nonatomic, readonly) double anchorX;
 @property(nonatomic, readonly) double anchorY;
-@property(nonatomic, readonly) double sizeW;
-@property(nonatomic, readonly) double sizeH;
+@property(nonatomic, readonly) BOOL hasSizeW;
+@property(nonatomic, readonly) BOOL sizeWIsRatio;
+@property(nonatomic, readonly) double sizeWValue;
+@property(nonatomic, readonly) BOOL hasSizeH;
+@property(nonatomic, readonly) BOOL sizeHIsRatio;
+@property(nonatomic, readonly) double sizeHValue;
 @property(nonatomic, readonly) double opacity;
 @property(nonatomic, readonly) BOOL hasTimeRange;
 @property(nonatomic, readonly) double startSec;
@@ -383,8 +387,12 @@ typedef NS_ENUM(NSInteger, RNVPTextAlignment) {
 - (instancetype)initWithImageURL:(NSURL *)imageURL
                          anchorX:(double)anchorX
                          anchorY:(double)anchorY
-                           sizeW:(double)sizeW
-                           sizeH:(double)sizeH
+                        hasSizeW:(BOOL)hasSizeW
+                    sizeWIsRatio:(BOOL)sizeWIsRatio
+                      sizeWValue:(double)sizeWValue
+                        hasSizeH:(BOOL)hasSizeH
+                    sizeHIsRatio:(BOOL)sizeHIsRatio
+                      sizeHValue:(double)sizeHValue
                          opacity:(double)opacity
                     hasTimeRange:(BOOL)hasTimeRange
                         startSec:(double)startSec
@@ -3796,8 +3804,12 @@ static BOOL withFirstDecodedFrame(NSString *videoPath,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:20.0
-                 sizeH:20.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:20.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:20.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -3909,8 +3921,12 @@ static BOOL withFirstDecodedFrame(NSString *videoPath,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:20.0
-                 sizeH:20.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:20.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:20.0
                opacity:1.0
           hasTimeRange:YES
               startSec:0.3
@@ -3996,8 +4012,12 @@ static BOOL withFirstDecodedFrame(NSString *videoPath,
       initWithImageURL:[NSURL fileURLWithPath:ghostOverlay]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:20.0
-                 sizeH:20.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:20.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:20.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -4270,8 +4290,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:pngPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:40.0
-                 sizeH:40.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:40.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:40.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -4362,8 +4386,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:20.0
-                 sizeH:20.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:20.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:20.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -4544,8 +4572,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:pngPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:16.0
-                 sizeH:16.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:16.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:16.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -5135,8 +5167,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:20.0
-                 sizeH:20.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:20.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:20.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -5228,8 +5264,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.0
                anchorY:0.0
-                 sizeW:8.0
-                 sizeH:8.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:8.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:8.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -5322,8 +5362,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.0
                anchorY:0.0
-                 sizeW:4.0
-                 sizeH:4.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:4.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:4.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -5414,8 +5458,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.0
                anchorY:0.0
-                 sizeW:8.0
-                 sizeH:8.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:8.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:8.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0
@@ -5532,8 +5580,12 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
       initWithImageURL:[NSURL fileURLWithPath:overlayPath]
                anchorX:0.5
                anchorY:0.5
-                 sizeW:64.0
-                 sizeH:64.0
+                 hasSizeW:YES
+                 sizeWIsRatio:NO
+                 sizeWValue:64.0
+                 hasSizeH:YES
+                 sizeHIsRatio:NO
+                 sizeHValue:64.0
                opacity:1.0
           hasTimeRange:NO
               startSec:0.0

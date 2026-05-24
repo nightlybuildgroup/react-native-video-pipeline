@@ -31,7 +31,8 @@ await Video.stamp(sourceUri, {
   watermark: Overlay.Image({
     uri: logoUri,
     anchor: 'br',                  // bottom-right
-    size: { w: 0.2 },              // 20% of output width, height scales proportionally
+    // 20% of output width, height scales proportionally.
+    size: { width: { unit: 'ratio', value: 0.2 } },
     opacity: 0.85,
     timeRange: { startSec: 0, endSec: 5 }, // optional; omit for full duration
   }),
@@ -66,7 +67,11 @@ Text is rendered natively (`CATextLayer` on iOS, Media3 `TextOverlay` on Android
 ```ts
 await Video.stamp(sourceUri, {
   outPath: `${dir}/wm-and-meta.mp4`,
-  watermark: Overlay.Image({ uri: logoUri, anchor: 'br', size: { w: 0.15 } }),
+  watermark: Overlay.Image({
+    uri: logoUri,
+    anchor: 'br',
+    size: { width: { unit: 'ratio', value: 0.15 } },
+  }),
   metadata: { software: 'MyApp 1.4' },
 });
 ```

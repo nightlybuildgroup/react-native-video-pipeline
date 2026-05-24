@@ -680,8 +680,14 @@ internal object Transcoder {
 
     private fun drawRgbaOverlay(overlay: ImageOverlay, overlayIndex: Int) {
       val (bmpW, bmpH) = overlaySizes[overlayIndex]
-      val sizeW = overlay.size.w ?: 0.0
-      val sizeH = overlay.size.h ?: 0.0
+      // Resolve unit-tagged dims against the output canvas. Ratio values
+      // are fractions of the corresponding canvas axis.
+      val sizeW = overlay.size.w?.let {
+        if (it.unit == SizeUnit.RATIO) it.value * targetWidth else it.value
+      } ?: 0.0
+      val sizeH = overlay.size.h?.let {
+        if (it.unit == SizeUnit.RATIO) it.value * targetHeight else it.value
+      } ?: 0.0
       val (outW, outH) = resolveOverlayPixelSize(sizeW, sizeH, bmpW, bmpH)
       if (outW <= 0.0 || outH <= 0.0) return
       val anchorX = overlay.anchor.x

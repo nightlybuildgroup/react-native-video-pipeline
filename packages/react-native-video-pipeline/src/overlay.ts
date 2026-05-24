@@ -2,14 +2,15 @@ import type {
   AnchorPoint,
   AnchorPreset,
   ImageOverlay as NativeImageOverlay,
+  ImageOverlaySize as NativeImageOverlaySize,
   TextOverlay as NativeTextOverlay,
   TextStyle,
 } from './nitro/VideoPipeline.nitro';
-import type { Size, TimeRange } from './types';
+import type { OverlaySize, TimeRange } from './types';
 
 export type ImageOverlay = Omit<NativeImageOverlay, 'kind' | 'size'> & {
   kind: 'image';
-  size: Size;
+  size: NativeImageOverlaySize;
 };
 export type TextOverlay = Omit<NativeTextOverlay, 'kind'> & { kind: 'text' };
 
@@ -33,7 +34,7 @@ function resolveAnchor(anchor: AnchorPreset | AnchorPoint): AnchorPoint {
 export interface ImageOverlayInput {
   uri: string;
   anchor: AnchorPreset | AnchorPoint;
-  size: Size;
+  size: OverlaySize;
   opacity?: number;
   timeRange?: TimeRange;
 }
@@ -50,9 +51,18 @@ function image(input: ImageOverlayInput): ImageOverlay {
     kind: 'image',
     uri: input.uri,
     anchor: resolveAnchor(input.anchor),
-    size: input.size,
+    size: normalizeOverlaySize(input.size),
     ...(input.opacity !== undefined ? { opacity: input.opacity } : {}),
     ...(input.timeRange !== undefined ? { timeRange: input.timeRange } : {}),
+  };
+}
+
+function normalizeOverlaySize(size: OverlaySize): NativeImageOverlaySize {
+  return {
+    ...(size.width !== undefined ? { w: { unit: size.width.unit, value: size.width.value } } : {}),
+    ...(size.height !== undefined
+      ? { h: { unit: size.height.unit, value: size.height.value } }
+      : {}),
   };
 }
 

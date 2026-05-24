@@ -356,8 +356,12 @@ CIImage *rasterizeTextOverlay(RNVPTextOverlay *overlay,
 - (instancetype)initWithImageURL:(NSURL *)imageURL
                          anchorX:(double)anchorX
                          anchorY:(double)anchorY
-                           sizeW:(double)sizeW
-                           sizeH:(double)sizeH
+                        hasSizeW:(BOOL)hasSizeW
+                    sizeWIsRatio:(BOOL)sizeWIsRatio
+                      sizeWValue:(double)sizeWValue
+                        hasSizeH:(BOOL)hasSizeH
+                    sizeHIsRatio:(BOOL)sizeHIsRatio
+                      sizeHValue:(double)sizeHValue
                          opacity:(double)opacity
                     hasTimeRange:(BOOL)hasTimeRange
                         startSec:(double)startSec
@@ -366,8 +370,12 @@ CIImage *rasterizeTextOverlay(RNVPTextOverlay *overlay,
     _imageURL = imageURL;
     _anchorX = anchorX;
     _anchorY = anchorY;
-    _sizeW = sizeW;
-    _sizeH = sizeH;
+    _hasSizeW = hasSizeW;
+    _sizeWIsRatio = sizeWIsRatio;
+    _sizeWValue = sizeWValue;
+    _hasSizeH = hasSizeH;
+    _sizeHIsRatio = sizeHIsRatio;
+    _sizeHValue = sizeHValue;
     _opacity = opacity;
     _hasTimeRange = hasTimeRange;
     _startSec = startSec;
@@ -472,13 +480,26 @@ CIImage *positionAtAnchor(CIImage *overlayImage, double anchorX,
 
       if ([entry isKindOfClass:[RNVPImageOverlay class]]) {
         RNVPImageOverlay *overlay = (RNVPImageOverlay *)entry;
-        if (!(overlay.sizeW > 0.0) && !(overlay.sizeH > 0.0)) {
+        // Resolve unit-tagged dims against the output canvas. Ratio
+        // values multiply the corresponding canvas axis; px values are
+        // already in output pixels.
+        const double sizeW = overlay.hasSizeW
+            ? (overlay.sizeWIsRatio
+                   ? overlay.sizeWValue * targetSize.width
+                   : overlay.sizeWValue)
+            : 0.0;
+        const double sizeH = overlay.hasSizeH
+            ? (overlay.sizeHIsRatio
+                   ? overlay.sizeHValue * targetSize.height
+                   : overlay.sizeHValue)
+            : 0.0;
+        if (!(sizeW > 0.0) && !(sizeH > 0.0)) {
           if (error) {
             *error = makeError(
                 RNVPOverlayRendererErrorCodeInvalidSpec,
                 [NSString stringWithFormat:
                               @"overlay[%lu].size requires at least one of "
-                              @"{w, h} > 0",
+                              @"{width, height} > 0",
                               (unsigned long)i]);
           }
           return nil;
@@ -498,7 +519,7 @@ CIImage *positionAtAnchor(CIImage *overlayImage, double anchorX,
 
         const CGRect naturalExtent = raw.extent;
         const CGSize scaled = resolveTargetImageSize(
-            overlay.sizeW, overlay.sizeH, naturalExtent.size.width,
+            sizeW, sizeH, naturalExtent.size.width,
             naturalExtent.size.height);
         if (!(scaled.width > 0.0) || !(scaled.height > 0.0)) {
           if (error) {
@@ -508,8 +529,7 @@ CIImage *positionAtAnchor(CIImage *overlayImage, double anchorX,
                               @"overlay[%lu] resolved to a zero-area size "
                               @"(source %gx%g, requested %g×%g)",
                               (unsigned long)i, naturalExtent.size.width,
-                              naturalExtent.size.height, overlay.sizeW,
-                              overlay.sizeH]);
+                              naturalExtent.size.height, sizeW, sizeH]);
           }
           return nil;
         }

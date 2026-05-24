@@ -426,8 +426,12 @@ void appendNativeOverlay(
   if (std::holds_alternative<ImageOverlay>(overlay)) {
     const auto& img = std::get<ImageOverlay>(overlay);
     NSURL* imageURL = urlFromUri(img.uri);
-    const double sizeW = img.size.w.has_value() ? *img.size.w : 0.0;
-    const double sizeH = img.size.h.has_value() ? *img.size.h : 0.0;
+    const BOOL hasSizeW = img.size.w.has_value();
+    const BOOL sizeWIsRatio = hasSizeW && img.size.w->unit == SizeUnit::RATIO;
+    const double sizeWValue = hasSizeW ? img.size.w->value : 0.0;
+    const BOOL hasSizeH = img.size.h.has_value();
+    const BOOL sizeHIsRatio = hasSizeH && img.size.h->unit == SizeUnit::RATIO;
+    const double sizeHValue = hasSizeH ? img.size.h->value : 0.0;
     const double opacity = img.opacity.has_value() ? *img.opacity : 1.0;
     BOOL hasTimeRange = NO;
     double startSec = 0.0;
@@ -440,8 +444,12 @@ void appendNativeOverlay(
     [out addObject:[[RNVPImageOverlay alloc] initWithImageURL:imageURL
                                                       anchorX:img.anchor.x
                                                       anchorY:img.anchor.y
-                                                        sizeW:sizeW
-                                                        sizeH:sizeH
+                                                     hasSizeW:hasSizeW
+                                                 sizeWIsRatio:sizeWIsRatio
+                                                   sizeWValue:sizeWValue
+                                                     hasSizeH:hasSizeH
+                                                 sizeHIsRatio:sizeHIsRatio
+                                                   sizeHValue:sizeHValue
                                                       opacity:opacity
                                                  hasTimeRange:hasTimeRange
                                                      startSec:startSec

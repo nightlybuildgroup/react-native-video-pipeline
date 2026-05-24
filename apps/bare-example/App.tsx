@@ -33,7 +33,7 @@ import {
   View,
 } from 'react-native';
 
-import { bootstrapPatternRGBA, drawWithRGBA, Video } from 'react-native-video-pipeline';
+import { bootstrapPatternRGBA, drawWithRGBA, Overlay, Video } from 'react-native-video-pipeline';
 import { drawWithSkia } from 'react-native-video-pipeline-skia';
 
 const SKIA_LOAD_SIGNATURE =
@@ -270,12 +270,11 @@ function App(): React.JSX.Element {
       const t0 = Date.now();
       await Video.stamp(`file://${src}`, {
         outPath,
-        watermark: {
-          kind: 'image',
+        watermark: Overlay.Image({
           uri: `file://${watermark}`,
-          anchor: { x: 0.5, y: 0.5 },
-          size: { w: 40, h: 40 },
-        },
+          anchor: 'center',
+          size: { width: { unit: 'px', value: 40 }, height: { unit: 'px', value: 40 } },
+        }),
         metadata: { software: 'rnvp-stamp-smoke' },
       });
       const elapsed = Date.now() - t0;

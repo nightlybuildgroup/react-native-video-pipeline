@@ -58,7 +58,11 @@ await Video.render({
     { uri: 'outro.mp4', startSec: 0, durationSec: 3 },
   ],
   overlays: [
-    Overlay.Image({ uri: 'logo.png', anchor: 'tl', size: { w: 0.15 } }),
+    Overlay.Image({
+      uri: 'logo.png',
+      anchor: 'tl',
+      size: { width: { unit: 'ratio', value: 0.15 } }, // 15% of output width
+    }),
     Overlay.Text({ text: '@username', anchor: 'br', style: { fontSize: 24, color: '#fff' } }),
   ],
   audio: { mode: 'replace', replaceUri: 'soundtrack.m4a' },
@@ -456,7 +460,26 @@ Discriminated by `mode`, so `replaceUri` is required at compile time when (and o
 type Size = { w: number; h?: number } | { w?: number; h: number };
 ```
 
-Used by `Overlay.Image`. At least one of `w` / `h` is required; the other scales proportionally.
+Pixel-only. Currently used by `ThumbnailOptions.resizeTo`. At least one of `w` / `h` is required; the other scales proportionally.
+
+### `OverlaySize`
+
+```ts
+type Dim =
+  | { unit: 'px'; value: number }
+  | { unit: 'ratio'; value: number };
+
+type OverlaySize =
+  | { width: Dim; height?: Dim }
+  | { width?: Dim; height: Dim };
+```
+
+Used by `Overlay.Image.size`. Each axis carries an explicit unit:
+
+- `{ unit: 'px', value: N }` — absolute output pixels.
+- `{ unit: 'ratio', value: R }` — fraction of the corresponding output canvas dimension (resolved natively at render time, so inherited / synthesized output dims are honored).
+
+At least one of `width` / `height` is required; the missing axis scales proportionally from the overlay image's natural aspect ratio.
 
 ### `FrameDrawerContext`
 
