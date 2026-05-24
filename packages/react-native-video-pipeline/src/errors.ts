@@ -77,3 +77,31 @@ export function errorForCode(
       return assertNever(code);
   }
 }
+
+/**
+ * Pattern matched against native rejection messages. Native throws
+ * `std::runtime_error`s shaped like:
+ *
+ *   "VideoPipeline.<method>: <Code>"           (Cancelled, InvalidSpec — ...)
+ *   "VideoPipeline.<method>(...) failed: ..."   (generic encoder/IO failure)
+ *
+ * The first form encodes the discriminant directly; the second is a
+ * catch-all that maps to `EncoderFailure` so callers always see a typed
+ * `VideoPipelineError`. Library-thrown `VideoPipelineError`s are returned
+ * unchanged.
+ */
+export function normalizeNativeError(err: unknown): unknown {
+  if (err instanceof VideoPipelineError) return err;
+  const message = err instanceof Error ? err.message : String(err);
+  const codeMatch = message.match(
+    /^VideoPipeline\.[a-zA-Z]+:?\s+(Cancelled|InvalidSpec|UnsupportedCodec|DeviceCapabilityExceeded|SourceCorrupted|IOError|EncoderFailure)\b/,
+  );
+  if (codeMatch !== null && codeMatch[1] !== undefined) {
+    return errorForCode(codeMatch[1] as VideoPipelineErrorCode, { message, cause: err });
+  }
+  // "VideoPipeline.<method>[ something] failed: ..." → generic encoder failure.
+  if (/^VideoPipeline\.[a-zA-Z]+( [a-zA-Z]+)? failed:/.test(message)) {
+    return new EncoderFailureError({ message, cause: err });
+  }
+  return err;
+}

@@ -1,4 +1,4 @@
-import { CancelledError, InvalidSpecError } from './errors';
+import { CancelledError, InvalidSpecError, normalizeNativeError } from './errors';
 import { getNativeVideoPipeline } from './native';
 import type {
   Clip,
@@ -10,11 +10,12 @@ import type {
   FrameSource,
   FrameTarget,
   MetadataSpec,
+  Overlay as NativeOverlay,
   VideoSpec as NativeVideoSpec,
   ThumbnailOptions,
   VideoInfo,
 } from './nitro/VideoPipeline.nitro';
-import type { Overlay } from './overlay';
+import { type Overlay, toNativeOverlaySize } from './overlay';
 import type {
   AudioSpec,
   ClipInput,
@@ -82,24 +83,29 @@ function requirePositive(name: string, value: number): void {
 }
 
 /**
- * Output paths must be a non-empty filesystem path or a `file://` URI. Other
- * URI schemes (http://, https://, content://, data:, …) would silently
- * confuse the native URL parsers — reject them at the JS boundary instead.
+ * Shared validator for any URI we hand to the native pipeline as either an
+ * input file (clip sources, audio replacement) or an output target. Accepts
+ * a non-empty plain filesystem path or a `file://` URI; rejects every other
+ * scheme up front so platform-specific behavior (Android `content://`,
+ * iOS Photos asset identifiers, http(s), data:, …) can never silently reach
+ * the native URL parsers. If/when the library grows first-class support for
+ * those, it will appear as an explicit `Source` discriminated union rather
+ * than an implicit scheme passed through `uri: string`.
  */
-function validateOutputPath(name: string, path: string): void {
-  if (path.length === 0 || path.trim() === '') {
-    fail(`${name}: outPath must be a non-empty filesystem path`);
+function validateFileUri(name: string, uri: string): void {
+  if (uri.length === 0 || uri.trim() === '') {
+    fail(`${name} must be a non-empty filesystem path`);
   }
   // Match a leading `scheme:` (RFC 3986 syntax). file:// is allowed; anything
   // else with a scheme is rejected. Plain absolute filesystem paths fall
   // through (the slash in `/tmp/...` is not a scheme delimiter).
-  if (/^[a-z][a-z0-9+.-]*:/i.test(path) && !path.startsWith('file://')) {
-    fail(
-      `${name}: outPath must be a filesystem path or a file:// URI — got an unsupported scheme`,
-      { path },
-    );
+  if (/^[a-z][a-z0-9+.-]*:/i.test(uri) && !uri.startsWith('file://')) {
+    fail(`${name} must be a filesystem path or a file:// URI — got an unsupported scheme`, { uri });
   }
 }
+
+const validateOutputPath = (name: string, path: string): void =>
+  validateFileUri(`${name}: outPath`, path);
 
 function validateOutputForSynthesis(output: OutputSpec): void {
   if (output.width === undefined)
@@ -122,6 +128,8 @@ function validateOutputForSynthesis(output: OutputSpec): void {
 function normalizeClips(
   inputs: NonEmptyArray<ClipInput>,
 ): NonEmptyArray<Clip> | Promise<NonEmptyArray<Clip>> {
+  // Validate URIs eagerly so `native.info` is never called with a bad scheme.
+  for (const c of inputs) validateFileUri('clip.uri', c.uri);
   const needsProbe = inputs.some((c) => c.durationSec === undefined);
   if (!needsProbe) {
     return finalizeClips(
@@ -153,6 +161,7 @@ function finalizeClips(
   let outputStart = 0;
   for (const { input, sourceDuration } of resolved) {
     const sourceStart = input.startSec ?? 0;
+    validateFileUri('clip.uri', input.uri);
     requireNonNeg('clip.startSec', sourceStart);
     requirePositive('clip.durationSec', sourceDuration);
     out.push({
@@ -168,6 +177,25 @@ function finalizeClips(
   return out as NonEmptyArray<Clip>;
 }
 
+/**
+ * Convert a public `Overlay` (image overlays carry the `OverlaySize`
+ * `width`/`height` shape) into the Nitro `Overlay` (image overlays carry
+ * the `{ w, h }` boundary shape). Text overlays pass through unchanged.
+ * Also validates image-overlay URIs as file paths / `file://`.
+ */
+function toNativeOverlay(o: Overlay): NativeOverlay {
+  if (o.kind === 'text') return o;
+  validateFileUri('overlay.uri', o.uri);
+  return {
+    kind: 'image',
+    uri: o.uri,
+    anchor: o.anchor,
+    size: toNativeOverlaySize(o.size),
+    ...(o.opacity !== undefined ? { opacity: o.opacity } : {}),
+    ...(o.timeRange !== undefined ? { timeRange: o.timeRange } : {}),
+  };
+}
+
 function buildNativeSpecFromClipped(
   spec: RenderSpec | ComposeSpec,
   clips: NonEmptyArray<Clip>,
@@ -175,7 +203,7 @@ function buildNativeSpecFromClipped(
   return {
     output: spec.output,
     clips,
-    ...(spec.overlays !== undefined ? { overlays: spec.overlays } : {}),
+    ...(spec.overlays !== undefined ? { overlays: spec.overlays.map(toNativeOverlay) } : {}),
     ...(spec.audio !== undefined ? { audio: spec.audio } : {}),
     ...(spec.metadata !== undefined ? { metadata: spec.metadata } : {}),
   };
@@ -186,6 +214,7 @@ function validateAudio(audio: NativeVideoSpec['audio']): void {
     if (audio.replaceUri === undefined || audio.replaceUri === '') {
       fail("audio.mode='replace' requires a non-empty replaceUri");
     }
+    validateFileUri('audio.replaceUri', audio.replaceUri);
   }
 }
 
@@ -213,7 +242,16 @@ function validateNativeSpec(spec: NativeVideoSpec, options: RenderOptions | unde
     fail('render: duration is only valid when clips is empty or omitted');
   }
 
-  if (spec.duration?.mode === 'open') {
+  // Nitro's named-union `DurationMode` doesn't narrow the struct, so the
+  // structural `in` check is what gates which field we read.
+  const dur = spec.duration;
+  if (dur?.mode === 'fixed' && 'seconds' in dur) {
+    requirePositive('duration.seconds', dur.seconds);
+  }
+  if (dur?.mode === 'open') {
+    if ('maxSeconds' in dur && dur.maxSeconds !== undefined) {
+      requirePositive('duration.maxSeconds', dur.maxSeconds);
+    }
     if (options?.signal === undefined && options?.controller === undefined) {
       fail(
         'render: open-ended duration requires either an AbortSignal or a VideoRenderController so the render can be stopped',
@@ -222,6 +260,29 @@ function validateNativeSpec(spec: NativeVideoSpec, options: RenderOptions | unde
   }
 
   validateAudio(spec.audio);
+}
+
+/**
+ * Find the source clip producing the frame at `timeSec` on a concat
+ * timeline. Returns the largest-indexed clip whose `outputStart <=
+ * timeSec` (which also handles the trailing-edge `timeSec ==
+ * totalDuration` case by pinning to the last clip). Returns `undefined`
+ * when there are no clips — the synthesize path.
+ */
+function activeClipFor(
+  clips: readonly Clip[],
+  timeSec: number,
+): { index: number; clip: Clip } | undefined {
+  if (clips.length === 0) return undefined;
+  let idx = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const c = clips[i];
+    if (c !== undefined && c.outputStart <= timeSec) idx = i;
+    else break;
+  }
+  const clip = clips[idx];
+  if (clip === undefined) return undefined;
+  return { index: idx, clip };
 }
 
 async function runCompose(
@@ -264,12 +325,17 @@ async function runCompose(
   // `source` is undefined on the synthesize path and the FrameSource handle
   // on the compose-on-clip path.
   const renderStartMs = Date.now();
+  // Snapshot the clip timeline once per render so per-frame lookups don't
+  // re-read the spec. Empty on the synthesize path (no source clips).
+  const clipTimeline = spec.clips ?? [];
+  const fps = spec.output.fps;
   const wrapped = (
     target: FrameTarget,
     source: FrameSource | undefined,
     frameIndex: number,
     timeSec: number,
   ): boolean => {
+    const activeClip = activeClipFor(clipTimeline, timeSec);
     const ctx: FrameDrawerContext = {
       target,
       ...(source !== undefined ? { source } : {}),
@@ -278,6 +344,14 @@ async function runCompose(
       elapsedMs: Date.now() - renderStartMs,
       width: target.width,
       height: target.height,
+      ...(fps !== undefined ? { fps } : {}),
+      ...(activeClip !== undefined
+        ? {
+            clipIndex: activeClip.index,
+            sourceUri: activeClip.clip.uri,
+            sourceTimeSec: activeClip.clip.sourceStart + (timeSec - activeClip.clip.outputStart),
+          }
+        : {}),
       finish: () => {
         if (controller !== undefined) {
           controller.finish();
@@ -296,15 +370,10 @@ async function runCompose(
     await native.renderCompose(spec, token, wrapped, options?.onProgress);
     if (controller !== undefined) controller._markDone();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (
-      signal?.aborted === true ||
-      controller?.state === 'aborted' ||
-      message.includes('VideoPipeline.renderCompose: Cancelled')
-    ) {
+    if (signal?.aborted === true || controller?.state === 'aborted') {
       throw new CancelledError({ message: 'compose aborted', cause: err });
     }
-    throw err;
+    throw normalizeNativeError(err);
   } finally {
     if (signal !== undefined && onAbort !== undefined) {
       signal.removeEventListener('abort', onAbort);
@@ -345,22 +414,17 @@ async function runRender(spec: NativeVideoSpec, options: RenderOptions | undefin
     await native.render(spec, token, options?.onProgress);
     if (controller !== undefined) controller._markDone();
   } catch (err) {
-    // Any of three paths surface a Cancelled rejection from native:
+    // Two paths surface a Cancelled rejection here:
     //  - AbortSignal fired → JS called native.cancelRender, native throws.
     //  - controller.abort() called → same cancelRender path.
-    //  - Race: abort() after render kicked off but before native registered.
-    // Detect via local state + the native error message prefix; the latter
-    // catches the "native aborted on its own" edge case where cancelRender
-    // flipped the stop token but the signal listener ran on a later tick.
-    const message = err instanceof Error ? err.message : String(err);
-    if (
-      signal?.aborted === true ||
-      controller?.state === 'aborted' ||
-      message.includes('VideoPipeline.render: Cancelled')
-    ) {
+    // The race where native aborts on its own (cancelRender flipped the stop
+    // token but the signal listener ran on a later tick) is handled inside
+    // `normalizeNativeError`, which maps "VideoPipeline.<method>: Cancelled"
+    // messages to CancelledError too.
+    if (signal?.aborted === true || controller?.state === 'aborted') {
       throw new CancelledError({ message: 'render aborted', cause: err });
     }
-    throw err;
+    throw normalizeNativeError(err);
   } finally {
     if (signal !== undefined && onAbort !== undefined) {
       signal.removeEventListener('abort', onAbort);
@@ -415,15 +479,10 @@ async function withCancellation(
     await invoke(token);
     if (controller !== undefined) controller._markDone();
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (
-      signal?.aborted === true ||
-      controller?.state === 'aborted' ||
-      message.includes('VideoPipeline.render: Cancelled')
-    ) {
+    if (signal?.aborted === true || controller?.state === 'aborted') {
       throw new CancelledError({ message: 'operation aborted', cause: err });
     }
-    throw err;
+    throw normalizeNativeError(err);
   } finally {
     if (signal !== undefined && onAbort !== undefined) {
       signal.removeEventListener('abort', onAbort);
@@ -434,23 +493,38 @@ async function withCancellation(
 export const Video = {
   /** Probe a video and return its container/codec/dimension metadata. */
   info(uri: string): Promise<VideoInfo> {
-    return getNativeVideoPipeline().info(uri);
+    validateFileUri('info.uri', uri);
+    return getNativeVideoPipeline()
+      .info(uri)
+      .catch((err) => {
+        throw normalizeNativeError(err);
+      });
   },
 
   /** Extract a single JPEG frame at `atSec` and write it to `outPath`. */
   thumbnail(uri: string, options: ThumbnailOptions): Promise<string> {
+    validateFileUri('thumbnail.uri', uri);
     requireNonNeg('thumbnail.atSec', options.atSec);
     validateOutputPath('thumbnail', options.outPath);
-    return getNativeVideoPipeline().thumbnail(uri, options);
+    return getNativeVideoPipeline()
+      .thumbnail(uri, options)
+      .catch((err) => {
+        throw normalizeNativeError(err);
+      });
   },
 
   /** Cached encoder capability snapshot (codecs, max dims, HDR, …). */
   capabilities(): Promise<EncoderCaps> {
-    return getNativeVideoPipeline().capabilities();
+    return getNativeVideoPipeline()
+      .capabilities()
+      .catch((err) => {
+        throw normalizeNativeError(err);
+      });
   },
 
   /** Remux trim — never re-encodes when `transform` is rotation-only. */
   trim(uri: string, options: TrimOptions): Promise<void> {
+    validateFileUri('trim.uri', uri);
     requireNonNeg('trim.startSec', options.startSec);
     requirePositive('trim.durationSec', options.durationSec);
     validateOutputPath('trim', options.outPath);
@@ -469,6 +543,7 @@ export const Video = {
 
   /** Rotation-flag remux when the container supports it; transcode fallback otherwise. */
   flip(uri: string, options: FlipOptions): Promise<void> {
+    validateFileUri('flip.uri', uri);
     validateOutputPath('flip', options.outPath);
     return withCancellation(options, (token) =>
       getNativeVideoPipeline().flip(uri, options.outPath, options.axis, token, options.onProgress),
@@ -480,12 +555,15 @@ export const Video = {
     if (options.watermark === undefined && options.metadata === undefined) {
       fail('stamp: at least one of `watermark` or `metadata` must be provided');
     }
+    validateFileUri('stamp.uri', uri);
     validateOutputPath('stamp', options.outPath);
+    const watermark =
+      options.watermark !== undefined ? toNativeOverlay(options.watermark) : undefined;
     return withCancellation(options, (token) =>
       getNativeVideoPipeline().stamp(
         uri,
         options.outPath,
-        options.watermark,
+        watermark,
         options.metadata,
         token,
         options.onProgress,

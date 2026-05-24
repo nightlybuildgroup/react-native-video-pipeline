@@ -6,6 +6,7 @@ import {
   errorForCode,
   InvalidSpecError,
   IOError,
+  normalizeNativeError,
   SourceCorruptedError,
   UnsupportedCodecError,
   VideoPipelineError,
@@ -68,6 +69,36 @@ describe('errorForCode + assertNever exhaustiveness', () => {
 
   it('assertNever throws at runtime if somehow reached', () => {
     expect(() => assertNever('bogus' as never)).toThrow(/Unreachable/);
+  });
+
+  it('normalizeNativeError maps "VideoPipeline.<method>: Cancelled" → CancelledError', () => {
+    const native = new Error('VideoPipeline.render: Cancelled');
+    const out = normalizeNativeError(native);
+    expect(out).toBeInstanceOf(CancelledError);
+    expect((out as Error & { cause?: unknown }).cause).toBe(native);
+  });
+
+  it('normalizeNativeError maps "VideoPipeline.<method>: InvalidSpec — ..." → InvalidSpecError', () => {
+    const out = normalizeNativeError(new Error('VideoPipeline.render: InvalidSpec — missing fps'));
+    expect(out).toBeInstanceOf(InvalidSpecError);
+  });
+
+  it('normalizeNativeError maps generic "VideoPipeline.<method> failed: ..." → EncoderFailureError', () => {
+    const out = normalizeNativeError(
+      new Error('VideoPipeline.trim failed: AVFoundation error -11800'),
+    );
+    expect(out).toBeInstanceOf(EncoderFailureError);
+    expect((out as EncoderFailureError).message).toMatch(/AVFoundation error/);
+  });
+
+  it('normalizeNativeError passes through library-thrown VideoPipelineErrors', () => {
+    const orig = new IOError({ message: 'disk full' });
+    expect(normalizeNativeError(orig)).toBe(orig);
+  });
+
+  it('normalizeNativeError returns unknown errors unchanged', () => {
+    const opaque = new Error('totally unrelated');
+    expect(normalizeNativeError(opaque)).toBe(opaque);
   });
 
   it('compile-time exhaustiveness: switching on code without default is allowed', () => {

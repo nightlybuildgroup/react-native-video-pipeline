@@ -4,7 +4,7 @@ const pxW = (value: number) => ({ width: { unit: 'px' as const, value } });
 const pxH = (value: number) => ({ height: { unit: 'px' as const, value } });
 
 describe('Overlay.Image', () => {
-  it('builds an image overlay with narrowed kind and normalized tagged size', () => {
+  it('builds an image overlay with narrowed kind and the public OverlaySize shape', () => {
     const o = Overlay.Image({
       uri: 'file:///tmp/wm.png',
       anchor: { x: 0.25, y: 0.75 },
@@ -13,19 +13,28 @@ describe('Overlay.Image', () => {
     expect(o.kind).toBe('image');
     expect(o.uri).toBe('file:///tmp/wm.png');
     expect(o.anchor).toEqual({ x: 0.25, y: 0.75 });
-    // Builder converts public { width: Dim } into the Nitro { w: Dim } shape.
-    expect(o.size).toEqual({ w: { unit: 'px', value: 100 } });
+    // Public output uses `width`/`height` (same vocabulary as input);
+    // conversion to the Nitro `{ w, h }` shape happens at the boundary in
+    // `./video.ts`.
+    expect(o.size).toEqual({ width: { unit: 'px', value: 100 } });
     expect('opacity' in o).toBe(false);
     expect('timeRange' in o).toBe(false);
   });
 
-  it('passes ratio-tagged dimensions through to the Nitro shape', () => {
+  it('returns ratio-tagged dimensions in the public OverlaySize shape', () => {
     const o = Overlay.Image({
       uri: 'x',
       anchor: 'tl',
       size: { width: { unit: 'ratio', value: 0.15 } },
     });
-    expect(o.size).toEqual({ w: { unit: 'ratio', value: 0.15 } });
+    expect(o.size).toEqual({ width: { unit: 'ratio', value: 0.15 } });
+  });
+
+  it('does not alias caller-mutable size objects', () => {
+    const size = { width: { unit: 'px' as const, value: 100 } };
+    const o = Overlay.Image({ uri: 'x', anchor: 'tl', size });
+    size.width.value = 999;
+    expect(o.size).toEqual({ width: { unit: 'px', value: 100 } });
   });
 
   it('expands AnchorPreset shorthand', () => {

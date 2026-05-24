@@ -520,6 +520,30 @@ export interface FrameDrawerContext {
   elapsedMs: number;
   width: number;
   height: number;
+  /**
+   * Output frame rate when known to the JS wrapper — always set on the
+   * synthesize path (`output.fps` is required there); set on the compose
+   * path only when the caller passed an explicit `output.fps`. Undefined
+   * when the wrapper would have had to probe a source to discover it.
+   */
+  fps?: number;
+  /**
+   * Index of the source clip currently producing frames (compose path
+   * only; undefined on synthesize). Derived in JS from `timeSec` and the
+   * normalized clip timeline.
+   */
+  clipIndex?: number;
+  /**
+   * URI of the source clip currently producing frames (compose path only;
+   * undefined on synthesize). Convenience for worklets that vary drawing
+   * by source.
+   */
+  sourceUri?: string;
+  /**
+   * Time within the current source clip (compose path only; undefined on
+   * synthesize). Equals `clip.sourceStart + (timeSec - clip.outputStart)`.
+   */
+  sourceTimeSec?: number;
   /** Worklet-side graceful stop (open-ended renders only); no-op otherwise. */
   finish(): void;
 }
