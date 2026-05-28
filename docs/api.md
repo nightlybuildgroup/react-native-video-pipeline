@@ -367,6 +367,11 @@ interface ClipInput {
   startSec?: number;       // seconds into source; default 0
   durationSec?: number;    // seconds of source to use; default "rest of source"
   transform?: ClipTransform;
+
+  // Forward-compatibility timeline hooks — see "Reserved timeline fields".
+  id?: string;             // stable clip id; surfaced as FrameDrawerContext.clipId
+  outputStartSec?: number; // explicit output position; v0.1 must equal concat position
+  track?: number;          // multi-track index; v0.1 accepts only undefined or 0
 }
 
 interface ClipTransform {
@@ -378,6 +383,16 @@ interface ClipTransform {
 ```
 
 The timeline model is **concat-only**: clips are stitched end-to-end in array order. The first clip starts at output time `0`, the next picks up where it ended, and so on. There are no gaps and no overlaps; if you need either, render the segments separately and concat them.
+
+#### Reserved timeline fields
+
+`id`, `outputStartSec`, and `track` reserve public field names for a future richer timeline (gaps, multi-track, transitions, clip-targeted overlays). They are **not** feature flags — v0.1 accepts only concat-compatible values and rejects everything else with `InvalidSpecError`:
+
+- **`id`** — optional stable identifier, surfaced as `FrameDrawerContext.clipId` on the compose path. Must be unique within a single spec.
+- **`outputStartSec`** — when provided, must equal the cumulative concat position (within 1ms). A larger value (gap) or smaller value (overlap) is rejected. Omit it to accept the computed position.
+- **`track`** — must be `undefined` or `0` (the single main track). Any other value is rejected.
+
+Code written against these fields today keeps working as the timeline model grows; the validation rules will loosen, not the field shapes.
 
 When `durationSec` is omitted, the library calls `Video.info(uri)` to probe the source duration and uses `sourceDuration - startSec`. Provide `durationSec` explicitly to skip the probe.
 
@@ -494,9 +509,22 @@ interface FrameDrawerContext {
   elapsedMs: number;              // wall-clock since render start
   width: number;
   height: number;
+
+  // Timeline context. fps is set whenever the wrapper knows it (always on
+  // synthesize; on compose only when output.fps was passed explicitly). The
+  // clip* / source* fields are populated on the compose-on-clip path and are
+  // undefined on the synthesize path.
+  fps?: number;                   // output frame rate, when known
+  clipIndex?: number;             // index of the active source clip
+  clipId?: string;                // ClipInput.id of the active clip, if set
+  sourceUri?: string;             // uri of the active source clip
+  sourceTimeSec?: number;         // time within the active source clip
+
   finish(): void;                 // graceful stop on open-ended renders
 }
 ```
+
+The `clipIndex` / `clipId` / `sourceUri` / `sourceTimeSec` fields are derived by the JS wrapper from the normalized concat timeline, so worklets don't have to duplicate the library's timeline math. They track which source clip is producing the current output frame.
 
 The `target` and `source` HybridObjects are **valid only during the enclosing `drawFrame` call**. The native pump invalidates them on return. Don't retain the pointer; don't pass them to async work.
 

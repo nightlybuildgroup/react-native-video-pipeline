@@ -125,11 +125,40 @@ function validateOutputForSynthesis(output: OutputSpec): void {
  * the existing test pattern that checks `native.render` was invoked
  * before awaiting the return promise keeps working).
  */
+/** Concat tolerance for `outputStartSec`; mirrors the native engine's
+ *  `kSecondsTolerance` (Remuxer.cpp) so JS and native agree on what counts
+ *  as "matches the cumulative position". */
+const OUTPUT_START_TOLERANCE_SEC = 1e-3;
+
+/**
+ * Eagerly validate the forward-compat timeline fields that don't depend on
+ * resolved durations: `id` uniqueness across the spec and the v0.1
+ * single-track restriction. `outputStartSec` is checked later in
+ * `finalizeClips`, where the cumulative position is known.
+ */
+function validateTimelineFields(inputs: NonEmptyArray<ClipInput>): void {
+  const seenIds = new Set<string>();
+  for (const c of inputs) {
+    if (c.id !== undefined) {
+      if (seenIds.has(c.id)) {
+        fail(`clip.id must be unique within a spec — duplicate "${c.id}"`, { id: c.id });
+      }
+      seenIds.add(c.id);
+    }
+    if (c.track !== undefined && c.track !== 0) {
+      fail(`clip.track ${c.track} is not supported yet — v0.1 accepts only the main track (0)`, {
+        track: c.track,
+      });
+    }
+  }
+}
+
 function normalizeClips(
   inputs: NonEmptyArray<ClipInput>,
 ): NonEmptyArray<Clip> | Promise<NonEmptyArray<Clip>> {
   // Validate URIs eagerly so `native.info` is never called with a bad scheme.
   for (const c of inputs) validateFileUri('clip.uri', c.uri);
+  validateTimelineFields(inputs);
   const needsProbe = inputs.some((c) => c.durationSec === undefined);
   if (!needsProbe) {
     return finalizeClips(
@@ -164,6 +193,18 @@ function finalizeClips(
     validateFileUri('clip.uri', input.uri);
     requireNonNeg('clip.startSec', sourceStart);
     requirePositive('clip.durationSec', sourceDuration);
+    // v0.1 is concat-only: an explicit outputStartSec must land on the
+    // computed cumulative position. A larger value is a gap, a smaller one
+    // an overlap — both rejected until the pump can fill / blend them.
+    if (
+      input.outputStartSec !== undefined &&
+      Math.abs(input.outputStartSec - outputStart) > OUTPUT_START_TOLERANCE_SEC
+    ) {
+      fail(
+        `clip.outputStartSec ${input.outputStartSec}s does not match the concat position ${outputStart}s — gaps and overlaps are not supported yet`,
+        { outputStartSec: input.outputStartSec, expected: outputStart },
+      );
+    }
     out.push({
       uri: input.uri,
       sourceStart,
@@ -289,6 +330,10 @@ async function runCompose(
   spec: NativeVideoSpec,
   drawFrame: FrameDrawer,
   options: RenderOptions | undefined,
+  // Public `ClipInput.id`s aligned by index to `spec.clips` (the Nitro `Clip`
+  // boundary shape carries no id). Used only to populate
+  // `FrameDrawerContext.clipId`. Empty / omitted on the synthesize path.
+  clipIds?: readonly (string | undefined)[],
 ): Promise<void> {
   validateNativeSpec(spec, options);
 
@@ -336,6 +381,7 @@ async function runCompose(
     timeSec: number,
   ): boolean => {
     const activeClip = activeClipFor(clipTimeline, timeSec);
+    const clipId = activeClip !== undefined ? clipIds?.[activeClip.index] : undefined;
     const ctx: FrameDrawerContext = {
       target,
       ...(source !== undefined ? { source } : {}),
@@ -352,6 +398,7 @@ async function runCompose(
             sourceTimeSec: activeClip.clip.sourceStart + (timeSec - activeClip.clip.outputStart),
           }
         : {}),
+      ...(clipId !== undefined ? { clipId } : {}),
       finish: () => {
         if (controller !== undefined) {
           controller.finish();
@@ -590,13 +637,19 @@ export const Video = {
       fail('compose: drawFrame is required and must be a function');
     }
     const composeOpts = pickRenderOptions(options);
+    const clipIds = spec.clips.map((c) => c.id);
     const clips = normalizeClips(spec.clips);
     if (clips instanceof Promise) {
       return clips.then((c) =>
-        runCompose(buildNativeSpecFromClipped(spec, c), options.drawFrame, composeOpts),
+        runCompose(buildNativeSpecFromClipped(spec, c), options.drawFrame, composeOpts, clipIds),
       );
     }
-    return runCompose(buildNativeSpecFromClipped(spec, clips), options.drawFrame, composeOpts);
+    return runCompose(
+      buildNativeSpecFromClipped(spec, clips),
+      options.drawFrame,
+      composeOpts,
+      clipIds,
+    );
   },
 
   /**

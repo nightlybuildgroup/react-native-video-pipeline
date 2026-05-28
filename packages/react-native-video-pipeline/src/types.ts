@@ -115,6 +115,37 @@ export interface ClipInput {
   /** Seconds of source to include. Defaults to "rest of source". */
   durationSec?: number;
   transform?: ClipTransform;
+
+  // --- Forward-compatibility timeline hooks --------------------------------
+  // These three fields reserve public field names for a richer timeline
+  // (gaps, multi-track, transitions, clip-targeted overlays) without
+  // committing to that feature surface yet. v0.1 accepts only
+  // concat-compatible values and rejects everything else with
+  // `InvalidSpecError` — field *presence* is not a feature flag.
+
+  /**
+   * Stable identifier for this clip. Surfaced as `FrameDrawerContext.clipId`
+   * on the compose path and reserved for future clip-targeted features
+   * (overlays bound to a clip, transition endpoints). Must be unique within
+   * a single spec. Optional — most callers can omit it.
+   */
+  id?: string;
+  /**
+   * Explicit position on the output timeline, in seconds.
+   *
+   * v0.1 is concat-only: when provided, this MUST equal the cumulative
+   * position derived from preceding clips' durations (within 1ms). Gaps
+   * (`outputStartSec` beyond the cumulative position) and overlaps (before
+   * it) are rejected with `InvalidSpecError` until the pump learns to fill /
+   * blend them. Omit it to accept the computed concat position.
+   */
+  outputStartSec?: number;
+  /**
+   * Track index for future multi-track composition. v0.1 accepts only
+   * `undefined` or `0` (the single main track); any other value is rejected
+   * with `InvalidSpecError`.
+   */
+  track?: number;
 }
 
 /**

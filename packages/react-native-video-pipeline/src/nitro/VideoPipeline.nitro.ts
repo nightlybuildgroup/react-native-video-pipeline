@@ -534,6 +534,12 @@ export interface FrameDrawerContext {
    */
   clipIndex?: number;
   /**
+   * `id` of the source clip currently producing frames, when the caller
+   * supplied `ClipInput.id`. Undefined on the synthesize path or when the
+   * active clip has no id.
+   */
+  clipId?: string;
+  /**
    * URI of the source clip currently producing frames (compose path only;
    * undefined on synthesize). Convenience for worklets that vary drawing
    * by source.

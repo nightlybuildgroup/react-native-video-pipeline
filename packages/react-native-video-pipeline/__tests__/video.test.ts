@@ -397,6 +397,80 @@ describe('Video.render — validation', () => {
     await promise;
   });
 
+  it('accepts an explicit outputStartSec that matches the concat position', async () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'a.mp4', startSec: 0, durationSec: 3, outputStartSec: 0 },
+        { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 3 },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as { clips: Array<{ outputStart: number }> };
+    // outputStartSec is a validation-only field; the boundary shape is unchanged.
+    expect(passed.clips.map((c) => c.outputStart)).toEqual([0, 3]);
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it('rejects an outputStartSec gap (beyond the concat position)', () => {
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'a.mp4', startSec: 0, durationSec: 3 },
+          { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 5 },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects an outputStartSec overlap (before the concat position)', () => {
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'a.mp4', startSec: 0, durationSec: 3 },
+          { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 1 },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects a duplicate clip id', () => {
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'a.mp4', startSec: 0, durationSec: 1, id: 'intro' },
+          { uri: 'b.mp4', startSec: 0, durationSec: 1, id: 'intro' },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects a non-zero track', () => {
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [{ uri: 'a.mp4', startSec: 0, durationSec: 1, track: 1 }],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('accepts track 0 and unique ids', async () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'a.mp4', startSec: 0, durationSec: 1, id: 'intro', track: 0 },
+        { uri: 'b.mp4', startSec: 0, durationSec: 1, id: 'body' },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
   it('probes missing durationSec via Video.info and uses the remaining source duration', async () => {
     const promise = Video.render({
       output: { path: '/tmp/out.mp4' },
@@ -735,6 +809,34 @@ describe('FrameDrawerContext enrichment (review #7)', () => {
       { timeSec: 1.5, fps: 30, clipIndex: 0, sourceUri: 'a.mp4', sourceTimeSec: 3.5 },
       { timeSec: 3, fps: 30, clipIndex: 1, sourceUri: 'b.mp4', sourceTimeSec: 0 },
       { timeSec: 5, fps: 30, clipIndex: 1, sourceUri: 'b.mp4', sourceTimeSec: 2 },
+    ]);
+    call?.resolve();
+    await promise;
+  });
+
+  it('exposes clipId when the active clip carries an id (review #1)', async () => {
+    const seen: Array<{ clipIndex?: number; clipId?: string }> = [];
+    const drawFrame = (ctx: { clipIndex?: number; clipId?: string }) => {
+      seen.push({ clipIndex: ctx.clipIndex, clipId: ctx.clipId });
+    };
+    const promise = Video.compose(
+      {
+        output: { path: '/tmp/out.mp4', fps: 30 },
+        clips: [
+          { uri: 'a.mp4', startSec: 0, durationSec: 3, id: 'intro' },
+          // Second clip intentionally has no id → clipId undefined on its frames.
+          { uri: 'b.mp4', startSec: 0, durationSec: 4 },
+        ],
+      },
+      { drawFrame },
+    );
+    const call = fake.renderCalls[0];
+    const target = { width: 16, height: 9 };
+    call?.drawFrame?.(target, undefined, 0, 0); // clip 0 → 'intro'
+    call?.drawFrame?.(target, undefined, 120, 4); // clip 1 → no id
+    expect(seen).toEqual([
+      { clipIndex: 0, clipId: 'intro' },
+      { clipIndex: 1, clipId: undefined },
     ]);
     call?.resolve();
     await promise;
