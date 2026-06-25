@@ -44,6 +44,15 @@ class VideoPipelineInvalidSpecException(detail: String) :
 @Keep
 class HybridVideoPipeline : HybridVideoPipelineSpec() {
 
+  init {
+    // First render-adjacent moment after launch (the HybridObject is
+    // constructed once, lazily, on first JS access): clean up any render that
+    // a prior process left in-flight when it was killed (T047 / US8).
+    com.margelo.nitro.NitroModules.applicationContext?.applicationContext?.let {
+      RenderJournal.drainZombiesOnce(it)
+    }
+  }
+
   private fun <T> rejectedNotImplemented(method: String): Promise<T> =
     Promise.rejected(VideoPipelineNotImplementedException(method))
 
@@ -126,6 +135,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       val clip = spec.clips!!.first()
       val outputPath = spec.output.path
       val stopToken = RenderTokenRegistry.registerToken(renderToken)
+      val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
       val progressSink: SynthesizeRunner.ProgressSink? =
         onProgress?.let { cb -> wrapProgressCallback(cb) }
       return Promise.parallel {
@@ -147,6 +157,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             }
           }
         } finally {
+          guard.end()
           RenderTokenRegistry.unregisterToken(renderToken)
         }
       }
@@ -185,6 +196,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
 
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     val progressSink: SynthesizeRunner.ProgressSink? =
       onProgress?.let { cb -> wrapProgressCallback(cb) }
 
@@ -206,6 +218,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           }
         }
       } finally {
+        guard.end()
         RenderTokenRegistry.unregisterToken(renderToken)
       }
     }
@@ -490,14 +503,22 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         )
       )
     }
+    // Passthrough remux finishes in milliseconds — journal-only (no
+    // foreground-service notification flicker), but still cleaned up on a
+    // mid-op kill via the journal.
+    val guard = RenderForegroundGuard.begin(renderToken, outPath, keepAlive = false)
     return Promise.parallel {
-      Remuxer.remuxTrim(
-        sourceUri = uri,
-        outputPath = outPath,
-        startSec = startSec,
-        durationSec = durationSec,
-      )
-      Unit
+      try {
+        Remuxer.remuxTrim(
+          sourceUri = uri,
+          outputPath = outPath,
+          startSec = startSec,
+          durationSec = durationSec,
+        )
+        Unit
+      } finally {
+        guard.end()
+      }
     }
   }
 
@@ -532,13 +553,20 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       )
     }
     // Metadata-only stamp stays on the remux path — no re-encode needed.
+    // Journal-only (fast), same rationale as trim.
     if (watermark == null) {
+      val guard = RenderForegroundGuard.begin(renderToken, outPath, keepAlive = false)
       return Promise.parallel {
-        Remuxer.remuxStamp(sourceUri = uri, outputPath = outPath, metadata = metadata!!)
-        Unit
+        try {
+          Remuxer.remuxStamp(sourceUri = uri, outputPath = outPath, metadata = metadata!!)
+          Unit
+        } finally {
+          guard.end()
+        }
       }
     }
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outPath, keepAlive = true)
     return Promise.parallel {
       try {
         // Image overlays decode a source bitmap; text overlays (T045)
@@ -597,6 +625,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       } catch (e: Transcoder.InvalidSpecException) {
         throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
       } finally {
+        guard.end()
         RenderTokenRegistry.unregisterToken(renderToken)
       }
     }
@@ -622,6 +651,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     val durationVariant = spec.duration!!
 
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     val progressSink: SynthesizeRunner.ProgressSink? =
       onProgress?.let { cb -> wrapProgressCallback(cb) }
 
@@ -655,6 +685,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         }
         Unit
       } finally {
+        guard.end()
         RenderTokenRegistry.unregisterToken(renderToken)
       }
     }
@@ -680,6 +711,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
     val outputPath = spec.output.path
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
 
     return Promise.parallel {
       try {
@@ -692,6 +724,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       } catch (e: Remuxer.CancelledException) {
         throw VideoPipelineCancelledException()
       } finally {
+        guard.end()
         RenderTokenRegistry.unregisterToken(renderToken)
       }
     }
