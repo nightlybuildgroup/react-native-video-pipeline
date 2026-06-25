@@ -1,6 +1,7 @@
 import type { NodePath, PluginObj, types as t } from '@babel/core';
 
-const DOCS_URL = 'https://github.com/unbogify/react-native-video-pipeline#worklet-directives';
+const DOCS_URL =
+  'https://github.com/nightlybuildgroup/react-native-video-pipeline#worklet-directives';
 
 interface Target {
   /** Index of the argument carrying the options object. */

@@ -7,11 +7,11 @@ Pod::Spec.new do |s|
   s.version      = package["version"]
   s.summary      = package["description"]
   s.description  = package["description"]
-  s.homepage     = "https://github.com/unbogify/react-native-video-pipeline"
+  s.homepage     = "https://github.com/nightlybuildgroup/react-native-video-pipeline"
   s.license      = package["license"]
   s.authors      = { "Sebastian Biallas" => "sb@biallas.net" }
   s.platforms    = { :ios => "13.0" }
-  s.source       = { :git => "https://github.com/unbogify/react-native-video-pipeline.git", :tag => "v#{s.version}" }
+  s.source       = { :git => "https://github.com/nightlybuildgroup/react-native-video-pipeline.git", :tag => "v#{s.version}" }
 
   # Hand-written adapter sources. The nitrogen-generated spec + bridges are
   # pulled in below via `add_nitrogen_files`.

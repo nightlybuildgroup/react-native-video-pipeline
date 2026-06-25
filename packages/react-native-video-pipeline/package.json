@@ -6,12 +6,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/unbogify/react-native-video-pipeline.git",
+    "url": "git+https://github.com/nightlybuildgroup/react-native-video-pipeline.git",
     "directory": "packages/react-native-video-pipeline"
   },
-  "homepage": "https://github.com/unbogify/react-native-video-pipeline#readme",
+  "homepage": "https://github.com/nightlybuildgroup/react-native-video-pipeline#readme",
   "bugs": {
-    "url": "https://github.com/unbogify/react-native-video-pipeline/issues"
+    "url": "https://github.com/nightlybuildgroup/react-native-video-pipeline/issues"
   },
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",

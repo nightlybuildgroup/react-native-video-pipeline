@@ -18,7 +18,7 @@
 #endif
 
 NSString* const RNVPBackgroundTaskJournalDefaultsKey =
-    @"com.unbogify.rnvp.activeRenders";
+    @"com.nightlybuildgroup.rnvp.activeRenders";
 
 #pragma mark - Journal
 

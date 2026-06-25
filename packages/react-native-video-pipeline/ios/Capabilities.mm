@@ -54,7 +54,7 @@ os_log_t rnvpCapabilitiesLog(void) {
   static dispatch_once_t once;
   static os_log_t log;
   dispatch_once(&once, ^{
-    log = os_log_create("com.unbogify.rnvp", "Capabilities");
+    log = os_log_create("com.nightlybuildgroup.rnvp", "Capabilities");
   });
   return log;
 }

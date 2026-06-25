@@ -105,7 +105,10 @@ describe('babel-plugin-video-pipeline', () => {
           drawFrame: () => { /* no directive */ },
         });
       `;
-      expectThrows(code, /github\.com\/unbogify\/react-native-video-pipeline#worklet-directives/);
+      expectThrows(
+        code,
+        /github\.com\/nightlybuildgroup\/react-native-video-pipeline#worklet-directives/,
+      );
     });
   });
 
