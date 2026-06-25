@@ -25,7 +25,7 @@ This document describes how `react-native-video-pipeline` is organized internall
 | iOS framework           | **AVFoundation + AVAssetWriter + CoreImage**                                                 | Native, hardware-accelerated, no patent risk                                                                 |
 | Android framework       | **Media3 Transformer + MediaCodec**                                                          | Google-maintained, Jetpack-blessed; closes the Media3 gap that killed the previous Android stub             |
 | Image overlay (static)  | **CIFilter** + `AVMutableVideoComposition` (iOS) / Media3 `OverlayEffect` + `BitmapOverlay` (Android) | No Skia dep; both platforms have first-class bitmap-overlay primitives; pixel-hash parity is achievable     |
-| Text overlay (static)   | **CATextLayer** (iOS) / Media3 `TextOverlay` (Android)                                       | No Skia dep; minimal declarative API; cross-platform parity is "visually similar," not pixel-identical      |
+| Text overlay (static)   | **CATextLayer** (iOS) / native `StaticLayout` + `Canvas` rasterization, composited via the transcoder GL overlay path (Android) | No Skia dep; minimal declarative API; cross-platform parity is "visually similar," not pixel-identical      |
 | Worklet runtime         | **react-native-worklets-core** (peer)                                                        | Standard RN way to run JS off the JS thread                                                                  |
 | Dynamic overlay drawing | **@shopify/react-native-skia** (optional peer, compose path only)                            | Consumer brings Skia; library never imports it                                                               |
 | Build                   | **react-native-builder-bob + Nitro codegen**                                                 | Standard RN lib toolchain                                                                                    |
@@ -188,7 +188,7 @@ These are decisions that have been made and should not be re-litigated without a
 
 ## Known limitations
 
-- **iOS / Android text rendering is not pixel-identical.** `CATextLayer` vs Media3 `TextOverlay` differ in shaping, hinting, and kerning. `Overlay.Text` targets "visually similar," not "pixel-identical." Documented in [`api.md`](./api.md). Users who need identical text rasterize via Skia and pass as `Overlay.Image`.
+- **iOS / Android text rendering is not pixel-identical.** `CATextLayer` (iOS) vs Android `StaticLayout`/`Canvas` rasterization differ in shaping, hinting, and kerning. `Overlay.Text` targets "visually similar," not "pixel-identical." Documented in [`api.md`](./api.md). Users who need identical text rasterize via Skia and pass as `Overlay.Image`.
 - **Media3 Transformer is still evolving.** We pin to a specific Media3 version and maintain a compatibility matrix; the codebase falls back to MediaCodec directly for hot paths.
 - **HDR re-encode on the transcode path can silently downgrade to SDR.** Mitigated by an explicit `hdr: 'preserve' | 'downgrade' | 'error'` option on `OutputSpec`; default is `error` so accidents are loud.
 - **Nitro Modules is < 1.0.** We pin the Nitro version; we'll contribute upstream if blockers appear.

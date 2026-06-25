@@ -14,7 +14,9 @@
 ///     TODO flagged alongside the iOS transcode audio path (T033 does
 ///     passthrough via a second AVAssetWriterInput; Android needs a second
 ///     MediaMuxer track sourced from the MediaExtractor's audio samples).
-///   * Image overlays. Text overlays reject with a pointer to T045.
+///   * Image + text overlays. Both are resolved to an ARGB bitmap up front
+///     (`ResolvedOverlay`) — text via `OverlayTextRasterizer` (T045) — and
+///     composited through one shared alpha-blended RGBA quad path.
 ///   * Any transform: rotate (0/90/180/270), flipH, flipV, crop (source-
 ///     pixel rect). Output dims/fps/codec/bitrate follow the target; the
 ///     decoded frame is re-sampled onto the target canvas.
@@ -86,6 +88,48 @@ internal object Transcoder {
 
   data class Result(val framesWritten: Int, val aborted: Boolean)
 
+  /// Unified overlay currency. Image and text overlays are both flattened to
+  /// an ARGB bitmap + geometry up front so the GL compose path is overlay-kind
+  /// agnostic. `sizeW`/`sizeH` null → natural bitmap size (always the case for
+  /// text, which has no public size field). `opacity` defaults to fully opaque
+  /// (text overlays carry no opacity field). The caller owns nothing once the
+  /// list is handed to `transcode` — it recycles every bitmap on exit.
+  class ResolvedOverlay(
+    val bitmap: Bitmap,
+    val sizeW: Dim?,
+    val sizeH: Dim?,
+    val anchorX: Double,
+    val anchorY: Double,
+    val opacity: Double,
+    val timeRange: TimeRange?,
+  )
+
+  /// Loads + decodes an image overlay's source into a `ResolvedOverlay`.
+  /// Throws `InvalidSpecException` on a missing/undecodable image.
+  fun resolveImageOverlay(overlay: ImageOverlay): ResolvedOverlay =
+    ResolvedOverlay(
+      bitmap = loadOverlayBitmap(overlay),
+      sizeW = overlay.size.w,
+      sizeH = overlay.size.h,
+      anchorX = overlay.anchor.x,
+      anchorY = overlay.anchor.y,
+      opacity = overlay.opacity ?: 1.0,
+      timeRange = overlay.timeRange,
+    )
+
+  /// Rasterizes a text overlay into a natural-size `ResolvedOverlay`.
+  /// Throws `InvalidSpecException` on a malformed color string.
+  fun resolveTextOverlay(overlay: TextOverlay): ResolvedOverlay =
+    ResolvedOverlay(
+      bitmap = OverlayTextRasterizer.rasterize(overlay),
+      sizeW = null,
+      sizeH = null,
+      anchorX = overlay.anchor.x,
+      anchorY = overlay.anchor.y,
+      opacity = 1.0,
+      timeRange = overlay.timeRange,
+    )
+
   fun interface ProgressSink {
     fun report(
       framesCompleted: Int,
@@ -99,7 +143,7 @@ internal object Transcoder {
     sourceUri: String,
     outputPath: String,
     target: Target,
-    overlays: List<ImageOverlay>,
+    overlays: List<ResolvedOverlay>,
     metadata: MetadataSpec?,
     stopToken: VideoPipelineStopToken?,
     progress: ProgressSink?,
@@ -115,21 +159,19 @@ internal object Transcoder {
       (sourceDurationSec * target.fps).roundToLong().toInt().coerceAtLeast(1)
     } else 0
 
-    val overlayBitmaps = overlays.map { loadOverlayBitmap(it) }
     try {
       return runPipeline(
         sourcePath = sourcePath,
         outputPath = outputPath,
         target = target,
         overlays = overlays,
-        overlayBitmaps = overlayBitmaps,
         metadata = metadata,
         stopToken = stopToken,
         progress = progress,
         estimatedFrameCount = estFrameCount,
       )
     } finally {
-      overlayBitmaps.forEach { runCatching { it.recycle() } }
+      overlays.forEach { runCatching { it.bitmap.recycle() } }
     }
   }
 
@@ -202,8 +244,7 @@ internal object Transcoder {
     sourcePath: String,
     outputPath: String,
     target: Target,
-    overlays: List<ImageOverlay>,
-    overlayBitmaps: List<Bitmap>,
+    overlays: List<ResolvedOverlay>,
     metadata: MetadataSpec?,
     stopToken: VideoPipelineStopToken?,
     progress: ProgressSink?,
@@ -245,7 +286,7 @@ internal object Transcoder {
       encoderSurface = encoderInputSurface,
       targetWidth = target.width,
       targetHeight = target.height,
-      overlayBitmaps = overlayBitmaps,
+      overlays = overlays,
     )
     // The decoder writes into a SurfaceTexture bound to the shared EGL
     // context; the compose shader samples it as an external OES texture.
@@ -374,7 +415,7 @@ internal object Transcoder {
     decoderOutputTexture: SurfaceTexture,
     frameSync: FrameAvailableLatch,
     gl: ComposeGL,
-    overlays: List<ImageOverlay>,
+    overlays: List<ResolvedOverlay>,
     state: RunnerState,
     sourceFormat: MediaFormat,
     target: Target,
@@ -622,7 +663,7 @@ internal object Transcoder {
 
     fun drawFrame(
       decoderOutputTexture: SurfaceTexture,
-      overlays: List<ImageOverlay>,
+      overlays: List<ResolvedOverlay>,
       outputFrameIndex: Int,
       fps: Double,
     ) {
@@ -673,25 +714,26 @@ internal object Transcoder {
       }
     }
 
-    private fun overlayActive(overlay: ImageOverlay, ptsSec: Double): Boolean {
+    private fun overlayActive(overlay: ResolvedOverlay, ptsSec: Double): Boolean {
       val tr = overlay.timeRange ?: return true
       return ptsSec + 1e-6 >= tr.startSec && ptsSec <= tr.endSec + 1e-6
     }
 
-    private fun drawRgbaOverlay(overlay: ImageOverlay, overlayIndex: Int) {
+    private fun drawRgbaOverlay(overlay: ResolvedOverlay, overlayIndex: Int) {
       val (bmpW, bmpH) = overlaySizes[overlayIndex]
       // Resolve unit-tagged dims against the output canvas. Ratio values
-      // are fractions of the corresponding canvas axis.
-      val sizeW = overlay.size.w?.let {
+      // are fractions of the corresponding canvas axis. Null dims (always the
+      // case for text overlays) fall back to the natural bitmap size.
+      val sizeW = overlay.sizeW?.let {
         if (it.unit == SizeUnit.RATIO) it.value * targetWidth else it.value
       } ?: 0.0
-      val sizeH = overlay.size.h?.let {
+      val sizeH = overlay.sizeH?.let {
         if (it.unit == SizeUnit.RATIO) it.value * targetHeight else it.value
       } ?: 0.0
       val (outW, outH) = resolveOverlayPixelSize(sizeW, sizeH, bmpW, bmpH)
       if (outW <= 0.0 || outH <= 0.0) return
-      val anchorX = overlay.anchor.x
-      val anchorY = overlay.anchor.y
+      val anchorX = overlay.anchorX
+      val anchorY = overlay.anchorY
       // Anchor is a normalized point in [0,1] on the output frame. Treat
       // the point as the CENTER of the overlay (matches iOS
       // RNVPOverlayRenderer's applyLayerGeometry contract).
@@ -722,7 +764,7 @@ internal object Transcoder {
       GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
       GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, overlayTextures[overlayIndex])
       GLES20.glUniform1i(rgbaUSamplerLocation, 1)
-      GLES20.glUniform1f(rgbaUAlphaLocation, (overlay.opacity ?: 1.0).toFloat().coerceIn(0f, 1f))
+      GLES20.glUniform1f(rgbaUAlphaLocation, overlay.opacity.toFloat().coerceIn(0f, 1f))
 
       val vBuf = asFloatBuffer(vertices)
       val tBuf = asFloatBuffer(tex)
@@ -780,8 +822,9 @@ internal object Transcoder {
         encoderSurface: Surface,
         targetWidth: Int,
         targetHeight: Int,
-        overlayBitmaps: List<Bitmap>,
+        overlays: List<ResolvedOverlay>,
       ): ComposeGL {
+        val overlayBitmaps = overlays.map { it.bitmap }
         val display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY)
         require(display !== EGL14.EGL_NO_DISPLAY) { "eglGetDisplay → NO_DISPLAY" }
         val version = IntArray(2)

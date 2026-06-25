@@ -28,10 +28,10 @@ internal class HybridFrameSource(
   @Volatile
   private var invalidated = false
 
-  override val unstable_bufferAddr: Long
+  override val unstable_bufferAddr: ULong
     get() {
       throwIfInvalid()
-      return hardwareBufferPtr
+      return hardwareBufferPtr.toULong()
     }
 
   override val width: Double
