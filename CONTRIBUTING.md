@@ -37,15 +37,26 @@ Never run `npm install` or `pnpm install` — both will produce an incorrect loc
 ## Daily workflow
 
 ```sh
-yarn lint              # fix lint issues
+yarn lint              # Biome + ESLint
 yarn format            # Biome formatter; should leave a clean tree
 yarn typecheck         # strict TS across every workspace
-yarn test              # Jest, across workspaces (once T050 lands)
-yarn nitrogen          # regenerate native bindings from the Nitro spec (once T008 lands)
+yarn test              # Jest, across workspaces
+yarn nitrogen          # regenerate native bindings from the Nitro spec
 ```
 
 - **Nitro spec.** `packages/react-native-video-pipeline/src/nitro/VideoPipeline.nitro.ts` is the **single source of truth** for every cross-boundary type. Change types there and run `yarn nitrogen` to regenerate. Never hand-edit files under `nitrogen/`.
 - **Derived artifacts** (`nitrogen/`, `packages/react-native-video-pipeline/plugin/build/`) are gitignored. The Expo plugin's `plugin/build/` is shipped to npm via the package's `files` allowlist + a `prepack` script — it never goes through git.
+
+### Test suites
+
+| Command | What it runs | Needs |
+| --- | --- | --- |
+| `yarn test` | Jest (JS unit + bootstrap canaries) | — |
+| `yarn test:native` | iOS AVFoundation/CoreVideo XCTests, compiled against `-sdk macosx` and run on the host (~6s) — no simulator | macOS + Xcode |
+| `yarn test:golden` | Cross-platform golden pixel-hash suite (see [`__tests__/golden/README.md`](./__tests__/golden/README.md)). App-free: renders on the Android emulator + iOS host, compares signatures. `--update` regenerates references. | booted Android emulator + macOS/Xcode |
+| `yarn test:e2e:android` / `yarn test:e2e:ios` | Maestro smoke flow (synthesize + trim + stamp) against `bare-example` (see [`.maestro/README.md`](./.maestro/README.md)) | installed app + Metro + Maestro |
+| `yarn smoke:ios` | lint + typecheck + `test` + `test:native`, then a `bare-example` simulator build | macOS + Xcode + simulator |
+| Android instrumented | `./gradlew :react-native-video-pipeline:connectedDebugAndroidTest` (overlay/foreground-service/golden render) | booted Android emulator |
 
 ### Running the example apps
 
@@ -58,6 +69,23 @@ yarn workspace bare-example run android
 ```
 
 The bare example is the fastest path to exercise a native change end-to-end. The Expo example exists to verify the bundled config plugin.
+
+> **⚠️ The example app runs the library's _built_ JS, not `src/`.** `react-native-video-pipeline`'s `main` points at `lib/commonjs/`, so Metro bundles the **last `bob build` output**. After editing anything under `packages/react-native-video-pipeline/src/**`, rebuild before the app picks it up:
+>
+> ```sh
+> yarn workspace react-native-video-pipeline build
+> ```
+>
+> Symptom of a stale `lib/`: the app throws a runtime error from an API shape that no longer matches `src/` (e.g. `VideoPipeline.render(...): Value is undefined, expected a number`). Native (`cpp/**`, `ios/**`, `android/**`) changes are picked up by the normal app rebuild and don't need this step.
+
+#### Android emulator disk space
+
+RN debug builds are large and the default Pixel AVD ships a **6 GB** data partition, so repeated installs (plus the test-APK that `connectedAndroidTest` installs) fill it and `installDebug` fails with `Requested internal only, but not enough space`. Two levers:
+
+- **Build one ABI.** The debug APK bundles all four ABIs (~183 MB of native libs); the emulator only needs one. On Apple Silicon: `./gradlew :app:installDebug -PreactNativeArchitectures=arm64-v8a` (or set `reactNativeArchitectures=arm64-v8a` in `apps/bare-example/android/gradle.properties`). This cuts the install from ~191 MB to ~60 MB.
+- **Grow the partition.** Recreate the AVD with a larger data partition (e.g. `disk.dataPartition.size=16G` in `~/.android/avd/<name>.avd/config.ini`, or boot with `emulator -avd <name> -partition-size 16384`).
+
+Housekeeping between runs: `adb uninstall <stale.pkg>` and `adb shell pm trim-caches 9G`.
 
 ---
 
