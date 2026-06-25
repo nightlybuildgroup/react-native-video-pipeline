@@ -35,12 +35,12 @@ internal class HybridFrameTarget(
   @Volatile
   private var invalidated = false
 
-  override val unstable_bufferAddr: Long
+  override val unstable_bufferAddr: ULong
     get() {
       throwIfInvalid()
       // The address is unused by drawWithSkia's writeBytes path on Android;
       // expose 0 instead of leaking the JNI direct-buffer address.
-      return 0L
+      return 0UL
     }
 
   override val width: Double
@@ -76,7 +76,7 @@ internal class HybridFrameTarget(
     backing.position(0)
   }
 
-  override fun unstable_blitFromNativeTexture(mtlTexturePtr: Long) {
+  override fun unstable_blitFromNativeTexture(mtlTexturePtr: ULong) {
     throwIfInvalid()
     throw UnsupportedOperationException(
       "VideoPipeline.FrameTarget.unstable_blitFromNativeTexture: GPU fast " +
