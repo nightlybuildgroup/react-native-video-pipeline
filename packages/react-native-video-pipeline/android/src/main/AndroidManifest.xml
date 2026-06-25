@@ -1,1 +1,18 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!-- T047 — keep long video exports alive while the app is backgrounded.
+       FOREGROUND_SERVICE is a normal (auto-granted) permission from API 28;
+       the *_MEDIA_PROCESSING variant is required from API 34 to start a
+       mediaProcessing-typed foreground service. Both are no-ops on lower
+       API levels. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+
+  <application>
+    <service
+      android:name="com.margelo.nitro.videopipeline.ForegroundExportService"
+      android:exported="false"
+      android:foregroundServiceType="mediaProcessing" />
+  </application>
+
+</manifest>
