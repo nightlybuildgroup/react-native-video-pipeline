@@ -1,0 +1,26 @@
+# T048 — iOS end-to-end smoke: synthesize + trim + stamp.
+#
+# Mirror of e2e-trim-synth-stamp-android.yaml against the iOS app id. Drives the
+# self-contained "run-remux-smoke" button (synthesize → trim → concat → stamp).
+#
+# Precondition: bare-example is built + installed on the booted simulator and
+# Metro is serving JS (`yarn smoke:ios` builds it). Run via `yarn test:e2e:ios`.
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- scrollUntilVisible:
+    element:
+      id: "run-remux-smoke"
+    timeout: 8000
+- tapOn:
+    id: "run-remux-smoke"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 120000
+- assertVisible: ".*synth=.*rnvp-remux-src\\.mp4.*"
+- assertVisible: ".*trim=.*rnvp-remux-trim\\.mp4.*"
+- assertVisible: ".*stamp=.*rnvp-remux-stamp\\.mp4.*"

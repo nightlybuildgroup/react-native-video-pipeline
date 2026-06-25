@@ -5799,4 +5799,99 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
                  @"no partial output expected for a missing source");
 }
 
+/// T048 — iOS half of the cross-platform golden pixel-hash suite. Env-gated by
+/// RNVP_GOLDEN_DIR so the normal `yarn test:native` run stays clean; the host
+/// `scripts/golden.mjs` sets it. Renders the deterministic synthesize golden
+/// spec (kept in lockstep with android GoldenSpecs.kt + scripts/golden.mjs)
+/// and writes sampled frames as raw RGBA8888. The host computes the signatures
+/// and does the regression + cross-platform comparison.
+- (void)testGoldenDumpFrames
+{
+  const char *dirEnv = getenv("RNVP_GOLDEN_DIR");
+  if (dirEnv == NULL || strlen(dirEnv) == 0) {
+    return; // not a golden run
+  }
+  NSString *outDir = [NSString stringWithUTF8String:dirEnv];
+  [[NSFileManager defaultManager] createDirectoryAtPath:outDir
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:NULL];
+
+  // synthesize spec — must match android GoldenSpecs.kt + scripts/golden.mjs.
+  const NSInteger w = 160, h = 120;
+  const double fps = 30.0, seconds = 0.5;
+  const NSInteger frames[] = {5, 10, 14};
+
+  NSString *mp4 = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:@"golden-synthesize.mp4"];
+  [[NSFileManager defaultManager] removeItemAtPath:mp4 error:nil];
+  NSError *err = nil;
+  BOOL aborted = NO;
+  XCTAssertTrue([RNVPSynthesizeRunner runFixedWithOutputPath:mp4
+                                                       width:w
+                                                      height:h
+                                                         fps:fps
+                                                     seconds:seconds
+                                                   stopToken:nil
+                                                    progress:nil
+                                                     aborted:&aborted
+                                                       error:&err],
+                @"synthesize golden render failed: %@", err);
+
+  // Extract via AVAssetReader (raw decoder output, BGRA) rather than
+  // AVAssetImageGenerator — the latter colour-manages the CGImage, shifting
+  // values away from what the decoder actually produced and away from
+  // Android's MediaMetadataRetriever output. Reading sequentially also keys on
+  // the exact frame index (no time-tolerance ambiguity).
+  AVAsset *asset = [AVAsset assetWithURL:[NSURL fileURLWithPath:mp4]];
+  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&err];
+  XCTAssertNotNil(reader, @"asset reader init failed: %@", err);
+  AVAssetTrack *track =
+      [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+  AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:track
+     outputSettings:@{(id)kCVPixelBufferPixelFormatTypeKey :
+                          @(kCVPixelFormatType_32BGRA)}];
+  [reader addOutput:output];
+  XCTAssertTrue([reader startReading], @"reader start failed: %@", reader.error);
+
+  NSMutableSet<NSNumber *> *want = [NSMutableSet set];
+  for (int i = 0; i < (int)(sizeof(frames) / sizeof(frames[0])); i++) {
+    [want addObject:@(frames[i])];
+  }
+
+  NSInteger idx = 0;
+  CMSampleBufferRef sb = NULL;
+  while ((sb = [output copyNextSampleBuffer]) != NULL) {
+    if ([want containsObject:@(idx)]) {
+      CVPixelBufferRef pb = CMSampleBufferGetImageBuffer(sb);
+      CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+      const size_t bw = CVPixelBufferGetWidth(pb);
+      const size_t bh = CVPixelBufferGetHeight(pb);
+      const size_t stride = CVPixelBufferGetBytesPerRow(pb);
+      const uint8_t *src = (const uint8_t *)CVPixelBufferGetBaseAddress(pb);
+      NSMutableData *rgba = [NSMutableData dataWithLength:bw * bh * 4];
+      uint8_t *dst = rgba.mutableBytes;
+      for (size_t y = 0; y < bh; y++) {
+        const uint8_t *row = src + y * stride;
+        for (size_t x = 0; x < bw; x++) {
+          const uint8_t *px = row + x * 4; // BGRA
+          const size_t o = (y * bw + x) * 4;
+          dst[o] = px[2];     // R
+          dst[o + 1] = px[1]; // G
+          dst[o + 2] = px[0]; // B
+          dst[o + 3] = px[3]; // A
+        }
+      }
+      CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+      NSString *name = [NSString
+          stringWithFormat:@"synthesize__%zux%zu__f%ld.rgba", bw, bh, (long)idx];
+      [rgba writeToFile:[outDir stringByAppendingPathComponent:name]
+             atomically:YES];
+    }
+    CFRelease(sb);
+    idx++;
+  }
+}
+
 @end

@@ -1,0 +1,28 @@
+# T048 — Android end-to-end smoke: synthesize + trim + stamp.
+#
+# Drives the bare-example "run-remux-smoke" button, which is fully
+# self-contained: it synthesizes a 160x120/30fps/2s source, trims it,
+# concatenates it, and stamps metadata onto it — exercising the synthesize,
+# trim, and stamp render paths in one tap with no pre-pushed fixtures.
+#
+# Precondition: bare-example is installed on the booted emulator and Metro is
+# serving JS (or a bundled build is installed). Run via `yarn test:e2e:android`.
+appId: com.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- scrollUntilVisible:
+    element:
+      id: "run-remux-smoke"
+    timeout: 8000
+- tapOn:
+    id: "run-remux-smoke"
+- extendedWaitUntil:
+    visible:
+      id: "result-ok"
+    timeout: 120000
+- assertVisible: ".*synth=.*rnvp-remux-src\\.mp4.*"
+- assertVisible: ".*trim=.*rnvp-remux-trim\\.mp4.*"
+- assertVisible: ".*stamp=.*rnvp-remux-stamp\\.mp4.*"
