@@ -24,6 +24,7 @@ android {
   defaultConfig {
     minSdkVersion getExtOrDefault("minSdkVersion", 24)
     targetSdkVersion getExtOrDefault("targetSdkVersion", 34)
+    testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
     externalNativeBuild {
       cmake {
@@ -52,6 +53,9 @@ android {
       java.srcDirs += ["src/main/java"]
       manifest.srcFile "src/main/AndroidManifest.xml"
     }
+    androidTest {
+      java.srcDirs += ["src/androidTest/java"]
+    }
   }
 
   compileOptions {
@@ -68,6 +72,12 @@ android {
     // the app doesn't see two copies.
     jniLibs {
       excludes += ["**/libc++_shared.so"]
+      // The instrumented-test APK pulls the RN/JSI prefab .so's (libfbjni,
+      // libjsi, libreactnative, …) from both this module's prefab copy and the
+      // react-android transform — take the first so the androidTest merge
+      // doesn't fail on the duplicates. Affects only apk/test-apk assembly,
+      // never the shipped AAR (the consuming app does its own packaging).
+      pickFirsts += ["**/*.so"]
     }
   }
 }
@@ -81,6 +91,12 @@ dependencies {
   implementation "com.facebook.react:react-android"
   implementation project(":react-native-nitro-modules")
   implementation "org.jetbrains.kotlin:kotlin-stdlib"
+
+  // On-device (instrumented) tests for the pure-Kotlin media surface
+  // (Transcoder / OverlayTextRasterizer / SynthesizeRunner). See
+  // src/androidTest. Not shipped — androidTest deps never enter the AAR.
+  androidTestImplementation "androidx.test.ext:junit:1.1.5"
+  androidTestImplementation "androidx.test:runner:1.5.2"
 }
 
 // Pull in the nitrogen-generated Kotlin + CMake extensions. The autolinker

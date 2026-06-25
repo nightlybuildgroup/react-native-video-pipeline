@@ -538,20 +538,19 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         Unit
       }
     }
-    // Text watermark is T045 (Media3 TextOverlay); v0.1 rejects loudly.
-    if (watermark is Variant_ImageOverlay_TextOverlay.Second) {
-      return Promise.rejected(
-        VideoPipelineInvalidSpecException(
-          "stamp: text watermark rendering is T045 (not yet implemented on Android); " +
-            "use an image watermark via Overlay.Image for v0.1"
-        )
-      )
-    }
-    val imageOverlay = (watermark as Variant_ImageOverlay_TextOverlay.First).value
-
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     return Promise.parallel {
       try {
+        // Image overlays decode a source bitmap; text overlays (T045)
+        // rasterize natively via OverlayTextRasterizer. Both flatten to a
+        // ResolvedOverlay the GL compose path treats identically. Resolved
+        // inside the worker so file IO / rasterization stay off the JS thread.
+        val resolved = when (watermark) {
+          is Variant_ImageOverlay_TextOverlay.First ->
+            Transcoder.resolveImageOverlay(watermark.value)
+          is Variant_ImageOverlay_TextOverlay.Second ->
+            Transcoder.resolveTextOverlay(watermark.value)
+        }
         // Probe the source for dimensions + fps — stamp inherits them, the
         // watermark just composites on top of decoded frames re-encoded at
         // the same shape.
@@ -586,7 +585,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           sourceUri = uri,
           outputPath = outPath,
           target = target,
-          overlays = listOf(imageOverlay),
+          overlays = listOf(resolved),
           metadata = metadata,
           stopToken = stopToken,
           progress = progressSink,
