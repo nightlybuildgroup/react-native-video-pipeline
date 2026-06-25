@@ -15,7 +15,7 @@ def getExtOrDefault(name, defaultValue) {
 }
 
 android {
-  namespace "com.unbogify.videopipeline"
+  namespace "com.nightlybuildgroup.videopipeline"
 
   compileSdkVersion getExtOrDefault("compileSdkVersion", 35)
   ndkVersion getExtOrDefault("ndkVersion", "26.1.10909125")

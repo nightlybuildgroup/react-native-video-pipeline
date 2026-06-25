@@ -31,8 +31,8 @@ internal object RenderJournal {
   private const val TAG = "RNVP.RenderJournal"
 
   /// Matches the iOS NSUserDefaults key namespace so the two platforms read
-  /// as one design (`com.unbogify.rnvp.activeRenders`).
-  private const val PREFS = "com.unbogify.rnvp.activeRenders"
+  /// as one design (`com.nightlybuildgroup.rnvp.activeRenders`).
+  private const val PREFS = "com.nightlybuildgroup.rnvp.activeRenders"
 
   private val lock = Any()
   private val drained = AtomicBoolean(false)

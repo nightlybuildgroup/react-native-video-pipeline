@@ -1,4 +1,4 @@
-package com.unbogify.videopipeline
+package com.nightlybuildgroup.videopipeline
 
 import com.facebook.react.TurboReactPackage
 import com.facebook.react.bridge.NativeModule
