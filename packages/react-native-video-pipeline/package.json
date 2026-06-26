@@ -24,7 +24,7 @@
     "android",
     "nitrogen",
     "plugin/build",
-    "plugin/app.plugin.js",
+    "app.plugin.js",
     "nitro.json",
     "NitroVideoPipeline.podspec",
     "!**/__tests__",
@@ -40,8 +40,9 @@
     "typecheck": "tsc --noEmit",
     "nitrogen": "nitrogen",
     "build": "bob build",
+    "build:plugin": "tsc -p plugin/tsconfig.json",
     "clean": "del-cli lib nitrogen plugin/build",
-    "prepack": "yarn nitrogen && yarn build"
+    "prepack": "yarn nitrogen && yarn build && yarn build:plugin"
   },
   "keywords": [
     "react-native",
@@ -72,6 +73,7 @@
     }
   },
   "devDependencies": {
+    "@expo/config-plugins": "^56.0.9",
     "del-cli": "^7.0.0",
     "nitrogen": "0.35.2",
     "react-native-builder-bob": "^0.41.0",
