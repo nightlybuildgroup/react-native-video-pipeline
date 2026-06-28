@@ -665,14 +665,24 @@ export interface VideoPipeline extends HybridObject<{ ios: 'c++'; android: 'kotl
    * elapsedMs, width, height) is reconstructed by the JS wrapper in
    * `src/video.ts` before invoking the user's `FrameDrawer`.
    *
-   * `drawFrame` returns `boolean` (not `void`) so Nitro picks `SyncJSCallback`
-   * — a `void`-returning function would be routed through `AsyncJSCallback`
-   * which dispatches to JS asynchronously and the native pump would continue
-   * before the worklet has actually written into the `FrameTarget`. The
-   * return value is currently ignored; it's reserved for a future
-   * "keep-rendering" signal on open-ended renders. The JS wrapper in
-   * `src/video.ts` always returns `true` so consumer `FrameDrawer`s can keep
-   * the documented `(ctx) => void` contract.
+   * `drawFrame` crosses Nitro as an **async** callback: the current Nitrogen
+   * generates `std::function<std::shared_ptr<Promise<bool>>(...)>` regardless
+   * of the `boolean` (vs `void`) return — there is no `SyncJSCallback` path in
+   * this version. The per-frame synchronization the `FrameTarget` requires (its
+   * buffer is valid only for the duration of the call) is therefore NOT a
+   * property of the callback's return type; it is enforced by the native pump
+   * explicitly blocking on the returned promise each frame
+   * (`promise->await().get()` in `VideoPipeline.mm`) before it invalidates the
+   * target and advances. The `boolean` return value is currently ignored; it's
+   * reserved for a future "keep-rendering" signal on open-ended renders, and
+   * the JS wrapper in `src/video.ts` always returns `true` so consumer
+   * `FrameDrawer`s keep the documented `(ctx) => void` contract.
+   *
+   * NOTE (#34): because this is a plain async JS callback, `drawFrame` runs on
+   * the React JS thread, not in a `react-native-worklets-core` runtime — the
+   * `'worklet'` directive is enforced at build time but not yet honored at run
+   * time. Moving per-frame drawing onto a worklets-core runtime on the render
+   * thread is tracked by #34.
    */
   renderCompose(
     spec: VideoSpec,
