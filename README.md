@@ -168,7 +168,7 @@ const info = await Video.info(sourceUri);
 | Method | Does | Path |
 | --- | --- | --- |
 | `Video.info` / `Video.thumbnail` / `Video.capabilities` | Probe metadata, extract a frame, query encoder caps | — |
-| `Video.trim` | Cut a single clip | remux → transcode if transformed |
+| `Video.trim` | Lossless-cut a single clip (no transform — use `render` to also transform) | remux |
 | `Video.flip` | Horizontal / vertical flip | remux → transcode |
 | `Video.stamp` | Watermark and/or write metadata | remux (metadata) / transcode (watermark) |
 | `Video.render` | Multi-clip concat, overlays, custom encode, audio | remux / transcode |

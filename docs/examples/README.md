@@ -9,6 +9,7 @@ For the full type reference see [`../api.md`](../api.md).
 | Scenario                                  | Path        | File                                       |
 | ----------------------------------------- | ----------- | ------------------------------------------ |
 | Trim a clip without re-encoding           | remux       | [`trim.md`](./trim.md)                     |
+| Trim **and** transform (flip/rotate/crop) | remux/transcode | [`render.md`](./render.md)             |
 | Flip horizontally / vertically            | remux/transcode | [`flip.md`](./flip.md)                 |
 | Stamp a watermark or write metadata       | transcode/remux | [`stamp.md`](./stamp.md)               |
 | Per-frame drawing on top of a clip        | compose     | [`compose.md`](./compose.md)               |
@@ -20,7 +21,7 @@ For the full type reference see [`../api.md`](../api.md).
 ## Pick by execution path
 
 - **Remux** (passthrough, fastest): [`trim.md`](./trim.md), metadata-only [`stamp.md`](./stamp.md), rotation-only [`flip.md`](./flip.md)
-- **Transcode** (native overlays + transforms): watermark [`stamp.md`](./stamp.md), cropped [`trim.md`](./trim.md)
+- **Transcode** (native overlays + transforms): watermark [`stamp.md`](./stamp.md), flip/crop via [`render.md`](./render.md)
 - **Compose** (worklet, slowest): [`compose.md`](./compose.md), [`compose-skia.md`](./compose-skia.md), [`synthesize.md`](./synthesize.md)
 
 See [`../api.md#routing-rules`](../api.md#routing-rules) for the routing decision table.

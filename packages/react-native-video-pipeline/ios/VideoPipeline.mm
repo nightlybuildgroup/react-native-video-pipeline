@@ -988,26 +988,14 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::trim(
     const std::string& outPath,
     double startSec,
     double durationSec,
-    const std::optional<ClipTransform>& transform,
     const std::string& /*renderToken*/,
     const std::optional<std::function<void(const Progress&)>>& /*onProgress*/) {
-  // Remux trim has no decode/encode loop to instrument — `onProgress` is
-  // accepted for API uniformity and ignored. See `docs/api.md` (Progress
-  // reporting on convenience methods) for the contract.
-  // T027 scope: pure passthrough trim. Any non-empty transform (rotation,
-  // flip, crop) routes through T028+ once those paths land. Surface that
-  // explicitly instead of silently dropping the transform.
-  if (transform.has_value()) {
-    const auto& t = *transform;
-    const bool anySet = t.rotate.has_value() || t.flipH.value_or(false) ||
-                        t.flipV.value_or(false) || t.crop.has_value();
-    if (anySet) {
-      return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
-          "trim: transform argument is not supported yet — rotation/flip "
-          "land in T028, crop in a later transcode task")));
-    }
-  }
-
+  // `trim` is the lossless-cut primitive: pure passthrough remux, no
+  // transform. Trimming *and* transforming in one pass goes through
+  // `render`, whose native router picks remux (rotation-only) vs transcode
+  // (flip/crop). Remux trim has no decode/encode loop to instrument, so
+  // `onProgress` is accepted for API uniformity and ignored — see
+  // `docs/api.md` (Progress reporting on convenience methods).
   NSURL* sourceURL = urlFromUri(uri);
   NSURL* outputURL = urlFromUri(outPath);
   return Promise<void>::async(

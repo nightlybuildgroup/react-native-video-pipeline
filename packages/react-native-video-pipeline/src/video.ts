@@ -2,7 +2,6 @@ import { CancelledError, InvalidSpecError, normalizeNativeError } from './errors
 import { getNativeVideoPipeline } from './native';
 import type {
   Clip,
-  ClipTransform,
   EncoderCaps,
   FlipAxis,
   FrameDrawer,
@@ -32,7 +31,6 @@ export interface TrimOptions extends RenderOptions {
   startSec: number;
   durationSec: number;
   outPath: string;
-  transform?: ClipTransform;
 }
 
 export interface FlipOptions extends RenderOptions {
@@ -569,7 +567,11 @@ export const Video = {
       });
   },
 
-  /** Remux trim — never re-encodes when `transform` is rotation-only. */
+  /**
+   * Lossless-cut a single clip — always remux, never re-encode. To trim *and*
+   * transform (rotate/flip/crop) in one pass, use {@link Video.render}, whose
+   * native router picks remux vs transcode uniformly across platforms.
+   */
   trim(uri: string, options: TrimOptions): Promise<void> {
     validateFileUri('trim.uri', uri);
     requireNonNeg('trim.startSec', options.startSec);
@@ -581,7 +583,6 @@ export const Video = {
         options.outPath,
         options.startSec,
         options.durationSec,
-        options.transform,
         token,
         options.onProgress,
       ),

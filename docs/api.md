@@ -35,8 +35,9 @@ Start here. The decision tree is shallow:
 **2. Editing video?** Ask: *am I writing pixels from JavaScript?*
 
 - **No** — the operation can be expressed as "the native side does X to this clip":
-  - Single-clip trim, optionally with a transform → `Video.trim`.
+  - Single-clip lossless cut (no transform) → `Video.trim`.
   - Single-clip horizontal/vertical flip → `Video.flip`.
+  - Cut **and** transform (rotate/flip/crop) in one pass → `Video.render`.
   - Add a watermark image/text and/or write metadata onto one clip → `Video.stamp`.
   - **Anything more complex** — multiple clips concatenated, multiple overlays, custom output codec/bitrate/dimensions, mixed transforms, audio replacement — → `Video.render` with a full `RenderSpec`.
 - **Yes**, I want a worklet drawing on every frame:
@@ -122,7 +123,7 @@ Cached encoder capability snapshot — supported codecs, max dimensions and fps,
 Video.trim(uri: string, options: TrimOptions): Promise<void>
 ```
 
-Trim a clip. Always remuxes (passthrough — no re-encode) when `options.transform` is `undefined` or rotation-only; transcodes when `transform.crop`, `flipH`, or `flipV` is present. See [Routing rules](#routing-rules).
+Lossless-cut a single clip. **Always remuxes** (passthrough — no re-encode), on both iOS and Android. `trim` deliberately takes no transform: it is the fast-cut primitive. To trim **and** transform (rotate/flip/crop) in one pass, use [`Video.render`](#videorender) — its native router picks remux (rotation-only) vs transcode (flip/crop) uniformly across platforms. See [Routing rules](#routing-rules) and the [trim + flip example](./examples/render.md).
 
 End-past-EOF requests (`startSec + durationSec > source duration`) are silently clamped to the source's actual duration — matches `AVAssetExportSession` and ffmpeg leniency. This absorbs muxer-vs-encoder rounding drift (e.g. recorders that report a target duration ~10ms shorter than the bytes they actually wrote). Only `startSec` past EOF rejects with `InvalidSpec`.
 

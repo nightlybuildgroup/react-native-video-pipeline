@@ -39,7 +39,6 @@ public:
       const std::string& outPath,
       double startSec,
       double durationSec,
-      const std::optional<ClipTransform>& transform,
       const std::string& renderToken,
       const std::optional<std::function<void(const Progress&)>>& onProgress) override;
   std::shared_ptr<Promise<void>> flip(

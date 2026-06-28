@@ -1,6 +1,6 @@
 # Trim a clip
 
-`Video.trim` cuts a sub-range out of a source clip. With no `transform`, or a rotation-only transform, the operation is a **remux** — bytes are copied straight through and no re-encode happens. Adding `crop`, `flipH`, or `flipV` falls into transcode.
+`Video.trim` cuts a sub-range out of a source clip. It is the **lossless-cut primitive**: the operation is always a **remux** — bytes are copied straight through, no re-encode — on both iOS and Android. `trim` takes no transform; to trim *and* transform in one pass, see [`render.md`](./render.md).
 
 ## Plain trim (remux)
 
@@ -16,33 +16,11 @@ await Video.trim(sourceUri, {
 
 The output is bit-identical to the source for the trimmed range — codec, bitrate, color profile, audio track all preserved.
 
-## Trim with rotation (still remux)
+End-past-EOF requests (`startSec + durationSec` longer than the source) are silently clamped to the source's real duration. Only a `startSec` past the end rejects with `InvalidSpecError`.
 
-Rotation is metadata in mp4 / mov containers — flipping the rotation flag doesn't touch pixel data.
+## Trim *and* transform → use `Video.render`
 
-```ts
-await Video.trim(sourceUri, {
-  outPath: `${dir}/trimmed-rot.mp4`,
-  startSec: 0,
-  durationSec: 3,
-  transform: { rotate: 90 },
-});
-```
-
-## Trim with crop (transcode)
-
-```ts
-await Video.trim(sourceUri, {
-  outPath: `${dir}/trimmed-cropped.mp4`,
-  startSec: 0,
-  durationSec: 3,
-  transform: {
-    crop: { x: 100, y: 100, w: 720, h: 720 },
-  },
-});
-```
-
-`crop` coordinates are in **source pixels**, not output pixels. The output dimensions are inferred from the crop rectangle.
+`trim` deliberately stays a pure cut. The moment you also want to rotate, flip, or crop, reach for `Video.render` — its native router remuxes a rotation-only spec (lossless, both platforms) and transcodes flip/crop, picking the cheapest path uniformly across iOS and Android. See [`render.md`](./render.md).
 
 ## Errors
 
@@ -52,5 +30,6 @@ await Video.trim(sourceUri, {
 
 ## See also
 
+- [`render.md`](./render.md) — trim + flip / rotate / crop in one pass
 - [`flip.md`](./flip.md) — pure flip without trimming
 - [`../api.md#videotrim`](../api.md#videotrim) — full type reference

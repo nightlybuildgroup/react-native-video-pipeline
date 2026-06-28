@@ -489,20 +489,15 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     outPath: String,
     startSec: Double,
     durationSec: Double,
-    transform: ClipTransform?,
     renderToken: String,
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
-    // Remux trim has no decode/encode loop to instrument — `onProgress` is
-    // accepted for API uniformity and ignored. See `docs/api.md`.
-    if (transform != null && clipTransformIsNonEmpty(transform)) {
-      return Promise.rejected(
-        VideoPipelineInvalidSpecException(
-          "trim: transform argument is not supported yet on Android — " +
-            "rotation/flip/crop land on the transcode path (T044)"
-        )
-      )
-    }
+    // `trim` is the lossless-cut primitive: pure passthrough remux, no
+    // transform. Trimming *and* transforming in one pass goes through
+    // `render`, whose router picks remux (rotation-only) vs transcode
+    // (flip/crop). Remux trim has no decode/encode loop to instrument, so
+    // `onProgress` is accepted for API uniformity and ignored. See
+    // `docs/api.md`.
     // Passthrough remux finishes in milliseconds — journal-only (no
     // foreground-service notification flicker), but still cleaned up on a
     // mid-op kill via the journal.

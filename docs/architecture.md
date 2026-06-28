@@ -139,7 +139,7 @@ react-native-video-pipeline/                          # repo root (yarn workspac
 | `Video.info`             | Probe                             | Read dimensions, duration, fps, codec, HDR, bit rate, container metadata                                                                 |
 | `Video.thumbnail`        | Probe                             | Extract JPEG at offset, optional resize                                                                                                  |
 | `Video.capabilities`     | Probe                             | Report device encoder caps (max res/fps/codec, HDR support)                                                                              |
-| `Video.trim`             | Convenience → remux               | Time-range trim, passthrough; transcodes when transform has crop/flip                                                                    |
+| `Video.trim`             | Convenience → remux               | Lossless time-range cut, passthrough only (no transform — `Video.render` owns trim+transform)                                            |
 | `Video.flip`             | Convenience → remux/transcode     | Rotation-flag flip in mp4/mov; transcodes otherwise                                                                                      |
 | `Video.stamp`            | Convenience → transcode/remux     | Watermark + metadata; metadata-only stamps remux                                                                                         |
 | `Video.render`           | Core                              | Full-spec native editing entry point — auto-routes between remux and transcode based on `VideoSpec`                                      |

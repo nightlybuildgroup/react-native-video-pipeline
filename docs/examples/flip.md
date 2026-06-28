@@ -20,18 +20,17 @@ await Video.flip(sourceUri, {
 
 ## When you also want to trim
 
-Use `Video.trim` with a `transform.flipH` or `transform.flipV` — same routing rules apply.
+`Video.trim` is a pure lossless cut and takes no transform. To cut **and** flip in one pass, use `Video.render` with a clip `transform` — the native router transcodes flip uniformly across platforms:
 
 ```ts
-await Video.trim(sourceUri, {
-  outPath: `${dir}/trimmed-flipped.mp4`,
-  startSec: 1,
-  durationSec: 4,
-  transform: { flipH: true },
+await Video.render({
+  clips: [{ uri: sourceUri, startSec: 1, durationSec: 4, transform: { flipH: true } }],
+  output: { path: `${dir}/trimmed-flipped.mp4` },
 });
 ```
 
 ## See also
 
-- [`trim.md`](./trim.md) — combine trim + flip
+- [`render.md`](./render.md) — combine trim + flip / rotate / crop in one pass
+- [`trim.md`](./trim.md) — the lossless-cut primitive
 - [`../api.md#videoflip`](../api.md#videoflip) — full type reference
