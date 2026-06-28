@@ -6905,20 +6905,24 @@ static NSUInteger audioTrackCount(NSString *path) {
   NSString *outPath = [NSTemporaryDirectory()
       stringByAppendingPathComponent:
           [NSString stringWithFormat:@"trim-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  // Use a *nonzero* source window [0.5, 1.0): the replacement audio must still
+  // align to the output's t=0 (read from replacement t=0), not be shifted by
+  // startSec — the regression the windowing fix closed.
   XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
                                         toURL:[NSURL fileURLWithPath:outPath]
-                                     startSec:0.0
-                                  durationSec:1.0
+                                     startSec:0.5
+                                  durationSec:0.5
                                     audioMode:RNVPAudioModeReplace
                           audioReplacementURL:[NSURL fileURLWithPath:replPath]
                                         error:&error],
                 @"replace trim failed: %@", error);
   XCTAssertGreaterThanOrEqual(audioTrackCount(outPath), 1u,
                               @"replace trim must carry a swapped audio track");
-  const double frontRMS = decodeAudioRMSWindow(outPath, 0.1, 0.35);
+  const double frontRMS = decodeAudioRMSWindow(outPath, 0.05, 0.3);
   XCTAssertGreaterThan(frontRMS, 0.15,
                        @"replaced soundtrack should make the front window a "
-                       @"tone (got %.4f) — proves the swap aligned to t=0",
+                       @"tone (got %.4f) — proves the swap aligned to the "
+                       @"output t=0, not the source window start",
                        frontRMS);
 
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
