@@ -573,6 +573,68 @@ function App(): React.JSX.Element {
     }
   };
 
+  // High-fps end-to-end smoke: a longer 240fps clip must run through every
+  // re-encoding render path. Synthesizes 5s @ 240fps (1200 frames), then trims
+  // (remux passthrough) and re-encodes (resize transcode) the full timeline.
+  // Exercises the #32 encode paths (no wall-clock deadline) at high frame
+  // count through RN → Nitro → native. Measured ~0.2ms/frame; 1200 frames
+  // synthesize in ~260ms, so the whole chain is well under a second of native
+  // work (logged for visibility).
+  const runHighFpsSmoke = async () => {
+    setResult({ kind: 'loading' });
+    try {
+      const tmp = resolveTempDir();
+      const srcPath = `${tmp}/rnvp-hifps-src.mp4`;
+      const trimPath = `${tmp}/rnvp-hifps-trim.mp4`;
+      const reencPath = `${tmp}/rnvp-hifps-reenc.mp4`;
+      const drawFrame = (() => {
+        'worklet';
+      }) as (ctx: unknown) => void;
+
+      const t0 = Date.now();
+      await Video.synthesize({
+        output: { path: srcPath, width: 160, height: 120, fps: 240 },
+        duration: { mode: 'fixed', seconds: 5.0 },
+        drawFrame,
+      });
+      const tSynth = Date.now() - t0;
+
+      const t1 = Date.now();
+      await Video.trim(`file://${srcPath}`, {
+        startSec: 0.0,
+        durationSec: 5.0,
+        outPath: trimPath,
+      });
+      const tTrim = Date.now() - t1;
+
+      const t2 = Date.now();
+      await Video.render(
+        {
+          output: { path: reencPath, width: 80, height: 60, fps: 240 },
+          clips: [{ uri: `file://${srcPath}`, startSec: 0, durationSec: 5.0 }],
+        },
+        {},
+      );
+      const tReenc = Date.now() - t2;
+
+      const value = [
+        `platform=${Platform.OS}`,
+        `hifps-synth=${tSynth}ms ${srcPath}`,
+        `hifps-trim=${tTrim}ms ${trimPath}`,
+        `hifps-reenc=${tReenc}ms ${reencPath}`,
+      ].join('\n');
+      console.log(value);
+      setResult({ kind: 'ok', value });
+    } catch (err) {
+      const e = err as Error;
+      setResult({
+        kind: 'error',
+        name: e.name ?? 'Error',
+        message: e.message ?? String(err),
+      });
+    }
+  };
+
   const runProbeSmoke = async () => {
     setResult({ kind: 'loading' });
     try {
@@ -718,6 +780,18 @@ function App(): React.JSX.Element {
           disabled={result.kind === 'loading'}
         >
           <Text style={styles.buttonLabel}>Stamp frame # on IMG_6643 (Skia compose-on-clip)</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          accessibilityRole="button"
+          testID="run-highfps-smoke"
+          style={styles.button}
+          onPress={runHighFpsSmoke}
+          disabled={result.kind === 'loading'}
+        >
+          <Text style={styles.buttonLabel}>
+            Run high-fps smoke (synth + trim + transcode @ 240fps × 5s)
+          </Text>
         </TouchableOpacity>
 
         <TouchableOpacity
