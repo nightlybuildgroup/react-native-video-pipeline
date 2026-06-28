@@ -108,18 +108,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       return renderCompositePip(spec, clips.toList(), renderToken, onProgress)
     }
     // Timeline overlaps (a clip starting before the previous one ends) are
-    // crossfade-composited on iOS (#18). The Android Media3 crossfade — a
-    // multi-sequence Composition with a time-ramped alpha — is not implemented
-    // yet, so reject explicitly here rather than mis-render the overlap as a
-    // gapless concat. Tracked as Android follow-up #43.
+    // crossfade-dissolved over the overlap window (#43 — Android parity with iOS
+    // #18) via a two-sequence ping-pong Composition with a time-ramped alpha.
     if (clips != null && hasOverlap(clips.toList())) {
-      return Promise.rejected(
-        VideoPipelineInvalidSpecException(
-          "timeline overlaps (clip.outputStartSec before the previous clip's " +
-            "end) are not supported on Android yet — they crossfade on iOS; " +
-            "use a contiguous timeline or a gap on Android"
-        )
-      )
+      return renderCompositeCrossfade(spec, clips.toList(), renderToken, onProgress)
     }
     return when {
       clips == null || clips.isEmpty() ->
@@ -1031,8 +1023,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         baseClips.forEach { c ->
           if (c.outputStart < basePrevEnd - 1e-3) {
             throw VideoPipelineInvalidSpecException(
-              "base-track overlaps are not supported on Android yet (#43); " +
-                "overlay (PiP) tracks compose on top of a non-overlapping base"
+              "base-track overlaps combined with overlay (PiP) tracks are not " +
+                "supported on Android yet (#52); overlay tracks compose on top of " +
+                "a non-overlapping base — render the crossfade in a separate pass"
             )
           }
           basePrevEnd = c.outputStart + c.sourceDuration
@@ -1168,6 +1161,160 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
 
         TransformerRunner.runCompositePip(
           ctx, baseSpecs, overlayLayers, totalDurationSec, stopToken,
+          wrapTransformerProgress(onProgress),
+        )
+
+        spec.metadata?.let { applyRenderMetadata(outputPath, it) }
+        Unit
+      } catch (e: TransformerRunner.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.InvalidSpecException) {
+        throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
+      } finally {
+        guard.end()
+        RenderTokenRegistry.unregisterToken(renderToken)
+      }
+    }
+  }
+
+  /// Timeline-overlap crossfade (#43 — Android parity with iOS #18). Adjacent
+  /// clips whose output windows overlap are dissolved over the overlap region.
+  /// Runs as a two-sequence ping-pong Media3 [Composition] with a time-ramped
+  /// alpha via [TransformerRunner.runCompositeCrossfade].
+  ///
+  /// v1 limits: only adjacent-pair overlaps (a clip overlapping two neighbours or
+  /// fully containing another rejects — enforced in JS and re-checked here); the
+  /// base audio honours passthrough (volume-ramped per clip) / mute, while
+  /// `audio.mode = 'replace'` rejects (follow-up). Unlike iOS — whose H.264-only
+  /// export preset rejects an HEVC overlap output — Android re-encodes directly,
+  /// so HEVC and an explicit bitrate are honoured.
+  private fun renderCompositeCrossfade(
+    spec: VideoSpec,
+    clips: List<Clip>,
+    renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
+  ): Promise<Unit> {
+    val outputPath = spec.output.path
+    val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
+    return Promise.parallel {
+      try {
+        val output = spec.output
+        if (spec.duration != null) {
+          throw VideoPipelineInvalidSpecException("duration is only valid when clips is empty")
+        }
+        if (clips.size < 2) {
+          throw VideoPipelineInvalidSpecException("a crossfade overlap needs at least two clips")
+        }
+        if (spec.overlays?.isNotEmpty() == true) {
+          throw VideoPipelineInvalidSpecException(
+            "static overlays combined with crossfade overlaps are not supported yet"
+          )
+        }
+        if (spec.audio?.mode == AudioMode.REPLACE) {
+          throw VideoPipelineInvalidSpecException(
+            "audio.mode = 'replace' with crossfade overlaps is not supported yet"
+          )
+        }
+        val ctx = NitroModules.applicationContext?.applicationContext
+          ?: throw VideoPipelineInvalidSpecException(
+            "render: no application context available for the transcoder"
+          )
+
+        val infos = clips.map { ProbeRunner.info(it.uri) }
+
+        // Effective rendered durations (a trim is clamped to source EOF).
+        val effDur = clips.indices.map { i ->
+          val clip = clips[i]
+          val info = infos[i]
+          val isRealTrim = clip.sourceStart > 1e-3 || clip.sourceDuration < info.durationSec - 0.05
+          if (isRealTrim) {
+            minOf(clip.sourceDuration, info.durationSec - clip.sourceStart).coerceAtLeast(0.0)
+          } else {
+            info.durationSec
+          }
+        }
+        // Re-check the iOS adjacent-pair invariant (JS already enforces it):
+        // an overlap may reach back only into the immediately preceding clip and
+        // may not fully contain it.
+        for (i in 1 until clips.size) {
+          val start = clips[i].outputStart
+          val prevStart = clips[i - 1].outputStart
+          val prevEnd = prevStart + effDur[i - 1]
+          if (start < prevStart - 1e-3) {
+            throw VideoPipelineInvalidSpecException(
+              "crossfade: clip $i starts before the previous clip — an overlap may " +
+                "only reach back into the immediately preceding clip"
+            )
+          }
+          if (i >= 2) {
+            val prevPrevEnd = clips[i - 2].outputStart + effDur[i - 2]
+            if (start < prevPrevEnd - 1e-3) {
+              throw VideoPipelineInvalidSpecException(
+                "crossfade: clip $i overlaps two clips back — only adjacent-pair " +
+                  "overlaps are supported"
+              )
+            }
+          }
+          if (start + effDur[i] < prevEnd - 1e-3) {
+            throw VideoPipelineInvalidSpecException(
+              "crossfade: clip $i is fully contained in the previous clip — not supported"
+            )
+          }
+        }
+
+        // Shared canvas from clip 0 (post its own rotation) unless output pins it.
+        val t0 = clips[0].transform
+        val rot0 = t0?.rotate?.roundToInt() ?: -1
+        val swap0 = rot0 == 90 || rot0 == 270
+        val content0W = t0?.crop?.w ?: infos[0].width
+        val content0H = t0?.crop?.h ?: infos[0].height
+        val canvasW = (output.width ?: if (swap0) content0H else content0W).roundToInt()
+        val canvasH = (output.height ?: if (swap0) content0W else content0H).roundToInt()
+
+        val totalDurationSec = clips.last().outputStart + effDur.last()
+        val muteAll = spec.audio?.mode == AudioMode.MUTE
+
+        val crossfadeClips = clips.indices.map { i ->
+          val clip = clips[i]
+          val info = infos[i]
+          val t = clip.transform
+          val isRealTrim = clip.sourceStart > 1e-3 || clip.sourceDuration < info.durationSec - 0.05
+          val cfSpec = TransformerRunner.Spec(
+            sourceUri = clip.uri,
+            outputPath = outputPath,
+            sourceWidth = info.codedWidth.roundToInt(),
+            sourceHeight = info.codedHeight.roundToInt(),
+            startSec = if (isRealTrim) clip.sourceStart else 0.0,
+            durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
+            rotate = t?.rotate?.roundToInt() ?: -1,
+            flipH = t?.flipH ?: false,
+            flipV = t?.flipV ?: false,
+            cropX = t?.crop?.x ?: 0.0,
+            cropY = t?.crop?.y ?: 0.0,
+            cropW = t?.crop?.w ?: 0.0,
+            cropH = t?.crop?.h ?: 0.0,
+            outWidth = canvasW,
+            outHeight = canvasH,
+            fps = resolveMedia3TargetFps(output.fps, info.fps),
+            hevc = output.codec == VideoCodec.HEVC,
+            bitrate = output.bitrate?.roundToInt(),
+            outCanvasW = canvasW,
+            outCanvasH = canvasH,
+            removeAudio = muteAll,
+            outputDurationSec = totalDurationSec,
+          )
+          TransformerRunner.CrossfadeClip(
+            spec = cfSpec,
+            outputStartSec = clip.outputStart,
+            effDurSec = effDur[i],
+          )
+        }
+
+        TransformerRunner.runCompositeCrossfade(
+          ctx, crossfadeClips, totalDurationSec, stopToken,
           wrapTransformerProgress(onProgress),
         )
 

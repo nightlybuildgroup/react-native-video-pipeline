@@ -235,6 +235,47 @@ Unlike iOS — whose `HighestQuality` export preset is H.264-only — the Androi
 Transformer re-encodes the composite directly, so an HEVC output and an explicit
 bitrate are honoured for PiP too.
 
+### Timeline-overlap crossfade (#43, parity with iOS #18)
+
+A clip whose `outputStartSec` is **before** the previous clip's end overlaps it;
+the overlap window is crossfade-dissolved. `TransformerRunner.runCompositeCrossfade`
+builds **two ping-pong `EditedMediaItemSequence`s** — clip `i` goes on sequence
+`i % 2`, so an overlapping adjacent pair always lands on distinct sequences and
+can coexist in time (a single sequence is gapless/non-overlapping by
+construction). Each sequence is transparent-padded to span the full output
+duration, exactly like the PiP path.
+
+Media3 draws sequence 0 on top, so a `VideoCompositorSettings` ramps **sequence
+0's** alpha across each overlap window: `1→0` when sequence 0 holds the
+**outgoing** (earlier-index) clip, `0→1` when it holds the **incoming** clip —
+either way the visible result dissolves outgoing→incoming (`out·α + in·(1−α)` vs
+`in·α + out·(1−α)` are the same blend). Sequence 1 stays opaque. Because the
+z-order is fixed by registration (sequence 0 always on top), the ramp direction —
+not the layer order — is what flips with the clip's parity; this is the one place
+the Android compositor differs in mechanism from the iOS `setOpacityRamp` (which
+reorders layers per region so the outgoing clip is always in front).
+
+**Audio.** Passthrough audio rides **two more** ping-pong sequences, separate from
+the video ones. The video sequences are always audio-stripped: a sequence that
+leads with a transparent image pad and then has an audio-bearing clip throws a
+Media3 asset-loader error (it can't reconcile a no-audio first item with a later
+audio one, with or without a forced audio track). The audio sequences instead use
+`addGap` for proper silent positioning — clip `i`'s audio (video stripped) is
+preceded by an `addGap` so it lands at its `outputStart`, and a clip with no audio
+track becomes a plain silence gap so the envelope on the audio-bearing clips stays
+aligned. Each audio clip carries a `VolumeRampAudioProcessor` (a `BaseAudioProcessor`
+on PCM 16-bit) whose head ramps `0→1` when the clip is the incoming side of an
+overlap and whose tail ramps `1→0` when it is the outgoing side, so the two
+overlapping audio sequences sum to a crossfade rather than a doubled-volume bump —
+the same envelope the iOS `AVMutableAudioMix` applies. The audio sequences are only
+built when at least one clip actually has audio. `mute` drops audio entirely;
+`audio.mode = 'replace'` rejects on the crossfade path for now (follow-up).
+
+Only **adjacent-pair** overlaps are supported (a clip overlapping two neighbours
+or fully containing another rejects — enforced in JS and re-checked in
+`renderCompositeCrossfade`). As with PiP, an HEVC output and explicit bitrate are
+honoured on Android (iOS rejects HEVC overlaps — its crossfade preset is H.264).
+
 Container metadata (`spec.metadata`) can't be authored by Media3 Transformer, so
 when present it's applied in a second compressed-passthrough pass via
 `Remuxer.remuxStamp` (both tracks copied, no re-encode) — the same path the

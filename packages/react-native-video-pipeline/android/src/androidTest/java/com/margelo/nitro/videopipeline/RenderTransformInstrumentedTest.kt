@@ -22,6 +22,8 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -30,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -322,6 +325,185 @@ class RenderTransformInstrumentedTest {
       "base (green) shows outside the overlays (got ${Integer.toHexString(outside)})",
       isGreen(outside),
     )
+  }
+
+  // Timeline-overlap crossfade (#43 — Android parity with iOS #18). A solid-red
+  // clip [0, 1.0s] and a solid-blue clip starting at 0.6s overlap over [0.6, 1.0].
+  // Asserts: before the overlap the frame is red, after it is blue, and at the
+  // overlap midpoint both channels are present (a dissolve, not a hard cut).
+  // Mirrors the iOS testMultiClipOverlapCrossfade.
+  @Test
+  fun crossfadeOverlapBlendsAdjacentClips() {
+    val red = solidFixture("xf-a", 220, 0, 0)
+    val blue = solidFixture("xf-b", 0, 0, 220)
+    val out = File(ctx.cacheDir, "crossfade.mp4").absolutePath
+    File(out).delete()
+
+    val clipDur = frameCount / fps.toDouble() // 1.0s each
+    val overlapStart = 0.6
+    val total = overlapStart + clipDur // second clip ends here (1.6s)
+    val clips = listOf(
+      TransformerRunner.CrossfadeClip(
+        spec = spec(red, out, outWidth = width, outHeight = height),
+        outputStartSec = 0.0, effDurSec = clipDur,
+      ),
+      TransformerRunner.CrossfadeClip(
+        spec = spec(blue, out, outWidth = width, outHeight = height),
+        outputStartSec = overlapStart, effDurSec = clipDur,
+      ),
+    )
+    TransformerRunner.runCompositeCrossfade(
+      ctx, clips, totalDurationSec = total, stopToken = null, progress = null,
+    )
+    assertTrue("crossfade output exists", File(out).exists())
+    assertEquals(total, durationSec(out), 0.3)
+
+    fun isRed(c: Int) = Color.red(c) > Color.blue(c) + 40 && Color.red(c) > Color.green(c) + 40
+    fun isBlue(c: Int) = Color.blue(c) > Color.red(c) + 40 && Color.blue(c) > Color.green(c) + 40
+
+    // Before the overlap: pure red. After: pure blue.
+    val before = pixelAt(out, 0.5, 0.5, 0.3)
+    val after = pixelAt(out, 0.5, 0.5, 1.3)
+    assertTrue("pre-overlap is red (got ${Integer.toHexString(before)})", isRed(before))
+    assertTrue("post-overlap is blue (got ${Integer.toHexString(after)})", isBlue(after))
+
+    // Overlap midpoint (t=0.8, p=0.5): a dissolve — both red and blue present and
+    // neither washed out. Green stays low (neither source has green).
+    val mid = pixelAt(out, 0.5, 0.5, 0.8)
+    assertTrue(
+      "overlap midpoint blends red+blue (got ${Integer.toHexString(mid)})",
+      Color.red(mid) > 50 && Color.blue(mid) > 50 &&
+        Color.red(mid) < 200 && Color.blue(mid) < 200,
+    )
+  }
+
+  // Three-clip crossfade exercises BOTH ping-pong parities: overlap (A,B) has the
+  // outgoing clip on sequence 0 (ramp 1→0); overlap (B,C) has the INCOMING clip
+  // on sequence 0 (ramp 0→1). Both must still dissolve correctly. A=red[0,1.0],
+  // B=green[0.6,1.6], C=blue[1.2,2.2].
+  @Test
+  fun crossfadeThreeClipsBlendsBothParities() {
+    val red = solidFixture("xf3-a", 220, 0, 0)
+    val green = solidFixture("xf3-b", 0, 200, 0)
+    val blue = solidFixture("xf3-c", 0, 0, 220)
+    val out = File(ctx.cacheDir, "crossfade3.mp4").absolutePath
+    File(out).delete()
+
+    val clipDur = frameCount / fps.toDouble() // 1.0s
+    fun cf(src: String, start: Double) = TransformerRunner.CrossfadeClip(
+      spec = spec(src, out, outWidth = width, outHeight = height),
+      outputStartSec = start, effDurSec = clipDur,
+    )
+    val total = 1.2 + clipDur // C ends at 2.2
+    TransformerRunner.runCompositeCrossfade(
+      ctx, listOf(cf(red, 0.0), cf(green, 0.6), cf(blue, 1.2)),
+      totalDurationSec = total, stopToken = null, progress = null,
+    )
+    assertTrue("3-clip crossfade output exists", File(out).exists())
+
+    fun red(t: Double) = Color.red(pixelAt(out, 0.5, 0.5, t))
+    fun green(t: Double) = Color.green(pixelAt(out, 0.5, 0.5, t))
+    fun blue(t: Double) = Color.blue(pixelAt(out, 0.5, 0.5, t))
+
+    // Solo regions: A (0.3) red, B (1.05) green, C (2.0) blue.
+    assertTrue("A solo is red", red(0.3) > 150 && green(0.3) < 90 && blue(0.3) < 90)
+    assertTrue("B solo is green", green(1.05) > 130 && red(1.05) < 90 && blue(1.05) < 90)
+    assertTrue("C solo is blue", blue(2.0) > 150 && red(2.0) < 90 && green(2.0) < 90)
+    // Overlap (A,B) midpoint t=0.8: red+green blend (seq0 outgoing, ramp 1→0).
+    assertTrue("A/B overlap blends red+green", red(0.8) > 50 && green(0.8) > 50)
+    // Overlap (B,C) midpoint t=1.4: green+blue blend (seq0 INCOMING, ramp 0→1).
+    assertTrue("B/C overlap blends green+blue", green(1.4) > 50 && blue(1.4) > 50)
+  }
+
+  // Passthrough audio survives the crossfade and stays on the output timeline.
+  // The ping-pong second sequence leads with a video-only transparent pad before
+  // its audio clip, so the composition forces a continuous audio track; without
+  // that, Media3 drops/mis-times the second clip's audio. Asserts the output
+  // carries an audio track and spans the full (overlap-shortened) duration.
+  @Test
+  fun crossfadeKeepsAlignedPassthroughAudio() {
+    val a = authorAudioVideoFixture("xf-aud-a")
+    val b = authorAudioVideoFixture("xf-aud-b")
+    assertTrue("fixtures carry audio", trackMimes(a).any { it.startsWith("audio/") })
+    val out = File(ctx.cacheDir, "crossfade-audio.mp4").absolutePath
+    File(out).delete()
+
+    val clipDur = frameCount / fps.toDouble()
+    val overlapStart = 0.6
+    val total = overlapStart + clipDur
+    TransformerRunner.runCompositeCrossfade(
+      ctx,
+      listOf(
+        TransformerRunner.CrossfadeClip(
+          spec = spec(a, out, outWidth = width, outHeight = height),
+          outputStartSec = 0.0, effDurSec = clipDur,
+        ),
+        TransformerRunner.CrossfadeClip(
+          spec = spec(b, out, outWidth = width, outHeight = height),
+          outputStartSec = overlapStart, effDurSec = clipDur,
+        ),
+      ),
+      totalDurationSec = total, stopToken = null, progress = null,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("crossfade output keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue("crossfade output keeps an audio track", mimes.any { it.startsWith("audio/") })
+    assertEquals("crossfade spans the overlap-shortened timeline", total, durationSec(out), 0.3)
+  }
+
+  // The crossfade audio envelope (VolumeRampAudioProcessor): a 1.0s constant-tone
+  // PCM stream with a 0.4s tail ramp should be full-amplitude before the ramp,
+  // ~half at the ramp midpoint, and ~silent at the end. Validated directly on the
+  // processor (no audio decode), so the gain math is pinned independent of mixing.
+  @Test
+  fun volumeRampAudioProcessorAppliesTailEnvelope() {
+    val sampleRate = 48000
+    val total = 1.0
+    val tail = 0.4
+    val amp: Short = 10000
+    val p = VolumeRampAudioProcessor(totalSec = total, headSec = 0.0, tailSec = tail)
+    p.configure(AudioProcessor.AudioFormat(sampleRate, 1, C.ENCODING_PCM_16BIT))
+    p.flush()
+
+    val frames = (total * sampleRate).toInt()
+    val input = ByteBuffer.allocate(frames * 2).order(ByteOrder.LITTLE_ENDIAN)
+    repeat(frames) { input.putShort(amp) }
+    input.flip()
+    p.queueInput(input)
+    p.queueEndOfStream()
+
+    // Drain all output into one short array.
+    val collected = ShortBufferCollector()
+    while (true) {
+      val chunk = p.output
+      if (!chunk.hasRemaining()) break
+      collected.add(chunk.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer())
+      if (p.isEnded) break
+    }
+    val samples = collected.toArray()
+    assertEquals("output frame count preserved", frames, samples.size)
+
+    fun at(tSec: Double) = abs(samples[(tSec * sampleRate).toInt().coerceIn(0, frames - 1)].toInt())
+    assertTrue("full amplitude before the tail ramp (got ${at(0.5)})", abs(at(0.5) - amp) < 400)
+    assertTrue("~half amplitude at tail-ramp midpoint (got ${at(0.8)})", abs(at(0.8) - amp / 2) < 600)
+    assertTrue("near-silent at the end (got ${at(0.99)})", at(0.99) < 600)
+  }
+
+  /// Accumulates short buffers drained from an AudioProcessor into one array.
+  private class ShortBufferCollector {
+    private val chunks = ArrayList<ShortArray>()
+    fun add(sb: java.nio.ShortBuffer) {
+      val a = ShortArray(sb.remaining())
+      sb.get(a)
+      chunks.add(a)
+    }
+    fun toArray(): ShortArray {
+      val total = chunks.sumOf { it.size }
+      val out = ShortArray(total)
+      var o = 0
+      for (c in chunks) { c.copyInto(out, o); o += c.size }
+      return out
+    }
   }
 
   @Test

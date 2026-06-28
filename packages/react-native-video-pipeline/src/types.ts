@@ -137,10 +137,10 @@ export interface ClipInput {
    * Omit it to accept the computed concat position (each clip picks up where
    * the previous ended). A value **beyond** the cumulative position opens a
    * **gap**, filled with black + silence. A value **before** it is an
-   * **overlap**: on iOS the clips are crossfade-dissolved over the overlap
-   * window; on Android overlaps reject for now. Only adjacent-pair overlaps
-   * are allowed — an overlap reaching back before the previous clip's own
-   * start (spanning two clips) rejects with `InvalidSpecError`.
+   * **overlap**: on both iOS and Android the clips are crossfade-dissolved over
+   * the overlap window. Only adjacent-pair overlaps are allowed — an overlap
+   * reaching back before the previous clip's own start (spanning two clips)
+   * rejects with `InvalidSpecError`.
    */
   outputStartSec?: number;
   /**
