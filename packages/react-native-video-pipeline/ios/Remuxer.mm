@@ -1071,6 +1071,10 @@ NSString *fourCCString(FourCharCode code) {
   // Partition the timeline at every clip start/end; within each region at most
   // two clips are visible (guaranteed by the adjacent-pair checks above).
   std::vector<double> bounds;
+  // Always anchor the timeline at 0 so a leading gap (the first clip starting
+  // after 0, e.g. a gap+overlap spec) is covered by a black, layer-less region
+  // rather than left without a video-composition instruction.
+  bounds.push_back(0.0);
   for (NSUInteger i = 0; i < sources.count; i++) {
     bounds.push_back(presStart[i]);
     bounds.push_back(presEnd[i]);

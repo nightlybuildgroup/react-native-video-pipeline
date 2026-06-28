@@ -509,6 +509,20 @@ describe('Video.render — validation', () => {
     return promise;
   });
 
+  it('rejects a clip fully contained in the previous one (#18)', () => {
+    // Clip B at 1 with duration 1 ends at 2, before clip A ends at 5 — B is
+    // fully inside A, which the crossfade compositor can't express.
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'a.mp4', startSec: 0, durationSec: 5 },
+          { uri: 'b.mp4', startSec: 0, durationSec: 1, outputStartSec: 1 },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
   it('rejects an overlap that spans more than the immediately preceding clip (#18)', () => {
     // Clip C at 2 starts before clip B (which starts at 3) — it would overlap
     // both A and B at once, which the crossfade compositor can't express.

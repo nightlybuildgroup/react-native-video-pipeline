@@ -7591,4 +7591,55 @@ static NSString *authorSolidColorClip(NSInteger w, NSInteger h, NSInteger fps,
   [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
 }
 
+// Leading gap + overlap in one spec (#18, codex review): the first clip starts
+// after 0 (a leading black gap) AND a later clip overlaps it. The crossfade
+// compositor must render [0, firstStart) black, not leave it uncovered.
+- (void)testMultiClipLeadingGapWithOverlap {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *red = authorSolidColorClip(80, 80, kFps, 60, 0xFF, 0x00, 0x00, @"lg-red");
+  NSString *blue = authorSolidColorClip(80, 80, kFps, 60, 0x00, 0x00, 0xFF, @"lg-blue");
+  XCTAssertNotNil(red, @"red author failed");
+  XCTAssertNotNil(blue, @"blue author failed");
+
+  // Red [1,3) — a 1s leading black gap. Blue at 2.5 overlaps red over [2.5,3).
+  NSArray<RNVPRemuxerConcatSource *> *sources = @[
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:red]
+                                           sourceStart:0.0
+                                        sourceDuration:2.0
+                                           outputStart:1.0],
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:blue]
+                                           sourceStart:0.0
+                                        sourceDuration:2.0
+                                           outputStart:2.5],
+  ];
+  NSString *out = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"lg-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer composeCrossfadeSources:sources
+                                          renderSize:CGSizeMake(80, 80)
+                                       frameDuration:CMTimeMake(1, (int32_t)kFps)
+                                           audioMode:RNVPAudioModeMute
+                                 audioReplacementURL:nil
+                                               toURL:[NSURL fileURLWithPath:out]
+                                                stop:nil
+                                               error:&error],
+                @"leading-gap+overlap compose failed: %@", error);
+
+  // The leading second is black; the red window is red; the overlap blends.
+  XCTAssertLessThan(maxRgbAtTime(out, 0.5), 24,
+                    @"the leading gap should be black");
+  uint8_t redPx[3] = {0}, mid[3] = {0}, bluePx[3] = {0};
+  XCTAssertTrue(rgbAtTime(out, 1.5, redPx), @"read red frame");
+  XCTAssertGreaterThan(redPx[0], 200, @"clip A window should be red");
+  XCTAssertTrue(rgbAtTime(out, 2.75, mid), @"read overlap-midpoint frame");
+  XCTAssertGreaterThan(mid[2], 60, @"overlap midpoint should carry blue");
+  XCTAssertTrue(rgbAtTime(out, 4.0, bluePx), @"read blue frame");
+  XCTAssertGreaterThan(bluePx[2], 200, @"clip B window should be blue");
+
+  [[NSFileManager defaultManager] removeItemAtPath:red error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:blue error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
+}
+
 @end
