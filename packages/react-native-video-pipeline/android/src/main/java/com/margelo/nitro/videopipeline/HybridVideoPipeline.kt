@@ -833,6 +833,17 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       try {
         val info = ProbeRunner.info(clip.uri)
         val output = spec.output
+        // Replace soundtrack (audio.mode = 'replace'). Fail loudly here rather
+        // than letting Media3 silently emit video-only when the replacement has
+        // no audio track.
+        val replaceUri = spec.audio
+          ?.takeIf { it.mode == AudioMode.REPLACE }
+          ?.replaceUri
+        if (replaceUri != null && !Remuxer.hasAudioTrack(replaceUri)) {
+          throw VideoPipelineInvalidSpecException(
+            "audio replace — the replacement file has no audio track"
+          )
+        }
         val t = clip.transform
         val rotateDeg = t?.rotate?.roundToInt() ?: -1
         // A real trim window (vs the clip spanning the whole source). Only a
@@ -899,9 +910,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             outCanvasW = canvasW,
             outCanvasH = canvasH,
             removeAudio = spec.audio?.mode == AudioMode.MUTE,
-            audioReplacementUri = spec.audio
-              ?.takeIf { it.mode == AudioMode.REPLACE }
-              ?.replaceUri,
+            audioReplacementUri = replaceUri,
+            // Output video duration, so a longer replacement soundtrack is
+            // clipped instead of extending the export with an audio-only tail.
+            outputDurationSec = if (isRealTrim) clip.sourceDuration else info.durationSec,
           ),
           stopToken = stopToken,
           progress = wrapTransformerProgress(onProgress),

@@ -69,6 +69,7 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToLong
 
 internal object TransformerRunner {
 
@@ -119,6 +120,10 @@ internal object TransformerRunner {
     /// from that URI is muxed in via a parallel audio sequence.
     val removeAudio: Boolean = false,
     val audioReplacementUri: String? = null,
+    /// Output video duration in seconds, used to clip the replacement
+    /// soundtrack (Media3 sequence ordering does not bound the export, so a
+    /// longer replacement would otherwise extend it with an audio-only tail).
+    val outputDurationSec: Double? = null,
   )
 
   fun interface ProgressSink {
@@ -159,7 +164,18 @@ internal object TransformerRunner {
       .setRemoveAudio(spec.removeAudio || replaceUri != null)
       .build()
     val composition: Composition? = replaceUri?.let { uri ->
-      val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(uri))
+      // Clip the replacement to the output video duration so a longer track
+      // can't extend the export with an audio-only tail (Media3 sequence
+      // ordering alone does not cap it). A shorter track leaves a silent tail.
+      val mediaItemBuilder = MediaItem.Builder().setUri(uri)
+      spec.outputDurationSec?.let { durSec ->
+        mediaItemBuilder.setClippingConfiguration(
+          MediaItem.ClippingConfiguration.Builder()
+            .setEndPositionMs((durSec * 1000.0).roundToLong())
+            .build()
+        )
+      }
+      val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
         .setRemoveVideo(true)
         .build()
       Composition.Builder(

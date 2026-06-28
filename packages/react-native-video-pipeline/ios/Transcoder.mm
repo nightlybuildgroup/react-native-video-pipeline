@@ -230,13 +230,22 @@ CIImage *applyTranscodePipeline(CIImage *sourceImage,
 // it so audio starts at t=0, aligned with the video track (itself rebased to
 // start at 0). Without the shift the windowed audio would sit at the source
 // timeline (~windowStart) while video sits at 0, desyncing A/V.
-BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
-                          AVAssetWriterInput *audioInput,
-                          AVAssetReader *audioReader, AVAssetWriter *writer,
-                          BOOL hasWindow,
-                          NSError *_Nullable __autoreleasing *error) {
+BOOL pumpAudioPassthrough(
+    AVAssetReaderTrackOutput *audioOutput, AVAssetWriterInput *audioInput,
+    AVAssetReader *audioReader, AVAssetWriter *writer, BOOL hasWindow,
+    const std::shared_ptr<margelo::nitro::videopipeline::StopToken> &stop,
+    NSError *_Nullable __autoreleasing *error) {
   CMTime shift = kCMTimeInvalid;  // anchored to the first kept packet's PTS
   while (YES) {
+    // Honour a cancel requested during (or just before) the audio pass — the
+    // replacement-soundtrack copy can outlast the video loop.
+    if (stop && stop->abortRequested()) {
+      if (error) {
+        *error = makeError(RNVPTranscoderErrorCodeCancelled,
+                           @"Transcode aborted during the audio pass.");
+      }
+      return NO;
+    }
     // Wait for the encoder to accept another sample. No wall-clock deadline
     // (issue #32): the wait ends on readiness or on the writer entering the
     // Failed state (which pins readiness at NO forever). A slow encoder is
@@ -521,6 +530,20 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
             : asset;
     AVAssetTrack *srcAudio =
         [audioAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+    if (replaceAudio && srcAudio == nil) {
+      // A replace render must not silently fall back to video-only: the
+      // replacement file is missing or carries no audio track.
+      if (error) {
+        *error = makeError(
+            RNVPTranscoderErrorCodeSourceCorrupted,
+            audioReplacementURL == nil
+                ? @"audio replace requires a replacement URL"
+                : [NSString stringWithFormat:
+                                @"audio replace: no audio track in %@",
+                                audioReplacementURL.lastPathComponent]);
+      }
+      return NO;
+    }
     if (srcAudio != nil) {
       NSError *audioReaderError = nil;
       audioReader = [[AVAssetReader alloc] initWithAsset:audioAsset
@@ -948,7 +971,7 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
     // Rebase to zero for a trim window (passthrough) and for replace (anchor
     // the swapped soundtrack — and any AAC priming — at the output's t=0).
     if (!pumpAudioPassthrough(audioOutput, audioInput, audioReader, writer,
-                              hasWindow || replaceAudio, &audioErr)) {
+                              hasWindow || replaceAudio, stop, &audioErr)) {
       [audioInput markAsFinished];
       [writer cancelWriting];
       [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];

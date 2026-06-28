@@ -176,17 +176,17 @@ internal object Remuxer {
     }
     // Replace: the soundtrack comes from a separate file, not the clips.
     val replace = audioMode == AudioMode.REPLACE && audioReplacementUri != null
-    val replacementExtractor: MediaExtractor? =
+    // Opened inside the try so a throwing setDataSource is still released by the
+    // finally (and never leaks the clip extractors either).
+    var replacementExtractor: MediaExtractor? = null
+    try {
       if (replace) {
         val p = resolveFilePath(audioReplacementUri!!)
         if (!File(p).exists()) {
           throw RemuxerException("concat: audio replacement file not found at $p")
         }
-        MediaExtractor().apply { setDataSource(p) }
-      } else {
-        null
+        replacementExtractor = MediaExtractor().apply { setDataSource(p) }
       }
-    try {
       val videoIndexes = extractors.map { selectVideoIndex(it) }
       val sharedFormat = enforceSharedSignature(extractors, videoIndexes, resolvedPaths)
       val rotation = readRotation(resolvedPaths[0])
@@ -196,6 +196,12 @@ internal object Remuxer {
       // replacement file; mute skips audio entirely.
       val audioIndexes = extractors.map { selectTracks(it).audioIndex }
       val replacementAudioIndex = replacementExtractor?.let { selectTracks(it).audioIndex } ?: -1
+      // A replace render must not silently emit video-only.
+      if (replace && replacementAudioIndex < 0) {
+        throw InvalidSpecException(
+          "concat: audio replace — the replacement file has no audio track"
+        )
+      }
       val firstAudioClip = when {
         audioMode == AudioMode.MUTE -> -1
         replace -> -1
@@ -411,6 +417,24 @@ internal object Remuxer {
   private fun propagateRotationHint(sourcePath: String, muxer: MediaMuxer) {
     val rotation = readRotation(sourcePath)
     if (rotation != 0) muxer.setOrientationHint(rotation)
+  }
+
+  /// Whether `uri` resolves to an existing file that carries an audio track.
+  /// Used to fail an `audio.mode = 'replace'` render loudly (rather than
+  /// silently emitting video-only) when the replacement has no audio. Returns
+  /// false for a missing or unreadable file.
+  fun hasAudioTrack(uri: String): Boolean {
+    val path = resolveFilePath(uri)
+    if (!File(path).exists()) return false
+    val ex = MediaExtractor()
+    return try {
+      ex.setDataSource(path)
+      selectTracks(ex).audioIndex >= 0
+    } catch (_: Throwable) {
+      false
+    } finally {
+      ex.release()
+    }
   }
 
   private fun selectTracks(extractor: MediaExtractor): TrackSelection {

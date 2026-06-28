@@ -373,6 +373,17 @@ describe('Video.render — validation', () => {
     ).rejects.toBeInstanceOf(InvalidSpecError);
   });
 
+  it("rejects audio.mode='replace' on a synthesized render (no source clips)", async () => {
+    await expect(
+      Video.synthesize({
+        output: { path: '/tmp/out.mp4', width: 16, height: 16, fps: 30 },
+        duration: { mode: 'fixed', seconds: 1 },
+        drawFrame: () => undefined,
+        audio: { mode: 'replace', replaceUri: 'file:///tmp/track.m4a' },
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
   it("accepts audio.mode='mute' (drops the audio track natively)", async () => {
     // Wired into both engines (iOS: omit/skip the audio track; Android:
     // EditedMediaItem.setRemoveAudio). The spec is forwarded to native.

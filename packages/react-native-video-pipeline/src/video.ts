@@ -248,13 +248,25 @@ function buildNativeSpecFromClipped(
   };
 }
 
-function validateAudio(audio: NativeVideoSpec['audio']): void {
+function validateAudio(audio: NativeVideoSpec['audio'], hasSourceClips: boolean): void {
   if (audio === undefined) return;
   // All three modes are wired into both native engines: 'passthrough' (keep the
   // source audio, also the default), 'mute' (drop the audio track), and
   // 'replace' (swap in `replaceUri`). Replace requires a non-empty file-URI
   // replacement (the granular check #11 removed while replace was unimplemented).
   if (audio.mode === 'replace') {
+    // Replace muxes the new soundtrack onto the render's video timeline. A
+    // synthesized render (no source clips) has no such timeline to carry it —
+    // accepting it would silently produce video-only output. Reject until a
+    // synth-replace path lands (would need to post-mux the audio).
+    if (!hasSourceClips) {
+      fail(
+        "audio.mode='replace' is not supported on a synthesized render (no " +
+          'source clips to mux the soundtrack onto) — render the synthesized ' +
+          'video, then replace its audio in a second pass',
+        { mode: audio.mode },
+      );
+    }
     if (audio.replaceUri === undefined || audio.replaceUri === '') {
       fail("audio.mode='replace' requires a non-empty replaceUri");
     }
@@ -303,7 +315,7 @@ function validateNativeSpec(spec: NativeVideoSpec, options: RenderOptions | unde
     }
   }
 
-  validateAudio(spec.audio);
+  validateAudio(spec.audio, !synth);
 }
 
 /**

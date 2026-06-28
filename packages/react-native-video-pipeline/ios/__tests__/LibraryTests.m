@@ -7134,4 +7134,56 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
+// A replace render must fail loudly when the replacement file is missing / has
+// no audio track, rather than silently producing video-only output.
+- (void)testReplaceFailsWhenReplacementHasNoAudio {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, kFps, 30,
+                                                   @"repl-noaud-src", &error);
+  XCTAssertNotNil(sourcePath, @"source author failed: %@", error);
+  // A non-existent replacement: the asset resolves to zero audio tracks.
+  NSString *videoOnly = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-missing-%@.m4a",
+                                     NSUUID.UUID.UUIDString]];
+
+  RNVPTranscodeTarget *target =
+      [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                          height:80
+                                             fps:(double)kFps
+                                           codec:RNVPTranscodeCodecH264
+                                         bitrate:0
+                                          rotate:-1
+                                           flipH:NO
+                                           flipV:NO
+                                           cropX:0
+                                           cropY:0
+                                       cropWidth:80
+                                      cropHeight:80
+                                     sourceStart:0.0
+                                  sourceDuration:0.0];
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-noaud-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  NSError *err = nil;
+  XCTAssertFalse([RNVPTranscoder transcodeFromURL:[NSURL fileURLWithPath:sourcePath]
+                                            toURL:[NSURL fileURLWithPath:outPath]
+                                           target:target
+                                         overlays:nil
+                                         metadata:nil
+                                        audioMode:RNVPAudioModeReplace
+                              audioReplacementURL:[NSURL fileURLWithPath:videoOnly]
+                                             stop:nil
+                                         progress:nil
+                                            error:&err],
+                 @"replace with a no-audio replacement must fail");
+  XCTAssertNotNil(err, @"a failed replace must report an error");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:videoOnly error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
 @end

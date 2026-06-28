@@ -71,7 +71,7 @@ await Video.synthesize({
 });
 ```
 
-`audio.mode` is `'passthrough' | 'mute' | 'replace'`. On a synthesize path, `'passthrough'` is equivalent to `'mute'` — there's no source audio to pass through.
+`audio.mode` on a synthesize path: `'passthrough'` and `'mute'` both yield video-only output — there's no source audio to keep or drop. `'replace'` is **rejected** with `InvalidSpecError` (a synthesized render has no source timeline to mux the soundtrack onto); render the synthesized video first, then replace its audio in a second pass.
 
 ## With metadata
 

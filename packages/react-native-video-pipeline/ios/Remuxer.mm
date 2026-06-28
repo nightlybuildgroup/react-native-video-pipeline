@@ -859,9 +859,24 @@ NSString *fourCCString(FourCharCode code) {
   }
 
   // Replace: swap the whole soundtrack for the replacement asset, capped to the
-  // joined timeline's duration (`cursor` is now the total). Reuses the shared
-  // composition audio helper, which inserts the replacement track at t=0.
+  // joined timeline's duration (`cursor` is now the total). Fail loudly rather
+  // than silently emit video-only if the replacement is missing or has no audio.
   if (audioMode == RNVPAudioModeReplace) {
+    AVAsset *replAsset = audioReplacementURL != nil
+                             ? [AVURLAsset assetWithURL:audioReplacementURL]
+                             : nil;
+    if ([replAsset tracksWithMediaType:AVMediaTypeAudio].firstObject == nil) {
+      if (error) {
+        *error = makeError(
+            RNVPRemuxerErrorCodeSourceCorrupted,
+            audioReplacementURL == nil
+                ? @"concat audio replace requires a replacement URL"
+                : [NSString stringWithFormat:
+                                @"concat audio replace: no audio track in %@",
+                                audioReplacementURL.lastPathComponent]);
+      }
+      return NO;
+    }
     insertAudioIntoComposition(composition, /*sourceAsset=*/nil,
                                CMTimeRangeMake(kCMTimeZero, cursor),
                                RNVPAudioModeReplace, audioReplacementURL);
