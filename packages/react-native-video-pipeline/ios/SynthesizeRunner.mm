@@ -156,14 +156,17 @@ buildSink(RNVPAVMuxer *muxer, NSString *outputPath, int width, int height,
     // Spin-wait for the encoder to accept another frame — but keep checking
     // the stop token on every tick. On the simulator the H.264 encoder can
     // back-pressure for seconds at a time after the writer's queue fills
-    // up (~50 frames at 160×120), and without this poll a finish/abort
-    // signal wouldn't be seen until either the encoder drained or the
-    // muxer's 30s safety deadline fired.
+    // up (~50 frames at 160×120). There is no wall-clock deadline (issue #32):
+    // the wait ends on a real signal only — the encoder draining (readiness),
+    // a stop/finish request, or the writer failing (which would otherwise
+    // pin readiness at NO forever). The subsequent appendPixelBuffer surfaces
+    // the writer's own error in the failure case.
     while (!muxer.videoInputIsReady) {
       if (stop && (stop->abortRequested() || stop->finishRequested())) {
         err = "AVMuxer.append: stop requested during ready-wait";
         return false;
       }
+      if (muxer.videoInputFailed) break;
       [NSThread sleepForTimeInterval:0.001];
     }
 

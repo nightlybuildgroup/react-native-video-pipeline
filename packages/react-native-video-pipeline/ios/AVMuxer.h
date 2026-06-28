@@ -85,9 +85,15 @@ typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode){
 /// another frame right now. Goes @c NO when the encoder back-pressures its
 /// internal queue (common on the simulator at small resolutions). Exposed so
 /// render loops that need to stay responsive to external stop signals can
-/// spin-wait on their own terms instead of blocking inside
-/// @c appendPixelBuffer's 30s deadline.
+/// spin-wait on their own terms (polling the stop token) instead of blocking
+/// inside @c appendPixelBuffer.
 @property(nonatomic, readonly) BOOL videoInputIsReady;
+
+/// @c YES once the underlying @c AVAssetWriter has entered the Failed state.
+/// A failed writer leaves @c videoInputIsReady stuck at @c NO forever, so a
+/// render loop spin-waiting on readiness must also break on this to avoid an
+/// unbounded hang — there is no wall-clock deadline backing the wait.
+@property(nonatomic, readonly) BOOL videoInputFailed;
 
 /// Finalize the file. Writes a silent audio segment spanning
 /// [0, lastPts + 1/fps) and closes the underlying AVAssetWriter. Blocks the

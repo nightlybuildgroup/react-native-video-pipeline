@@ -240,6 +240,10 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
   return _videoInput.isReadyForMoreMediaData;
 }
 
+- (BOOL)videoInputFailed {
+  return _writer.status == AVAssetWriterStatusFailed;
+}
+
 
 - (BOOL)appendPixelBuffer:(CVPixelBufferRef)pixelBuffer
          presentationTime:(CMTime)pts
@@ -251,23 +255,22 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
     }
     return NO;
   }
-  // Spin until the video input is ready. Bounded so a wedged writer surfaces
-  // as a typed error instead of an unbounded hang. 30s is loose on purpose:
-  // the simulator encoder back-pressures AVAssetWriterInput when its internal
-  // queue fills up (observed in `testSynthesizeOpenStopsOnStopTokenFinish`,
-  // which pushes ~50 small frames then waits multiple seconds for the queue
-  // to drain), and cold-start initialisation of the first frame can itself
-  // take seconds. Genuine hangs are still caught — just not the slow-simulator
-  // path. CLAUDE.md's "over 5s is wedged" is a per-test total, not a single
-  // appendPixelBuffer bound.
-  const NSTimeInterval kReadyDeadline = [NSDate timeIntervalSinceReferenceDate] + 30.0;
+  // Spin until the video input is ready. There is no wall-clock deadline: the
+  // simulator encoder back-pressures AVAssetWriterInput for seconds at a time
+  // when its internal queue fills, and a legitimately slow operation must not
+  // be killed (issue #32). The only escape other than readiness is a real
+  // failure signal — the writer entering the Failed state — which makes
+  // isReadyForMoreMediaData stay NO forever; bail on that with the writer's
+  // own error instead of spinning. Cancellation is the caller's job: the
+  // synthesize sink polls the stop token while it waits on videoInputIsReady
+  // before ever calling here.
   while (!_videoInput.isReadyForMoreMediaData) {
-    if ([NSDate timeIntervalSinceReferenceDate] >= kReadyDeadline) {
+    if (_writer.status == AVAssetWriterStatusFailed) {
       if (error) {
         *error = _writer.error
                      ?: makeError(RNVPAVMuxerErrorCodeAppendFailed,
-                                  @"AVMuxer.appendPixelBuffer: video input "
-                                  @"did not become ready within 30s.");
+                                  @"AVMuxer.appendPixelBuffer: writer entered "
+                                  @"the Failed state.");
       }
       return NO;
     }
@@ -327,23 +330,15 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
     finished = (self->_writer.status == AVAssetWriterStatusCompleted);
     dispatch_semaphore_signal(done);
   }];
-  // Bounded wait — a wedged writer must fail fast instead of hanging the
-  // whole test run. 3s is far beyond any legitimate finalize duration in the
-  // current test matrix (<1s of video, tiny dimensions).
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)));
+  // Wait unconditionally — finishWriting's completion handler always fires
+  // (Completed or Failed), so there is nothing to time out against. A
+  // wall-clock bound here would only risk discarding a legitimately slow
+  // finalize (issue #32); finishWriting is not cancellable, so the stop token
+  // does not participate.
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
 
   _closed = YES;
 
-  if (timedOut != 0) {
-    if (error) {
-      *error = _writer.error
-                   ?: makeError(RNVPAVMuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter.finishWriting did not complete "
-                                @"within 3s.");
-    }
-    return NO;
-  }
   if (!finished) {
     if (error) {
       *error = _writer.error

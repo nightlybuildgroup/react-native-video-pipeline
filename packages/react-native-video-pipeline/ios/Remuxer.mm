@@ -51,50 +51,55 @@ BOOL pumpPassthroughSamples(AVAssetReaderTrackOutput *output,
                             AVAssetWriterInput *input,
                             AVAssetReader *reader, AVAssetWriter *writer,
                             NSError *_Nullable __autoreleasing *error) {
-  // Bounded wait. The 30-second cap mirrors RNVPAVMuxer's video-input poll
-  // — anything longer is a wedged writer, not a slow encoder.
-  static const NSTimeInterval kReadyTimeout = 30.0;
-  while (YES) {
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kReadyTimeout];
-    while (!input.readyForMoreMediaData &&
-           [NSDate.date compare:deadline] == NSOrderedAscending) {
-      [NSThread sleepForTimeInterval:0.001];
-    }
-    if (!input.readyForMoreMediaData) {
-      if (error) {
-        *error = writer.error
-                     ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                  @"Writer input did not become ready within "
-                                  @"30s.");
-      }
-      return NO;
-    }
-    CMSampleBufferRef sample = [output copyNextSampleBuffer];
-    if (sample == NULL) {
-      AVAssetReaderStatus status = reader.status;
-      if (status == AVAssetReaderStatusFailed ||
-          status == AVAssetReaderStatusUnknown) {
-        if (error) {
-          *error = reader.error
-                       ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                    @"AVAssetReader entered the Failed "
-                                    @"state.");
+  // Drive the writer input through AVFoundation's pull callback
+  // (-requestMediaDataWhenReadyOnQueue:) rather than busy-waiting on
+  // readyForMoreMediaData — that property is explicitly *not* KVO-observable,
+  // so the callback is the only "real signal" we can block on. There is no
+  // wall-clock deadline (issue #32): AVFoundation re-invokes the block every
+  // time the input can take more data, and the pump ends only on a real signal
+  // — the reader draining (success), a failed reader (typed error), or a
+  // rejected append. `markAsFinished` inside the block stops re-invocation once
+  // the source is exhausted; the caller therefore must not mark this input
+  // finished again.
+  dispatch_queue_t queue = dispatch_queue_create(
+      "com.nightlybuildgroup.videopipeline.remux-pump", DISPATCH_QUEUE_SERIAL);
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  __block NSError *pumpError = nil;
+  [input requestMediaDataWhenReadyOnQueue:queue
+                               usingBlock:^{
+    while (input.isReadyForMoreMediaData) {
+      CMSampleBufferRef sample = [output copyNextSampleBuffer];
+      if (sample == NULL) {
+        AVAssetReaderStatus status = reader.status;
+        if (status == AVAssetReaderStatusFailed ||
+            status == AVAssetReaderStatusUnknown) {
+          pumpError = reader.error
+                          ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                                       @"AVAssetReader entered the Failed "
+                                       @"state.");
         }
-        return NO;
+        [input markAsFinished];
+        dispatch_semaphore_signal(done);
+        return;
       }
-      return YES;
-    }
-    BOOL ok = [input appendSampleBuffer:sample];
-    CFRelease(sample);
-    if (!ok) {
-      if (error) {
-        *error = writer.error
-                     ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                  @"Writer rejected passthrough sample.");
+      BOOL ok = [input appendSampleBuffer:sample];
+      CFRelease(sample);
+      if (!ok) {
+        pumpError = writer.error
+                        ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
+                                     @"Writer rejected passthrough sample.");
+        [input markAsFinished];
+        dispatch_semaphore_signal(done);
+        return;
       }
-      return NO;
     }
+  }];
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+  if (pumpError != nil) {
+    if (error) *error = pumpError;
+    return NO;
   }
+  return YES;
 }
 
 } // namespace
@@ -1044,8 +1049,9 @@ NSArray<AVMetadataItem *> *buildMergedMetadata(
                                      &pumpError);
   }
 
-  [videoInput markAsFinished];
-  if (audioInput != nil) [audioInput markAsFinished];
+  // pumpPassthroughSamples marks each input finished from inside its pull
+  // callback (so AVFoundation stops re-invoking it), so there is no
+  // markAsFinished to repeat here.
 
   if (!videoOK || !audioOK) {
     [writer cancelWriting];
@@ -1060,17 +1066,9 @@ NSArray<AVMetadataItem *> *buildMergedMetadata(
   [writer finishWritingWithCompletionHandler:^{
     dispatch_semaphore_signal(done);
   }];
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)));
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter.finishWriting did not complete "
-                         @"within 30s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
+  // Wait unconditionally — the completion handler always fires (issue #32).
+  // The Completed-status check below distinguishes success from failure.
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
   if (writer.status != AVAssetWriterStatusCompleted) {
     if (error) {
       *error = writer.error

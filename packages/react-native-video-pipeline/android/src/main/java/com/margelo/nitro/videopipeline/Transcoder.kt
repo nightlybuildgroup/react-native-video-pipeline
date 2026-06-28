@@ -488,7 +488,7 @@ internal object Transcoder {
           // releaseOutputBuffer(idx, true) enqueues a buffer on the
           // SurfaceTexture's producer queue — we must wait for the
           // onFrameAvailable callback before calling updateTexImage().
-          frameSync.await(timeoutMs = 2000)
+          frameSync.await()
           decoderOutputTexture.updateTexImage()
           gl.drawFrame(
             decoderOutputTexture = decoderOutputTexture,
@@ -1030,17 +1030,18 @@ internal object Transcoder {
       }
     }
 
-    fun await(timeoutMs: Long) {
-      val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+    fun await() {
+      // Wait unconditionally on the real signal — the onFrameAvailable
+      // callback, delivered off this (blocked) pump thread. No wall-clock
+      // deadline (issue #32): a legitimately slow GL/decode round trip on a
+      // slow device or a high-fps source must not be killed, and the callback
+      // always fires once releaseOutputBuffer(idx, true) has queued a frame.
+      // Mirrors TransformerRunner's latch.await(). Interruption is the only
+      // escape — the stop token cancels the decoder/encoder, which unblocks
+      // the pump.
       synchronized(lock) {
         while (!available) {
-          val remaining = (deadline - System.nanoTime()) / 1_000_000L
-          if (remaining <= 0L) {
-            throw TranscoderException(
-              "timed out waiting for decoder frame (${timeoutMs}ms)"
-            )
-          }
-          try { lock.wait(remaining) } catch (_: InterruptedException) {
+          try { lock.wait() } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             throw TranscoderException("interrupted waiting for decoder frame")
           }
