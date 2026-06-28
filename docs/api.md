@@ -383,7 +383,7 @@ interface ClipInput {
   // Forward-compatibility timeline hooks — see "Reserved timeline fields".
   id?: string;             // stable clip id; surfaced as FrameDrawerContext.clipId
   outputStartSec?: number; // explicit output position; past the previous clip opens a black gap, before it crossfades (iOS; Android rejects)
-  track?: number;          // 0/undefined = base timeline; >0 = overlay/PiP track (iOS; Android rejects)
+  track?: number;          // 0/undefined = base timeline; >0 = overlay/PiP track (iOS + Android)
   frame?: { x: number; y: number; w: number; h: number }; // PiP placement, normalized 0..1 (overlay tracks only)
 }
 
@@ -403,7 +403,7 @@ The timeline model stitches clips in array order. By default each clip picks up 
 
 - **`id`** — optional stable identifier, surfaced as `FrameDrawerContext.clipId` on the compose path. Must be unique within a single spec.
 - **`outputStartSec`** — when provided, a value at/after the previous clip's end opens a **gap** (filled with black + silence; forces a re-encode). A smaller value is an **overlap**: crossfade-dissolved on iOS (adjacent-pair only — an overlap spanning two clips rejects), rejected on Android. Omit it for the contiguous position.
-- **`track`** — `0`/`undefined` is the base timeline. A value **> 0** is an **overlay/PiP track** composited on top of the base, in ascending z-order (**iOS only** — Android rejects overlay tracks for now). An overlay-track clip **requires** an explicit `outputStartSec` (it has no implicit concat slot), a base-track clip to composite onto, and must **fit within the base timeline** (it can't extend the output past the base). Must be a non-negative integer. Overlay audio is dropped in v1, and the PiP composite re-encodes as H.264 at the encoder's quality default — an HEVC output or an explicit `output.bitrate` rejects on the overlay path for now.
+- **`track`** — `0`/`undefined` is the base timeline. A value **> 0** is an **overlay/PiP track** composited on top of the base, in ascending z-order (**iOS + Android** — iOS via `AVMutableVideoComposition`, Android via a Media3 multi-sequence `Composition`). An overlay-track clip **requires** an explicit `outputStartSec` (it has no implicit concat slot), a base-track clip to composite onto, and must **fit within the base timeline** (it can't extend the output past the base). Must be a non-negative integer. Overlay audio is dropped in v1 on both platforms. **iOS** re-encodes the composite as H.264 at the encoder's quality default, so an HEVC output or an explicit `output.bitrate` rejects on the overlay path there; **Android** re-encodes the composite directly and honours both. On **Android**, `audio.mode = 'replace'` and a spec-level static overlay (watermark) combined with overlay tracks reject for now (follow-ups).
 - **`frame`** — placement for an overlay-track clip, in normalized output coordinates (`0..1`, origin top-left). Omitted = fill the frame. Only valid on an overlay track; must lie within the output (`x+w` and `y+h ≤ 1`). Example PiP: `{ x: 0.7, y: 0.05, w: 0.25, h: 0.25 }`.
 
 Code written against these fields today keeps working as the timeline model grows; the validation rules will loosen, not the field shapes.
