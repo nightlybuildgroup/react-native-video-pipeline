@@ -159,6 +159,7 @@ class RenderTransformInstrumentedTest {
     outHeight: Int? = null,
     fps: Double? = null,
     removeAudio: Boolean = false,
+    audioReplacementUri: String? = null,
   ): TransformerRunner.Spec {
     // Resolve the output canvas exactly as the render router does
     // (HybridVideoPipeline.renderTranscodeSingle): pinned dims win, otherwise
@@ -191,6 +192,7 @@ class RenderTransformInstrumentedTest {
       outCanvasW = canvasW,
       outCanvasH = canvasH,
       removeAudio = removeAudio,
+      audioReplacementUri = audioReplacementUri,
     )
   }
 
@@ -311,6 +313,48 @@ class RenderTransformInstrumentedTest {
     val muteMimes = trackMimes(mute)
     assertTrue("concat keeps a video track", muteMimes.any { it.startsWith("video/") })
     assertTrue("mute concat has no audio track", muteMimes.none { it.startsWith("audio/") })
+  }
+
+  // audio.mode = 'replace' drops the source audio and muxes a separate
+  // soundtrack via a parallel Media3 audio sequence; the output keeps a video
+  // track and carries an audio track. Mirrors the iOS replace tests.
+  @Test
+  fun transformReplaceSwapsAudioTrack() {
+    val src = authorAudioVideoFixture("repl-src")
+    val replacement = authorAudioVideoFixture("repl-audio")
+    val out = File(ctx.cacheDir, "xform-replace-out.mp4").absolutePath
+    File(out).delete()
+    TransformerRunner.run(
+      ctx,
+      spec(src, out, flipH = true, audioReplacementUri = replacement),
+      stopToken = null,
+      progress = null,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("output keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue("replace output carries a (swapped) audio track", mimes.any { it.startsWith("audio/") })
+  }
+
+  // Concat replace: drop every clip's audio, mux the replacement soundtrack.
+  @Test
+  fun concatReplaceSwapsAudioTrack() {
+    val clipA = authorAudioVideoFixture("crepl-a")
+    val clipB = authorAudioVideoFixture("crepl-b")
+    val replacement = authorAudioVideoFixture("crepl-audio")
+    val perClip = frameCount / fps.toDouble()
+    val sources = listOf(
+      Remuxer.ConcatSource(clipA, 0.0, perClip, 0.0),
+      Remuxer.ConcatSource(clipB, 0.0, perClip, perClip),
+    )
+    val out = File(ctx.cacheDir, "concat-replace.mp4").absolutePath
+    File(out).delete()
+    Remuxer.remuxConcat(
+      sources, out, stopToken = null,
+      audioMode = AudioMode.REPLACE, audioReplacementUri = replacement,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("concat keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue("replace concat carries the swapped audio track", mimes.any { it.startsWith("audio/") })
   }
 
   // audio.mode = 'mute' drops the audio track (setRemoveAudio on the

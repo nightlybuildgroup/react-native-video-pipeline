@@ -502,33 +502,51 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   // rebases the emitted packets to start at 0. The two readers run
   // sequentially (video loop fully drains before the audio pump starts), so
   // there is no concurrent-read contention on the asset.
-  // Passthrough keeps the source audio; Mute drops it (skip the dedicated
-  // reader so no audio input is added downstream). Replace on the transcode
-  // pump needs a second reader on the replacement file — not wired here yet
-  // (#29 follow-up); it is unreachable while the JS layer rejects 'replace',
-  // so it conservatively drops audio like mute.
+  // Passthrough keeps the source audio (windowed to the trim); Mute drops it
+  // (skip the dedicated reader so no audio input is added); Replace reads the
+  // soundtrack from a second asset (audioReplacementURL) capped to the output
+  // video duration. `audioSourceTrack` feeds the writer-input format hint.
   AVAssetReaderTrackOutput *audioOutput = nil;
   AVAssetReader *audioReader = nil;
-  NSArray<AVAssetTrack *> *audioTracks =
-      [asset tracksWithMediaType:AVMediaTypeAudio];
-  if (audioMode == RNVPAudioModePassthrough && audioTracks.count > 0) {
-    NSError *audioReaderError = nil;
-    audioReader = [[AVAssetReader alloc] initWithAsset:asset
-                                                 error:&audioReaderError];
-    if (audioReader != nil) {
-      if (hasWindow) {
-        audioReader.timeRange = CMTimeRangeMake(
-            CMTimeMakeWithSeconds(windowStart, 90000),
-            CMTimeMakeWithSeconds(windowDuration, 90000));
-      }
-      AVAssetReaderTrackOutput *candidate =
-          [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTracks.firstObject
-                                           outputSettings:nil];
-      if ([audioReader canAddOutput:candidate]) {
-        [audioReader addOutput:candidate];
-        audioOutput = candidate;
-      } else {
-        audioReader = nil;
+  AVAssetTrack *audioSourceTrack = nil;
+  const BOOL replaceAudio = audioMode == RNVPAudioModeReplace;
+  const BOOL wantAudio =
+      audioMode == RNVPAudioModePassthrough || replaceAudio;
+  if (wantAudio) {
+    AVAsset *audioAsset =
+        replaceAudio
+            ? (audioReplacementURL != nil
+                   ? (AVAsset *)[AVURLAsset assetWithURL:audioReplacementURL]
+                   : nil)
+            : asset;
+    AVAssetTrack *srcAudio =
+        [audioAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+    if (srcAudio != nil) {
+      NSError *audioReaderError = nil;
+      audioReader = [[AVAssetReader alloc] initWithAsset:audioAsset
+                                                   error:&audioReaderError];
+      if (audioReader != nil) {
+        if (replaceAudio) {
+          // Cap the replacement to the output video duration: a shorter track
+          // leaves the tail silent, a longer one is truncated to the picture.
+          const double outDur = hasWindow ? windowDuration : sourceDurationSec;
+          audioReader.timeRange = CMTimeRangeMake(
+              kCMTimeZero, CMTimeMakeWithSeconds(outDur, 90000));
+        } else if (hasWindow) {
+          audioReader.timeRange = CMTimeRangeMake(
+              CMTimeMakeWithSeconds(windowStart, 90000),
+              CMTimeMakeWithSeconds(windowDuration, 90000));
+        }
+        AVAssetReaderTrackOutput *candidate =
+            [[AVAssetReaderTrackOutput alloc] initWithTrack:srcAudio
+                                             outputSettings:nil];
+        if ([audioReader canAddOutput:candidate]) {
+          [audioReader addOutput:candidate];
+          audioOutput = candidate;
+          audioSourceTrack = srcAudio;
+        } else {
+          audioReader = nil;
+        }
       }
     }
   }
@@ -607,11 +625,10 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
 
   AVAssetWriterInput *audioInput = nil;
   if (audioOutput != nil) {
-    AVAssetTrack *audioTrack = audioTracks.firstObject;
     CMFormatDescriptionRef audioFormat = NULL;
-    if (audioTrack.formatDescriptions.count > 0) {
+    if (audioSourceTrack.formatDescriptions.count > 0) {
       audioFormat = (__bridge CMFormatDescriptionRef)
-          audioTrack.formatDescriptions.firstObject;
+          audioSourceTrack.formatDescriptions.firstObject;
     }
     AVAssetWriterInput *candidate =
         [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
@@ -928,8 +945,10 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   }
   if (audioInput != nil && audioOutput != nil) {
     NSError *audioErr = nil;
+    // Rebase to zero for a trim window (passthrough) and for replace (anchor
+    // the swapped soundtrack — and any AAC priming — at the output's t=0).
     if (!pumpAudioPassthrough(audioOutput, audioInput, audioReader, writer,
-                              hasWindow, &audioErr)) {
+                              hasWindow || replaceAudio, &audioErr)) {
       [audioInput markAsFinished];
       [writer cancelWriting];
       [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];

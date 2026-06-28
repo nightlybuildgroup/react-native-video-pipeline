@@ -58,6 +58,7 @@ import androidx.media3.effect.TextureOverlay
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.EditedMediaItemSequence
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
@@ -113,9 +114,11 @@ internal object TransformerRunner {
     val outCanvasH: Int = 0,
     /// Audio handling (spec.audio). `false` (default) keeps the source audio,
     /// which Media3 Transformer copies through. `true` drops the audio track
-    /// (audio.mode = 'mute'). Replace ('audio.mode' = 'replace') is not wired
-    /// on this path yet (#29 follow-up) and is rejected upstream.
+    /// (audio.mode = 'mute'). When `audioReplacementUri` is set
+    /// (audio.mode = 'replace') the source audio is dropped and the soundtrack
+    /// from that URI is muxed in via a parallel audio sequence.
     val removeAudio: Boolean = false,
+    val audioReplacementUri: String? = null,
   )
 
   fun interface ProgressSink {
@@ -146,10 +149,24 @@ internal object TransformerRunner {
   ) {
     File(spec.outputPath).apply { if (exists()) delete() }
 
+    // Replace drops the source audio and muxes a separate soundtrack in via a
+    // parallel audio sequence (the video sequence drives the output duration,
+    // so a longer replacement is truncated and a shorter one leaves a silent
+    // tail). Mute drops audio; passthrough keeps it.
+    val replaceUri = spec.audioReplacementUri
     val editedItem = EditedMediaItem.Builder(buildMediaItem(spec))
       .setEffects(Effects(emptyList(), buildVideoEffects(spec)))
-      .setRemoveAudio(spec.removeAudio)
+      .setRemoveAudio(spec.removeAudio || replaceUri != null)
       .build()
+    val composition: Composition? = replaceUri?.let { uri ->
+      val audioItem = EditedMediaItem.Builder(MediaItem.fromUri(uri))
+        .setRemoveVideo(true)
+        .build()
+      Composition.Builder(
+        EditedMediaItemSequence(editedItem),
+        EditedMediaItemSequence(audioItem),
+      ).build()
+    }
 
     val mainHandler = Handler(Looper.getMainLooper())
     val latch = CountDownLatch(1)
@@ -186,7 +203,11 @@ internal object TransformerRunner {
         })
         .build()
       transformerRef.set(transformer)
-      transformer.start(editedItem, spec.outputPath)
+      if (composition != null) {
+        transformer.start(composition, spec.outputPath)
+      } else {
+        transformer.start(editedItem, spec.outputPath)
+      }
     }
 
     // Cancellation + progress are polled on the main Looper (the only thread

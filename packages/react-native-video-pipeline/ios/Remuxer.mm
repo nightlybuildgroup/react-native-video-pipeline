@@ -602,6 +602,7 @@ NSString *fourCCString(FourCharCode code) {
   return [self remuxConcatSources:sources
                             toURL:outputURL
                         audioMode:RNVPAudioModePassthrough
+              audioReplacementURL:nil
                              stop:stopToken
                             error:error];
 }
@@ -609,6 +610,7 @@ NSString *fourCCString(FourCharCode code) {
 + (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
                      toURL:(NSURL *)outputURL
                  audioMode:(RNVPAudioMode)audioMode
+       audioReplacementURL:(NSURL *)audioReplacementURL
                       stop:(nullable RNVPStopToken *)stopToken
                      error:(NSError *_Nullable __autoreleasing *)error {
   const std::shared_ptr<margelo::nitro::videopipeline::StopToken> stop =
@@ -788,8 +790,10 @@ NSString *fourCCString(FourCharCode code) {
   // clip without an audio track leaves a silent gap (the composition advances
   // the cursor regardless), so a mixed audio/no-audio concat stays in sync.
   // Created lazily on the first real audio segment so an all-video-only concat
-  // emits zero audio tracks.
-  const BOOL wantAudio = audioMode != RNVPAudioModeMute;
+  // emits zero audio tracks. Per-clip splicing applies to passthrough; replace
+  // swaps one soundtrack over the whole timeline after the loop; mute writes
+  // none.
+  const BOOL splicePerClipAudio = audioMode == RNVPAudioModePassthrough;
   AVMutableCompositionTrack *compositionAudioTrack = nil;
 
   CMTime cursor = kCMTimeZero;
@@ -821,7 +825,7 @@ NSString *fourCCString(FourCharCode code) {
     // few ms before/after the video, and an over-long insertTimeRange would
     // fail (silently dropping the clip's audio). Best-effort: a clip with no
     // audio just leaves silence for its span, keeping later clips in sync.
-    if (wantAudio) {
+    if (splicePerClipAudio) {
       AVAssetTrack *clipAudio =
           [assets[i] tracksWithMediaType:AVMediaTypeAudio].firstObject;
       if (clipAudio != nil) {
@@ -852,6 +856,15 @@ NSString *fourCCString(FourCharCode code) {
       }
     }
     cursor = CMTimeAdd(cursor, clipDuration);
+  }
+
+  // Replace: swap the whole soundtrack for the replacement asset, capped to the
+  // joined timeline's duration (`cursor` is now the total). Reuses the shared
+  // composition audio helper, which inserts the replacement track at t=0.
+  if (audioMode == RNVPAudioModeReplace) {
+    insertAudioIntoComposition(composition, /*sourceAsset=*/nil,
+                               CMTimeRangeMake(kCMTimeZero, cursor),
+                               RNVPAudioModeReplace, audioReplacementURL);
   }
 
   // --- Drive the passthrough export through the unified driver --------------

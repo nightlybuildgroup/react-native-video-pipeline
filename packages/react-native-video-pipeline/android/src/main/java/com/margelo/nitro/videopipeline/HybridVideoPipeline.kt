@@ -787,6 +787,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           outputPath = outputPath,
           stopToken = stopToken,
           audioMode = spec.audio?.mode ?: AudioMode.PASSTHROUGH,
+          audioReplacementUri = spec.audio
+            ?.takeIf { it.mode == AudioMode.REPLACE }
+            ?.replaceUri,
         )
         // Author container metadata in a second compressed-passthrough pass
         // (location via setLocation, the rest via Mp4MetadataInjector), same as
@@ -896,6 +899,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             outCanvasW = canvasW,
             outCanvasH = canvasH,
             removeAudio = spec.audio?.mode == AudioMode.MUTE,
+            audioReplacementUri = spec.audio
+              ?.takeIf { it.mode == AudioMode.REPLACE }
+              ?.replaceUri,
           ),
           stopToken = stopToken,
           progress = wrapTransformerProgress(onProgress),
