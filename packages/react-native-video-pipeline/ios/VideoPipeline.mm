@@ -894,7 +894,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // the fast remux-transform path below, which also carries any trim window.
     // A gap always re-encodes, so it never takes the single fast paths.
     const bool needsTranscode =
-        single && !hasGap &&
+        single && !hasGap && !hasOverlayTracks &&
         (clipHasCrop((*spec.clips)[0]) || outputAsksForReencode(spec.output) ||
          hasOverlays);
     if (needsTranscode) {
@@ -1419,7 +1419,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // preferredTransform carries the rotation/flip and the composition carries
     // the trim window — no pixels are re-encoded, so trim + flip stays as cheap
     // as a plain trim.
-    if (single && clipHasRotateOrFlip((*spec.clips)[0])) {
+    if (single && !hasOverlayTracks && clipHasRotateOrFlip((*spec.clips)[0])) {
       const auto& clip = (*spec.clips)[0];
       NSInteger rotate = -1;
       BOOL flipH = NO;
