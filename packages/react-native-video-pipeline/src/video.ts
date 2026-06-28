@@ -239,6 +239,10 @@ function finalizeClips(
   let prevClipEnd = 0; // end of clip i-1
   let prevPrevClipEnd = 0; // end of clip i-2
   let clipIndex = 0;
+  // Overlay windows, validated against the final base-timeline end below so an
+  // overlay can't extend the output past the base (which would leave a base-less
+  // tail).
+  const overlayWindows: Array<{ start: number; end: number }> = [];
   for (const { input, sourceDuration } of resolved) {
     const sourceStart = input.startSec ?? 0;
     validateFileUri('clip.uri', input.uri);
@@ -251,6 +255,7 @@ function finalizeClips(
       // base concat cursor. `frame` (default full-frame) places it spatially.
       const overlayStart = input.outputStartSec as number;
       requireNonNeg('clip.outputStartSec', overlayStart);
+      overlayWindows.push({ start: overlayStart, end: overlayStart + sourceDuration });
       out.push({
         uri: input.uri,
         sourceStart,
@@ -312,6 +317,18 @@ function finalizeClips(
     prevClipEnd = clipOutputEnd;
     outputStart = clipOutputEnd;
     clipIndex += 1;
+  }
+  // An overlay must fit within the base timeline — it composites on top of it,
+  // it can't extend the output past the base (which would leave a base-less,
+  // overlay-only tail).
+  const baseEnd = outputStart;
+  for (const w of overlayWindows) {
+    if (w.end > baseEnd + OUTPUT_START_TOLERANCE_SEC) {
+      fail(
+        `an overlay-track clip ends at ${w.end}s, past the base timeline (${baseEnd}s) — an overlay must fit within the base`,
+        { overlayEnd: w.end, baseEnd },
+      );
+    }
   }
   // `inputs` came in as `NonEmptyArray<ClipInput>`, so `out` has length >= 1.
   return out as NonEmptyArray<Clip>;

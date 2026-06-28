@@ -1037,12 +1037,39 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       // re-encode runs through AVAssetExportPresetHighestQuality (H.264), so
       // neither can target an HEVC output yet. Reject gaps/overlaps + HEVC until
       // the fill / crossfade encode respects the output codec.
-      if ((hasGap || hasOverlap) &&
+      //
+      // Overlay/PiP tracks (#17) take the same HighestQuality composite path,
+      // so they share the HEVC limit; and that preset doesn't honor an explicit
+      // bitrate, so reject a pinned bitrate on the overlay path rather than
+      // silently ignoring it.
+      if ((hasGap || hasOverlap || hasOverlayTracks) &&
           spec.output.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC) {
         return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
-            "timeline gaps/overlaps with an HEVC output are not supported yet — "
-            "the black gap fill and crossfade re-encode are authored as H.264; "
-            "use the default H.264 output")));
+            "timeline gaps/overlaps/overlay tracks with an HEVC output are not "
+            "supported yet — the black gap fill and the crossfade/overlay "
+            "re-encode are authored as H.264; use the default H.264 output")));
+      }
+      if (hasOverlayTracks && spec.output.bitrate.has_value()) {
+        return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+            "an explicit output.bitrate is not supported with overlay tracks "
+            "yet — the PiP composite re-encodes at the encoder's quality "
+            "default; drop output.bitrate")));
+      }
+      // The base/overlay split below indexes baseClips[0]; a direct native
+      // caller could bypass the JS "overlay needs a base" check, so guard it.
+      if (hasOverlayTracks) {
+        bool anyBase = false;
+        for (const auto& c : *spec.clips) {
+          if (c.track.value_or(0.0) <= 0.5) {
+            anyBase = true;
+            break;
+          }
+        }
+        if (!anyBase) {
+          return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+              "an overlay track (clip.track > 0) requires at least one base "
+              "(track 0) clip to composite onto")));
+        }
       }
       NSMutableArray* nativeOverlays = nil;
       if (spec.overlays.has_value() && !spec.overlays->empty()) {

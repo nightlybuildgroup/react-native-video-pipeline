@@ -600,6 +600,19 @@ describe('Video.render — validation', () => {
     ).toThrow(InvalidSpecError);
   });
 
+  it('rejects an overlay track that extends past the base timeline (#17)', () => {
+    // Base is 3s; the overlay [2,5) would run 2s past the base end.
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'base.mp4', startSec: 0, durationSec: 3 },
+          { uri: 'pip.mp4', startSec: 0, durationSec: 3, track: 1, outputStartSec: 2 },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
   it('rejects a clip.frame outside the normalized 0..1 output (#17)', () => {
     expect(() =>
       Video.render({
