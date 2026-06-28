@@ -408,7 +408,12 @@ When `durationSec` is omitted, the library calls `Video.info(uri)` to probe the 
 
 The native Nitro boundary still receives `{ sourceStart, sourceDuration, outputStart }` — the library normalizes `ClipInput[]` into that shape before crossing. Direct consumers of the Nitro spec see the underlying form.
 
-**Transform routing.** On a single-clip render: rotation/flip-only stays in **remux** on iOS (lossless) and goes through **transcode** on Android (its container can't store a mirror). `crop` — and any output-side change or overlay — forces **transcode** on both platforms. Source audio is preserved either way. A trim window composes with the transform in the same pass.
+**Transform routing.** On a single-clip render, both platforms produce the correct output and preserve source audio; the path differs:
+
+- **iOS** — rotation/flip-only stays in **remux** (lossless `preferredTransform`); `crop`, an output-side change, or an overlay forces **transcode**.
+- **Android** — the transform/trim/output path runs on **Media3 Transformer**, which transmuxes (copies compressed samples) when no pixel work is needed and re-encodes otherwise. Overlay-on-render uses the legacy GL transcoder (full-source only).
+
+A trim window composes with the transform in the same pass on both.
 
 ### `DurationSpec`
 

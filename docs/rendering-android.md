@@ -146,29 +146,38 @@ a small red marker at top-left as a visual canary.
 
 ---
 
-## Render with transform (transcode)
+## Render with transform (Media3 Transformer)
 
 `Video.render` with a single-clip `transform` (rotate / flip / crop), an
-overlay, an output-side change, or a trim window runs through `Transcoder.kt`:
-MediaCodec decode → GL compose (the transform is baked into the OES texcoords)
-→ MediaCodec encode → MediaMuxer. Two Android-specific points:
+output-side change (size / codec / bitrate), or a trim window runs through
+**Media3 Transformer** (`TransformerRunner.kt`) — the canonical Jetpack editing
+engine. It owns the decode → effects → encode lifecycle, so there is no
+hand-rolled MediaCodec/EOS plumbing:
 
-- **Rotation/flip re-encode here, unlike iOS.** iOS expresses a rotation or
-  flip losslessly in the container's `preferredTransform` (a remux). Android's
-  `MediaMuxer` only exposes an orientation *hint* (0/90/180/270) and cannot
-  store a mirror, so the transcoder bakes rotation **and** flip into pixels in
-  the same GL pass. The output is correct; it just isn't lossless or near-zero
-  cost the way iOS rotation/flip is. A future optimization could route a
-  rotation-only spec to a `setOrientationHint` remux.
-- **Audio is passthrough.** A second `MediaExtractor` copies the source's
-  compressed audio samples into a second `MediaMuxer` track (no re-encode),
-  honoring the same trim window as the video and rebasing PTS to the window
-  start. Both tracks are added before `muxer.start()`; the audio is written
-  after the video and MediaMuxer interleaves on finalize.
-- **Trim is frame-exact.** The extractor seeks to the sync sample at/ before
-  the window start; the pump decodes the GOP pre-roll but PTS-gates which
-  decoded frames are rendered, then stops at the window end. Output PTS is
-  rebased to `frameIndex / fps`.
+- **Trim** → `MediaItem.ClippingConfiguration` (start/end ms). Only a real trim
+  sets a clip range, so a rotation-only edit can still transmux.
+- **Crop / rotate / flip** → `Effects`: `Crop` (source-pixel rect mapped to
+  NDC), `ScaleAndRotateTransformation` (rotation is clockwise per the public
+  contract → negated for Media3; flips are scale ±1).
+- **Explicit output size** → `Presentation`; otherwise Media3 derives it (a 90°
+  rotation yields portrait output without the caller pinning dimensions).
+- **Audio** → preserved automatically (Transformer copies the audio through).
+- **Transmux fast path** → when the requested edit needs no pixel work, Media3
+  copies compressed samples without re-encoding.
+
+Transformer must be constructed, started, cancelled, and progress-polled on a
+thread with a `Looper`. The render worker (`Promise.parallel`) has none, so the
+session is driven on the main `Looper` and the worker blocks on a latch.
+
+**Why Media3 and not a DIY pump.** An earlier hand-rolled MediaCodec
+decode→GL→encode pump (still used by the watermark-stamp path) deadlocked on
+back-to-back renders in one process — the second export hung in the decode loop.
+Media3's managed lifecycle eliminates that class of bug; the instrumented
+`backToBackTranscodesBothComplete` test guards it.
+
+**Overlays on render** still use the hand-rolled `Transcoder` (full-source
+only); overlay + trim in one pass is rejected for now. Migrating overlays to a
+Media3 `OverlayEffect` is follow-up work.
 
 ## Potential improvements
 

@@ -2,15 +2,12 @@
 
 `Video.render` is the full-spec engine. For single-clip edits it doubles as the place to **trim and transform at the same time** — something `Video.trim` deliberately doesn't do (it stays a pure lossless cut).
 
-You describe *what* you want; the native router picks the cheapest path that works on each platform and **produces the correct output on both**. Source audio is preserved, and a trim window composes with the transform in the same pass. The path differs only in speed/quality:
+You describe *what* you want; each platform produces the **correct output** and **preserves the source audio**, and a trim window composes with the transform in the same pass. The engine differs:
 
-| transform | iOS | Android |
-| --- | --- | --- |
-| `rotate` | remux (lossless, fast) | transcode (re-encode) |
-| `flipH` / `flipV` | remux (lossless, fast) | transcode (re-encode) |
-| `crop` | transcode (re-encode) | transcode (re-encode) |
+- **iOS** — rotation/flip take the lossless **remux** path (the transform lives in the container's `preferredTransform`); `crop` re-encodes.
+- **Android** — runs on **Media3 Transformer**, which transmuxes (copies compressed samples, no re-encode) when the edit needs no pixel work and re-encodes otherwise.
 
-(Android's container can't store a mirror, and bakes rotation into pixels in the same pass — so it re-encodes for any transform. iOS expresses rotation/flip losslessly in the container transform.)
+So a rotate/flip on iOS is near-instant and lossless; the same edit on Android is correct and may transmux, but isn't guaranteed lossless. Cropping re-encodes everywhere.
 
 ## Trim + horizontal flip
 
@@ -33,11 +30,11 @@ await Video.render({
 });
 ```
 
-On iOS this is a lossless **remux** (the flip lives in the container transform); on Android it **transcodes** (the container can't store a mirror). Either way the output is a correctly-mirrored 5-second clip with its audio intact.
+On iOS this is a lossless **remux** (the flip lives in the container transform); on Android it runs through **Media3 Transformer**. Either way the output is a correctly-mirrored 5-second clip with its audio intact.
 
 ## Trim + rotate
 
-Trimming and rotating together — lossless **remux** on iOS, **transcode** on Android (both correct):
+Trimming and rotating together — lossless **remux** on iOS, **Media3 Transformer** on Android (both correct, audio preserved):
 
 ```ts
 await Video.render({
