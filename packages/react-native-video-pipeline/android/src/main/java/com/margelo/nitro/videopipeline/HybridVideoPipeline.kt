@@ -1023,8 +1023,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         baseClips.forEach { c ->
           if (c.outputStart < basePrevEnd - 1e-3) {
             throw VideoPipelineInvalidSpecException(
-              "base-track overlaps are not supported on Android yet (#43); " +
-                "overlay (PiP) tracks compose on top of a non-overlapping base"
+              "base-track overlaps combined with overlay (PiP) tracks are not " +
+                "supported on Android yet (#52); overlay tracks compose on top of " +
+                "a non-overlapping base — render the crossfade in a separate pass"
             )
           }
           basePrevEnd = c.outputStart + c.sourceDuration
