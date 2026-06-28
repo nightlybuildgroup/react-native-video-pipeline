@@ -722,9 +722,9 @@ NSString *fourCCString(FourCharCode code) {
   // --- Drive the passthrough export through the unified driver --------------
   // The composition encodes the full concatenated timeline; the driver runs the
   // Passthrough preset, forwards the first source's container metadata, polls
-  // the stop token (~50ms), enforces the completion deadline, and deletes any
-  // partial output on failure. Same driver the trim / flip / transform remuxes
-  // use — replaces the hand-rolled AVAssetExportSession block + stop watcher.
+  // the stop token (~50ms) for cancellation, and deletes any partial output on
+  // failure. Same driver the trim / flip / transform remuxes use — replaces the
+  // hand-rolled AVAssetExportSession block + stop watcher.
   // Later clips' metadata is dropped; a future merge policy can be defined when
   // stamp() learns about multi-clip inputs.
   RNVPExportRequest *request = [[RNVPExportRequest alloc]
