@@ -197,6 +197,7 @@ function finalizeClips(
     // at once is still unsupported and rejects. Omit it for contiguous concat.
     let clipOutputStart = outputStart;
     if (input.outputStartSec !== undefined) {
+      requireNonNeg('clip.outputStartSec', input.outputStartSec);
       if (input.outputStartSec < outputStart - OUTPUT_START_TOLERANCE_SEC) {
         fail(
           `clip.outputStartSec ${input.outputStartSec}s is before the previous clip's end (${outputStart}s) — overlaps are not supported`,

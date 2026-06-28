@@ -453,14 +453,18 @@ bool authorBlackClip(NSString* path, NSInteger width, NSInteger height,
                                      @"could not allocate a black gap frame"
                                }];
     }
+    [muxer closeWithError:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
     return false;
   }
   CVPixelBufferLockBaseAddress(pb, 0);
   std::memset(CVPixelBufferGetBaseAddress(pb), 0,
               CVPixelBufferGetBytesPerRow(pb) * static_cast<size_t>(height));
   CVPixelBufferUnlockBaseAddress(pb, 0);
+  // Author at least `seconds` of black (ceil to whole frames) so the caller can
+  // claim the exact gap duration when splicing — never less than requested.
   const NSInteger frames = std::max<NSInteger>(
-      1, static_cast<NSInteger>(std::llround(seconds * static_cast<double>(ifps))));
+      1, static_cast<NSInteger>(std::ceil(seconds * static_cast<double>(ifps))));
   bool ok = true;
   for (NSInteger i = 0; i < frames; i++) {
     if (stop != nil && stop.abortRequested) { ok = false; break; }
@@ -1163,15 +1167,15 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                       "VideoPipeline.render multi-transcode gap fill failed: ") +
                   desc);
             }
-            AVURLAsset* gapAsset =
-                [AVURLAsset assetWithURL:[NSURL fileURLWithPath:gapPath]];
-            const double gapDur = CMTimeGetSeconds(gapAsset.duration);
+            // The black temp is authored >= gapSec; splice exactly gapSec so the
+            // following clip lands precisely at its outputStart (no sub-frame
+            // drift accumulating across gaps).
             [sources addObject:[[RNVPRemuxerConcatSource alloc]
                                    initWithSourceURL:[NSURL fileURLWithPath:gapPath]
                                          sourceStart:0.0
-                                      sourceDuration:gapDur
+                                      sourceDuration:gapSec
                                          outputStart:cursor]];
-            cursor += gapDur;
+            cursor = clipsCopy[i].outputStart;
           }
           NSURL* clipURL = urlFromUri(clipsCopy[i].uri);
           // Per-clip target fps: an explicit output.fps resamples every clip to

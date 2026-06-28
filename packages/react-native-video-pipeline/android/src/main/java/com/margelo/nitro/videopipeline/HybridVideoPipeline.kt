@@ -1058,18 +1058,23 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         val canvasW = (output.width ?: if (swap0) content0H else content0W).roundToInt()
         val canvasH = (output.height ?: if (swap0) content0W else content0H).roundToInt()
 
+        // Effective rendered duration per clip (a trim is clamped to the source
+        // EOF). Gaps and the audio cap use these so a clip that renders shorter
+        // than its requested slot is bridged by black, landing the next clip at
+        // its outputStart.
+        val effDur = clips.indices.map { i ->
+          val clip = clips[i]
+          val isRealTrim = clip.sourceStart > 1e-3 ||
+            clip.sourceDuration < infos[i].durationSec - 0.05
+          if (isRealTrim) {
+            minOf(clip.sourceDuration, infos[i].durationSec - clip.sourceStart).coerceAtLeast(0.0)
+          } else {
+            infos[i].durationSec
+          }
+        }
         // Full timeline duration (last clip's output end, including any gaps),
         // for the replacement-audio cap.
-        val totalDurationSec = clips.last().let { last ->
-          val isRealTrim = last.sourceStart > 1e-3 ||
-            last.sourceDuration < infos.last().durationSec - 0.05
-          val lastDur = if (isRealTrim) {
-            minOf(last.sourceDuration, infos.last().durationSec - last.sourceStart).coerceAtLeast(0.0)
-          } else {
-            infos.last().durationSec
-          }
-          last.outputStart + lastDur
-        }
+        val totalDurationSec = clips.last().outputStart + effDur.last()
 
         val clipSpecs = clips.indices.map { i ->
           val clip = clips[i]
@@ -1079,11 +1084,12 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           val isRealTrim = clip.sourceStart > 1e-3 ||
             clip.sourceDuration < info.durationSec - 0.05
           // Black gap before this clip = its outputStart minus the previous
-          // clip's output end (0 when contiguous). Filled via addGap in runMulti.
+          // clip's *rendered* end (0 when contiguous). Filled via a black image
+          // item in runMulti.
           val leadingGap = if (i == 0) {
             clip.outputStart
           } else {
-            clip.outputStart - (clips[i - 1].outputStart + clips[i - 1].sourceDuration)
+            clip.outputStart - (clips[i - 1].outputStart + effDur[i - 1])
           }.coerceAtLeast(0.0)
           TransformerRunner.Spec(
             sourceUri = clip.uri,
