@@ -963,6 +963,25 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     return Promise.parallel {
       try {
         val output = spec.output
+        if (spec.duration != null) {
+          throw VideoPipelineInvalidSpecException(
+            "duration is only valid when clips is empty"
+          )
+        }
+        // Contiguous timeline only (the sequence joins clips back-to-back). The
+        // JS layer already enforces this; re-check so a direct caller can't slip
+        // a gap/overlap past it.
+        var cumulative = 0.0
+        clips.forEach { c ->
+          if (kotlin.math.abs(c.outputStart - cumulative) > 1e-3) {
+            throw VideoPipelineInvalidSpecException(
+              "multi-clip transcode requires a contiguous timeline — " +
+                "clip.outputStart does not match the cumulative position; gaps " +
+                "and overlaps are not supported yet"
+            )
+          }
+          cumulative += c.sourceDuration
+        }
         val ctx = NitroModules.applicationContext?.applicationContext
           ?: throw VideoPipelineInvalidSpecException(
             "render: no application context available for the transcoder"
@@ -1058,8 +1077,11 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             cropY = t?.crop?.y ?: 0.0,
             cropW = t?.crop?.w ?: 0.0,
             cropH = t?.crop?.h ?: 0.0,
-            outWidth = output.width?.roundToInt(),
-            outHeight = output.height?.roundToInt(),
+            // Pin every clip to the SHARED canvas (not just when the user pinned
+            // dims): a multi-clip sequence needs one consistent output size, so
+            // clips of differing sizes all scale to it.
+            outWidth = canvasW,
+            outHeight = canvasH,
             fps = resolveMedia3TargetFps(output.fps, info.fps),
             hevc = output.codec == VideoCodec.HEVC,
             bitrate = output.bitrate?.roundToInt(),

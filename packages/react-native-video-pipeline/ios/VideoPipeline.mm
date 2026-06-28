@@ -929,6 +929,21 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           }
         }
       }
+      // Contiguous timeline only (the transcode-each-then-concat path joins
+      // clips back-to-back). The JS layer already enforces this; re-check here
+      // so a direct native caller can't slip a gap/overlap past it.
+      {
+        double cumulative = 0.0;
+        for (const auto& c : *spec.clips) {
+          if (std::fabs(c.outputStart - cumulative) > 1e-3) {
+            return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+                "multi-clip transcode requires a contiguous timeline — "
+                "clip.outputStart does not match the cumulative position; gaps "
+                "and overlaps are not supported yet")));
+          }
+          cumulative += c.sourceDuration;
+        }
+      }
       NSMutableArray* nativeOverlays = nil;
       if (spec.overlays.has_value() && !spec.overlays->empty()) {
         nativeOverlays =
@@ -1042,6 +1057,19 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
             throw makeCancelled();
           }
           NSURL* clipURL = urlFromUri(clipsCopy[i].uri);
+          // Per-clip target fps: an explicit output.fps resamples every clip to
+          // it; otherwise each clip keeps its OWN source cadence. Using clip[0]'s
+          // fps for a clip recorded at a different rate would retime it (the
+          // transcoder emits one output frame per decoded sample at
+          // outputIndex/fps), changing its duration.
+          double clipTargetFps = fps;
+          if (!outputCopy.fps.has_value()) {
+            RNVPAVDemuxer* di = [[RNVPAVDemuxer alloc] init];
+            if ([di openAtURL:clipURL error:nil]) {
+              if (di.fps > 0.0) clipTargetFps = di.fps;
+              [di closeWithError:nullptr];
+            }
+          }
           NSString* tempPath = [NSTemporaryDirectory()
               stringByAppendingPathComponent:
                   [NSString stringWithFormat:@"rnvp-mc-%@-%zu.mp4",
@@ -1049,7 +1077,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           [temps addObject:tempPath];
           NSURL* tempURL = [NSURL fileURLWithPath:tempPath];
           RNVPTranscodeTarget* target = buildTranscodeTargetForClip(
-              clipsCopy[i], outW, outH, fps, codec, bitrate);
+              clipsCopy[i], outW, outH, clipTargetFps, codec, bitrate);
           NSError* tErr = nil;
           const BOOL ok = [RNVPTranscoder transcodeFromURL:clipURL
                                                      toURL:tempURL
