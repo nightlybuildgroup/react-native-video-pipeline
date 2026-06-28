@@ -200,9 +200,19 @@ through `OverlayTextRasterizer` — both flatten to the same `ResolvedOverlay`.
 
 Container metadata (`spec.metadata`) can't be authored by Media3 Transformer, so
 when present it's applied in a second compressed-passthrough pass via
-`Remuxer.remuxStamp` (both tracks copied, no re-encode) — the same metadata the
-stamp path persists (GPS via `MediaMuxer.setLocation`). The legacy hand-rolled
-GL `Transcoder` is now used only by the watermark-`stamp` path.
+`Remuxer.remuxStamp` (both tracks copied, no re-encode) — the same path the
+metadata-only `stamp` uses. `location` is written natively with
+`MediaMuxer.setLocation`; the rest of the `MetadataSpec` (`software`,
+`creationDate`, `description`, `custom`) is persisted as `moov.udta.meta` mdta
+items by `Mp4MetadataInjector` after the muxer closes — the same store iOS's
+AVAssetWriter writes, so the fields round-trip through `ProbeRunner`
+(`description`/`creationDate` into the dedicated `VideoInfo` fields,
+`software` + `custom` into `VideoInfo.custom`). The legacy hand-rolled GL
+`Transcoder` is now used only by the watermark-`stamp` path.
+
+> Parity note: `location` is still **not** written on the compose/synthesize
+> path (no `setLocation` there yet) — only the mdta fields are. The `loci`
+> altitude triple is also dropped on Android (`setLocation` takes lat/lon only).
 
 ## Potential improvements
 

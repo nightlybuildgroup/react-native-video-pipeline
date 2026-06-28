@@ -96,6 +96,16 @@ internal object ProbeRunner {
       for ((k, v) in mp4Items) {
         if (custom[k] == null) custom[k] = v
       }
+      // The stamp/render write path persists the standard scalar MetadataSpec
+      // fields as mdta items under canonical keys (Mp4MetadataInjector). Pull
+      // `description`/`creationDate` out of the generic `custom` bag into the
+      // dedicated VideoInfo fields, mirroring how iOS's AVFoundation normalises
+      // common metadata. `software` intentionally stays in `custom["software"]`
+      // (no dedicated field) — also matching iOS. A stamped creationDate wins
+      // over the container's mux-time default (METADATA_KEY_DATE).
+      val injectedDescription = custom.remove(Mp4MetadataInjector.KEY_DESCRIPTION)
+      val injectedCreationDate = custom.remove(Mp4MetadataInjector.KEY_CREATION_DATE)
+        ?.let { runCatching { Instant.parse(it) }.getOrNull() }
 
       val fileSizeBytes = try {
         java.io.File(path).length().toDouble()
@@ -122,12 +132,14 @@ internal object ProbeRunner {
         hasAudio = hasAudio,
         isHDR = isHDR,
         rotation = rotation.toDouble(),
-        creationDate = creationDate,
+        // A stamped creationDate (mdta) takes precedence over the container's
+        // mux-time METADATA_KEY_DATE default; falls back to it when unstamped.
+        creationDate = injectedCreationDate ?: creationDate,
         location = location,
-        // MediaMetadataRetriever has no DESCRIPTION key; surfacing this on
-        // Android requires walking the MP4 box tree (`udta/©cmt` etc.).
-        // Mirror the spec doc until that lands — iOS already populates it.
-        description = null,
+        // MediaMetadataRetriever has no DESCRIPTION key. We surface a
+        // library-stamped description from its mdta item; a description in a
+        // foreign file's `udta/©cmt` is still not walked (mirrors the spec doc).
+        description = injectedDescription,
         custom = custom.ifEmpty { null },
       )
     } catch (e: NotFoundException) {

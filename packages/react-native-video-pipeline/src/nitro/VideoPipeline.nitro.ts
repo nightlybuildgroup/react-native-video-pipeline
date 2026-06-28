@@ -428,12 +428,13 @@ export interface VideoInfo {
   location?: WGS84Coordinate;
   /**
    * Container-level description (`AVMetadataCommonKeyDescription` on iOS,
-   * `udta/©cmt`-equivalent on Android). Read symmetric with the write side
-   * via `MetadataSpec.description`.
+   * a `moov.udta.meta` mdta item on Android). Read symmetric with the write
+   * side via `MetadataSpec.description`.
    *
-   * Android caveat: surfacing this requires walking the MP4 box tree
-   * directly (MediaMetadataRetriever has no DESCRIPTION key) — currently
-   * not implemented, so Android probes always return undefined here.
+   * Android caveat: only a description this library stamped (an mdta
+   * `description` item) is surfaced. A description living in a foreign file's
+   * classic `udta/©cmt` atom is not walked (MediaMetadataRetriever has no
+   * DESCRIPTION key), so those still read back undefined.
    */
   description?: string;
   custom?: Record<string, string>;

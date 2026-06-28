@@ -38,6 +38,47 @@ import java.nio.ByteOrder
 
 internal object Mp4MetadataInjector {
 
+  /// Canonical `mdta` keys this library uses to persist the non-location
+  /// scalar `MetadataSpec` fields on Android. `MediaMuxer` can only express
+  /// `location` (`setLocation`), so everything else rides in the
+  /// `moov.udta.meta` mdta store — the same store iOS's `AVAssetWriter`
+  /// writes for `custom`. They round-trip through [read] + `ProbeRunner`:
+  /// `KEY_DESCRIPTION`/`KEY_CREATION_DATE` map back into the dedicated
+  /// `VideoInfo` fields; `KEY_SOFTWARE` surfaces under `custom["software"]`,
+  /// matching how AVFoundation normalises `AVMetadataCommonKeySoftware`.
+  ///
+  /// The keys are bare (not reverse-DNS) so an iOS reader sees `software`
+  /// in `custom` exactly as it would for an iOS-authored file. A caller
+  /// `custom` entry colliding with one of these is overwritten by the
+  /// explicit `MetadataSpec` field (see [itemsFor]); reverse-DNS custom
+  /// keys never collide in practice.
+  const val KEY_SOFTWARE = "software"
+  const val KEY_DESCRIPTION = "description"
+  const val KEY_CREATION_DATE = "creationDate"
+
+  /// Flatten a `MetadataSpec` into the `mdta` key/value items [inject]
+  /// persists: caller `custom` entries verbatim, plus the standard scalar
+  /// fields under their canonical keys. `location` is intentionally excluded
+  /// — it's written via `MediaMuxer.setLocation` as a real `©xyz` atom the
+  /// probe reads natively. `creationDate` is serialised ISO-8601 (the shape
+  /// `ProbeRunner.parseCreationDate` already accepts).
+  fun itemsFor(metadata: MetadataSpec): Map<String, String> {
+    val items = LinkedHashMap<String, String>()
+    metadata.custom?.forEach { (k, v) -> if (k.isNotEmpty() && v.isNotEmpty()) items[k] = v }
+    metadata.software?.takeIf { it.isNotEmpty() }?.let { items[KEY_SOFTWARE] = it }
+    metadata.description?.takeIf { it.isNotEmpty() }?.let { items[KEY_DESCRIPTION] = it }
+    metadata.creationDate?.let { items[KEY_CREATION_DATE] = it.toString() }
+    return items
+  }
+
+  /// Persist a full `MetadataSpec`'s non-location fields. No-op when there's
+  /// nothing to write. Safe to call after `MediaMuxer.setLocation` has already
+  /// handled `location`.
+  fun injectSpec(outputPath: String, metadata: MetadataSpec) {
+    val items = itemsFor(metadata)
+    if (items.isNotEmpty()) inject(outputPath, items)
+  }
+
   /// Inject `custom` as `mdta`-keyspace items into `outputPath`'s moov box.
   /// Existing `udta` siblings other than `meta` are preserved; an existing
   /// `meta` is replaced. No-op when `custom` is empty.
