@@ -17,8 +17,16 @@
 ///   * rotate (0/90/180/270)  → effect ScaleAndRotateTransformation (CW)
 ///   * flipH / flipV          → same effect, scale x/y by -1
 ///   * explicit output size   → effect Presentation
+///   * target fps (downsample) → effect FrameDropEffect
 ///   * codec / bitrate        → Transformer video MIME + encoder settings
 ///   * audio                  → kept (Transformer copies it through)
+///
+/// Frame-rate note: Media3 can only *drop* frames (FrameDropEffect), never
+/// interpolate, so `fps` here is always a downsample target (≤ source) — the
+/// router rejects an `output.fps` above the source rate before constructing the
+/// Spec. The default frame-drop strategy approximates the target rate from the
+/// real frame timestamps; it does not re-time every PTS to `outputIndex / fps`
+/// the way the iOS resampler does, so the output rate is approximate.
 ///
 /// Transformer requires construction + start() + cancel() + getProgress() on a
 /// thread with a Looper. The render worker (Promise.parallel) has none, so the
@@ -38,6 +46,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Crop
+import androidx.media3.effect.FrameDropEffect
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.transformer.Composition
@@ -80,6 +89,10 @@ internal object TransformerRunner {
     val cropH: Double,
     val outWidth: Int?,
     val outHeight: Int?,
+    /// Target frame rate. Null = keep the source rate. Always a downsample
+    /// (≤ source) — the router rejects an `output.fps` above the source rate,
+    /// since Media3 has no frame interpolation.
+    val fps: Double?,
     val hevc: Boolean,
     val bitrate: Int?,
   )
@@ -196,7 +209,15 @@ internal object TransformerRunner {
   private fun buildVideoEffects(spec: Spec): List<Effect> {
     val effects = ArrayList<Effect>()
 
-    // Crop first, in source-pixel coordinates → NDC. Crop(left, right, bottom,
+    // Frame-rate downsample first, so the rest of the chain only processes the
+    // frames that survive. Media3's default frame-drop strategy keeps frames
+    // whose timestamps fall closest to the target interval; it never adds
+    // frames, which is why the router rejects fps > source upstream.
+    if (spec.fps != null && spec.fps > 0.0) {
+      effects.add(FrameDropEffect.createDefaultFrameDropEffect(spec.fps.toFloat()))
+    }
+
+    // Crop next, in source-pixel coordinates → NDC. Crop(left, right, bottom,
     // top) with axes in [-1, 1]; NDC y is bottom-up while a source crop rect is
     // top-down, so the top edge maps to the larger NDC y.
     if (spec.cropW > 0.0 && spec.cropH > 0.0) {
