@@ -859,6 +859,66 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
   [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
 }
 
+/// Issue #32 diagnostic: the native fixed synthesize path (SynthesizeRunner →
+/// ComposeRunner → AVMuxer, with-audio openAtPath) must complete at 240fps for
+/// a multi-second clip — 480 frames — without stalling. If this hangs, the
+/// freeze is in the native muxer / silent-audio close; if it passes fast, the
+/// freeze observed end-to-end lives in the JS worklet frame bridge instead.
+- (void)testSynthesizeFixedHighFpsCompletes
+{
+  const NSInteger kWidth = 160;
+  const NSInteger kHeight = 120;
+  const double kFps = 240.0;
+  const double kSeconds = 2.0;
+  const NSInteger kExpectedFrames = (NSInteger)llround(kFps * kSeconds);
+
+  NSString *outputPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"i32-synth240-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+
+  NSError *error = nil;
+  XCTAssertTrue([RNVPSynthesizeRunner runFixedWithOutputPath:outputPath
+                                                       width:kWidth
+                                                      height:kHeight
+                                                         fps:kFps
+                                                     seconds:kSeconds
+                                                   stopToken:nil
+                                                    progress:nil
+                                                     aborted:NULL
+                                                       error:&error],
+                @"240fps synthesize failed: %@", error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outputPath]);
+
+  AVURLAsset *asset =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outputPath]];
+  AVAssetTrack *videoTrack =
+      [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  XCTAssertNotNil(videoTrack);
+
+  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset
+                                                         error:&error];
+  XCTAssertNotNil(reader);
+  AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:videoTrack
+     outputSettings:@{
+       (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+     }];
+  [reader addOutput:output];
+  XCTAssertTrue([reader startReading]);
+  NSInteger observed = 0;
+  while (YES) {
+    CMSampleBufferRef s = [output copyNextSampleBuffer];
+    if (s == NULL) break;
+    observed++;
+    CFRelease(s);
+  }
+  XCTAssertEqual(observed, kExpectedFrames, @"expected %ld frames, got %ld",
+                 (long)kExpectedFrames, (long)observed);
+
+  [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+}
+
 - (void)testSynthesizeFixedRejectsInvalidSpec
 {
   NSError *error = nil;
@@ -3407,6 +3467,97 @@ static BOOL readJpegPixelSize(NSString *path, NSInteger *outWidth,
                              @"output duration %f differs from expected %f",
                              demuxer.durationSec, expectedDurationSec);
   [demuxer closeWithError:nil];
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// Issue #32 regression: a longer, high-fps source (2 seconds at 240fps = 480
+/// frames) must transcode end-to-end without any wall-clock deadline aborting
+/// the encode. This is exactly the case the removed band-aids would have
+/// killed: at 240fps the encoder back-pressures far more often than the 30fps
+/// fixtures, and the AVMuxer.close / Transcoder.finishWriting flush handles a
+/// much larger moov than the tiny clips. Both the fixture author (AVMuxer's
+/// readiness spin + finishWriting) and the transcode hot loop (the
+/// readyForMoreMediaData spin + finishWriting) run unbounded here, escaping
+/// only on a real signal. The assertion is simply that it completes with the
+/// exact frame count — no deadline, no deleted output.
+- (void)testTranscodeLongHighFpsSourceCompletesWithoutDeadline
+{
+  const NSInteger kSourceW = 96;
+  const NSInteger kSourceH = 64;
+  const NSInteger kFps = 240;
+  const NSInteger kFrameCount = 480;  // 2.0s at 240fps
+
+  NSError *fixtureError = nil;
+  NSString *sourcePath = authorConcatFixture(kSourceW, kSourceH, kFps,
+                                             kFrameCount, @"i32-240fps",
+                                             &fixtureError);
+  XCTAssertNotNil(sourcePath, @"fixture failed: %@", fixtureError);
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"i32-240fps-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPTranscodeTarget *target =
+      [[RNVPTranscodeTarget alloc] initWithWidth:kSourceW
+                                          height:kSourceH
+                                             fps:(double)kFps
+                                           codec:RNVPTranscodeCodecH264
+                                         bitrate:0
+                                          rotate:-1
+                                           flipH:NO
+                                           flipV:NO
+                                           cropX:0
+                                           cropY:0
+                                       cropWidth:0
+                                      cropHeight:0];
+
+  NSError *error = nil;
+  const BOOL ok =
+      [RNVPTranscoder transcodeFromURL:[NSURL fileURLWithPath:sourcePath]
+                                 toURL:[NSURL fileURLWithPath:outPath]
+                                target:target
+                              overlays:nil
+                              metadata:nil
+                                 stop:nil
+                                 progress:nil
+                                 error:&error];
+  XCTAssertTrue(ok, @"high-fps transcode failed: %@", error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
+
+  // Count decoded output frames exactly — every source frame must survive the
+  // re-encode (no frames dropped by a premature timeout).
+  AVURLAsset *asset =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outPath]];
+  AVAssetTrack *videoTrack =
+      [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  XCTAssertNotNil(videoTrack);
+  XCTAssertEqualWithAccuracy(videoTrack.nominalFrameRate, (Float64)kFps, 1.0);
+
+  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset
+                                                         error:&error];
+  XCTAssertNotNil(reader, @"reader init failed: %@", error);
+  AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:videoTrack
+     outputSettings:@{
+       (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+     }];
+  [reader addOutput:output];
+  XCTAssertTrue([reader startReading], @"reader start failed: %@", reader.error);
+
+  NSInteger observedFrames = 0;
+  while (YES) {
+    CMSampleBufferRef sample = [output copyNextSampleBuffer];
+    if (sample == NULL) break;
+    observedFrames++;
+    CFRelease(sample);
+  }
+  XCTAssertEqual(observedFrames, kFrameCount,
+                 @"expected %ld frames, got %ld", (long)kFrameCount,
+                 (long)observedFrames);
 
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];

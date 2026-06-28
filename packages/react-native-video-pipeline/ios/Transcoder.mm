@@ -219,7 +219,8 @@ CIImage *applyTranscodePipeline(CIImage *sourceImage,
 }
 
 // Pump audio samples from @p audioOutput into @p audioInput, compressed
-// passthrough. Bounded-wait ready-spin mirrors the remux pumper.
+// passthrough. The ready-wait has no wall-clock deadline (issue #32); it
+// escapes only on writer.status == Failed, mirroring the remux pumper.
 //
 // On a trim window (@p hasWindow == YES) the audio is read from a dedicated
 // reader whose timeRange is already bounded to the window (see the caller), so
@@ -234,20 +235,22 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
                           AVAssetReader *audioReader, AVAssetWriter *writer,
                           BOOL hasWindow,
                           NSError *_Nullable __autoreleasing *error) {
-  static const NSTimeInterval kReadyTimeout = 30.0;
   CMTime shift = kCMTimeInvalid;  // anchored to the first kept packet's PTS
   while (YES) {
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kReadyTimeout];
+    // Wait for the encoder to accept another sample. No wall-clock deadline
+    // (issue #32): the wait ends on readiness or on the writer entering the
+    // Failed state (which pins readiness at NO forever). A slow encoder is
+    // legitimate and must not be killed.
     while (!audioInput.readyForMoreMediaData &&
-           [NSDate.date compare:deadline] == NSOrderedAscending) {
+           writer.status != AVAssetWriterStatusFailed) {
       [NSThread sleepForTimeInterval:0.001];
     }
     if (!audioInput.readyForMoreMediaData) {
       if (error) {
         *error = writer.error
                      ?: makeError(RNVPTranscoderErrorCodeWriterFailed,
-                                  @"Audio input did not become ready within "
-                                  @"30s.");
+                                  @"Audio input never became ready (writer "
+                                  @"entered the Failed state).");
       }
       return NO;
     }
@@ -693,7 +696,6 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
 
   NSError *loopError = nil;
   BOOL loopAborted = NO;
-  static const NSTimeInterval kReadyTimeout = 30.0;
 
   while (YES) {
     // Poll the stop token at the top of each iteration — before any work for
@@ -706,13 +708,12 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
     }
 
     // Wait for the encoder to accept another frame. Back-pressure on the
-    // macOS host is the dominant cost of the loop on tiny fixtures — mirror
-    // the remux pumper's 30s bound so a wedged writer fails fast. Poll the
-    // stop token on every 1ms tick so an abort arriving mid-back-pressure
-    // breaks out without waiting for the encoder to drain.
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kReadyTimeout];
-    while (!videoInput.readyForMoreMediaData &&
-           [NSDate.date compare:deadline] == NSOrderedAscending) {
+    // macOS host is the dominant cost of the loop on tiny fixtures. No
+    // wall-clock deadline (issue #32): the wait ends on readiness, a real
+    // writer failure, or an abort. Poll the stop token on every 1ms tick so
+    // an abort arriving mid-back-pressure breaks out without waiting for the
+    // encoder to drain.
+    while (!videoInput.readyForMoreMediaData) {
       if (stop && stop->abortRequested()) {
         loopAborted = YES;
         break;
@@ -725,8 +726,8 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
       loopError = writer.error
                       ?: makeError(RNVPTranscoderErrorCodeWriterFailed,
                                    [NSString stringWithFormat:
-                                       @"Video encoder did not become ready "
-                                       @"within 30s "
+                                       @"Video encoder never became ready "
+                                       @"(writer entered the Failed state) "
                                        @"(writer.status=%ld, "
                                        @"reader.status=%ld, "
                                        @"framesPushed=%d, "
@@ -931,17 +932,9 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   [writer finishWritingWithCompletionHandler:^{
     dispatch_semaphore_signal(done);
   }];
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)));
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPTranscoderErrorCodeWriterFailed,
-                         @"AVAssetWriter.finishWriting did not complete "
-                         @"within 60s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
+  // Wait unconditionally — the completion handler always fires (issue #32).
+  // The Completed-status check below distinguishes success from failure.
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
   if (writer.status != AVAssetWriterStatusCompleted) {
     if (error) {
       *error = writer.error

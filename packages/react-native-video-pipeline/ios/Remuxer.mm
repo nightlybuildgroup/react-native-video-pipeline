@@ -51,21 +51,27 @@ BOOL pumpPassthroughSamples(AVAssetReaderTrackOutput *output,
                             AVAssetWriterInput *input,
                             AVAssetReader *reader, AVAssetWriter *writer,
                             NSError *_Nullable __autoreleasing *error) {
-  // Bounded wait. The 30-second cap mirrors RNVPAVMuxer's video-input poll
-  // — anything longer is a wedged writer, not a slow encoder.
-  static const NSTimeInterval kReadyTimeout = 30.0;
+  // Wait for the writer input to accept more data, then append. No wall-clock
+  // deadline (issue #32): the readiness wait ends on a real signal only —
+  // the input becoming ready, or the writer entering the Failed state (which
+  // pins readiness at NO forever, e.g. an async disk-full failure between
+  // appends). `-requestMediaDataWhenReadyOnQueue:` would be the busy-wait-free
+  // pull API, but it offers no failure callback: if the writer fails while the
+  // input is full, AVFoundation never re-invokes the block and the pump would
+  // hang. So we poll readiness and escape on writer.status == Failed, matching
+  // the Transcoder pumps. The durable fix is retiring this manual pump in
+  // favour of AVAssetExportSession (#19/#14), not an interim API swap.
   while (YES) {
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kReadyTimeout];
-    while (!input.readyForMoreMediaData &&
-           [NSDate.date compare:deadline] == NSOrderedAscending) {
+    while (!input.readyForMoreMediaData) {
+      if (writer.status == AVAssetWriterStatusFailed) break;
       [NSThread sleepForTimeInterval:0.001];
     }
     if (!input.readyForMoreMediaData) {
       if (error) {
         *error = writer.error
                      ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                  @"Writer input did not become ready within "
-                                  @"30s.");
+                                  @"Writer input never became ready (writer "
+                                  @"entered the Failed state).");
       }
       return NO;
     }
@@ -1060,17 +1066,9 @@ NSArray<AVMetadataItem *> *buildMergedMetadata(
   [writer finishWritingWithCompletionHandler:^{
     dispatch_semaphore_signal(done);
   }];
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)));
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter.finishWriting did not complete "
-                         @"within 30s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
+  // Wait unconditionally — the completion handler always fires (issue #32).
+  // The Completed-status check below distinguishes success from failure.
+  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
   if (writer.status != AVAssetWriterStatusCompleted) {
     if (error) {
       *error = writer.error

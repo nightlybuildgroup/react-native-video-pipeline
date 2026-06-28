@@ -42,6 +42,8 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.MediaMetadataRetriever
+import android.os.Handler
+import android.os.HandlerThread
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -291,12 +293,20 @@ internal object Transcoder {
     // The decoder writes into a SurfaceTexture bound to the shared EGL
     // context; the compose shader samples it as an external OES texture.
     val frameSync = FrameAvailableLatch()
+    // Deliver onFrameAvailable on a dedicated thread, never the pump thread.
+    // The pump blocks in frameSync.await() with no wall-clock deadline (issue
+    // #32); if the SurfaceTexture callback were delivered on the pump thread
+    // (which happens with the no-Handler overload when the creator thread has a
+    // Looper) the await() would deadlock permanently. A private HandlerThread
+    // makes delivery thread-independent of however transcode() was invoked.
+    val frameCallbackThread = HandlerThread("rnvp-frame-available").apply { start() }
+    val frameCallbackHandler = Handler(frameCallbackThread.looper)
     val decoderOutputTexture = SurfaceTexture(gl.decoderTextureId).apply {
       setDefaultBufferSize(
         sourceFormat.getInteger(MediaFormat.KEY_WIDTH),
         sourceFormat.getInteger(MediaFormat.KEY_HEIGHT),
       )
-      setOnFrameAvailableListener { frameSync.signal() }
+      setOnFrameAvailableListener({ frameSync.signal() }, frameCallbackHandler)
     }
     val decoderSurface = Surface(decoderOutputTexture)
     val decoder = MediaCodec.createDecoderByType(sourceMime)
@@ -342,6 +352,7 @@ internal object Transcoder {
       runCatching { encoder.release() }
       runCatching { decoderSurface.release() }
       runCatching { decoderOutputTexture.release() }
+      runCatching { frameCallbackThread.quitSafely() }
       runCatching { gl.release() }
       runCatching { muxer.release() }
       runCatching { extractor.release() }
@@ -487,8 +498,15 @@ internal object Transcoder {
         if (doRender) {
           // releaseOutputBuffer(idx, true) enqueues a buffer on the
           // SurfaceTexture's producer queue — we must wait for the
-          // onFrameAvailable callback before calling updateTexImage().
-          frameSync.await(timeoutMs = 2000)
+          // onFrameAvailable callback before calling updateTexImage(). The wait
+          // has no wall-clock deadline (issue #32) but stays cancellable: it
+          // wakes periodically to honor the stop token so a cancelRender during
+          // the wait aborts promptly instead of blocking until the next frame.
+          if (!frameSync.await(state.stopToken)) {
+            state.aborted = true
+            runCatching { encoder.stop() }
+            return Result(state.framesWritten, aborted = true)
+          }
           decoderOutputTexture.updateTexImage()
           gl.drawFrame(
             decoderOutputTexture = decoderOutputTexture,
@@ -1015,10 +1033,9 @@ internal object Transcoder {
   }
 
   /// A one-shot latch that matches the onFrameAvailable callback against the
-  /// compose loop's awaitNewImage step. Grafika pattern, simplified for a
-  /// single-thread pump (listener runs on the Looper thread of whichever
-  /// HandlerThread the SurfaceTexture was constructed on — here, the
-  /// caller's thread, so the signal is a simple flag + notifyAll).
+  /// compose loop's awaitNewImage step (Grafika pattern). signal() runs on the
+  /// dedicated rnvp-frame-available HandlerThread; await() runs on the pump
+  /// thread — distinct threads, so the flag + wait/notify cannot self-deadlock.
   internal class FrameAvailableLatch {
     private val lock = Object()
     private var available = false
@@ -1030,23 +1047,32 @@ internal object Transcoder {
       }
     }
 
-    fun await(timeoutMs: Long) {
-      val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+    /// Wait for the next onFrameAvailable signal (delivered off this blocked
+    /// pump thread via a dedicated HandlerThread). Returns true when a frame is
+    /// available, false when the stop token requested an abort while waiting.
+    /// No wall-clock deadline (issue #32): a legitimately slow GL/decode round
+    /// trip on a slow device or a high-fps source must not be killed, and the
+    /// callback always fires once releaseOutputBuffer(idx, true) has queued a
+    /// frame. The bounded lock.wait() is a cancellation poll, not a deadline —
+    /// it never gives up on elapsed time, only on availability or abort.
+    fun await(stopToken: VideoPipelineStopToken?): Boolean {
       synchronized(lock) {
         while (!available) {
-          val remaining = (deadline - System.nanoTime()) / 1_000_000L
-          if (remaining <= 0L) {
-            throw TranscoderException(
-              "timed out waiting for decoder frame (${timeoutMs}ms)"
-            )
-          }
-          try { lock.wait(remaining) } catch (_: InterruptedException) {
+          if (stopToken?.isAbortRequested() == true) return false
+          try { lock.wait(CANCEL_POLL_MS) } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             throw TranscoderException("interrupted waiting for decoder frame")
           }
         }
         available = false
+        return true
       }
+    }
+
+    companion object {
+      // Re-check the stop token this often while parked. Not a deadline: the
+      // wait never fails on elapsed time, only on a frame or an abort.
+      private const val CANCEL_POLL_MS = 50L
     }
   }
 
