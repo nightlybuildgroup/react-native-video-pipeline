@@ -18,6 +18,7 @@
 ///   * flipH / flipV          → same effect, scale x/y by -1
 ///   * explicit output size   → effect Presentation
 ///   * target fps (downsample) → effect FrameDropEffect
+///   * native overlays        → effect OverlayEffect (BitmapOverlay per overlay)
 ///   * codec / bitrate        → Transformer video MIME + encoder settings
 ///   * audio                  → kept (Transformer copies it through)
 ///
@@ -38,6 +39,7 @@
 package com.margelo.nitro.videopipeline
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -45,10 +47,14 @@ import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.Crop
 import androidx.media3.effect.FrameDropEffect
+import androidx.media3.effect.OverlayEffect
+import androidx.media3.effect.OverlaySettings
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.ScaleAndRotateTransformation
+import androidx.media3.effect.TextureOverlay
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
@@ -95,6 +101,14 @@ internal object TransformerRunner {
     val fps: Double?,
     val hevc: Boolean,
     val bitrate: Int?,
+    /// Native overlays composited on top of the transformed frame via Media3
+    /// OverlayEffect. The runner owns these bitmaps and recycles them on exit.
+    val overlays: List<Transcoder.ResolvedOverlay> = emptyList(),
+    /// The resolved output canvas size, used to convert RATIO overlay sizes and
+    /// to scale each overlay bitmap to its target pixel size. Only read when
+    /// `overlays` is non-empty.
+    val outCanvasW: Int = 0,
+    val outCanvasH: Int = 0,
   )
 
   fun interface ProgressSink {
@@ -102,6 +116,22 @@ internal object TransformerRunner {
   }
 
   fun run(
+    context: Context,
+    spec: Spec,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    try {
+      runInternal(context, spec, stopToken, progress)
+    } finally {
+      // Media3 uploads each overlay bitmap to a GL texture during export; once
+      // run() returns (success, error, or cancel) the textures are released and
+      // the source bitmaps are no longer needed.
+      spec.overlays.forEach { runCatching { it.bitmap.recycle() } }
+    }
+  }
+
+  private fun runInternal(
     context: Context,
     spec: Spec,
     stopToken: VideoPipelineStopToken?,
@@ -249,7 +279,76 @@ internal object TransformerRunner {
         )
       )
     }
+
+    // Overlays composite last, on top of the transformed + resized frame, so
+    // their anchor/size are relative to the final output canvas (matching the
+    // legacy GL compose path and the iOS overlay renderer).
+    if (spec.overlays.isNotEmpty()) {
+      val canvasW = spec.outCanvasW.coerceAtLeast(1)
+      val canvasH = spec.outCanvasH.coerceAtLeast(1)
+      val textureOverlays = spec.overlays.map { buildOverlay(it, canvasW, canvasH) }
+      effects.add(OverlayEffect(ArrayList<TextureOverlay>(textureOverlays)))
+    }
     return effects
+  }
+
+  /// Maps one resolved overlay to a Media3 [TextureOverlay]. The GL compose path
+  /// treats the overlay's `anchor` as the *center* of the overlay placed at a
+  /// normalised point on the output frame (image-space, y-down); Media3 uses NDC
+  /// (y-up, origin center). The overlay is rendered at its bitmap's native pixel
+  /// size by default, so a target pixel size becomes a `scale` of out/native.
+  private fun buildOverlay(
+    overlay: Transcoder.ResolvedOverlay,
+    canvasW: Int,
+    canvasH: Int,
+  ): TextureOverlay {
+    val bmpW = overlay.bitmap.width.coerceAtLeast(1)
+    val bmpH = overlay.bitmap.height.coerceAtLeast(1)
+
+    // Resolve unit-tagged sizes to output pixels (RATIO → fraction of canvas),
+    // then aspect-fill against the natural bitmap size, mirroring the GL path.
+    val sizeWpx = overlay.sizeW?.let {
+      if (it.unit == SizeUnit.RATIO) it.value * canvasW else it.value
+    } ?: 0.0
+    val sizeHpx = overlay.sizeH?.let {
+      if (it.unit == SizeUnit.RATIO) it.value * canvasH else it.value
+    } ?: 0.0
+    val aspect = bmpW.toDouble() / bmpH.toDouble()
+    val (outW, outH) = when {
+      sizeWpx > 0 && sizeHpx > 0 -> Pair(sizeWpx, sizeHpx)
+      sizeWpx > 0 -> Pair(sizeWpx, sizeWpx / aspect)
+      sizeHpx > 0 -> Pair(sizeHpx * aspect, sizeHpx)
+      else -> Pair(bmpW.toDouble(), bmpH.toDouble())
+    }
+
+    // anchor (image-space, y-down, overlay center) → background NDC (y-up).
+    val bgX = (overlay.anchorX * 2.0 - 1.0).toFloat()
+    val bgY = (1.0 - overlay.anchorY * 2.0).toFloat()
+    val scaleX = (outW / bmpW).toFloat()
+    val scaleY = (outH / bmpH).toFloat()
+    val alpha = overlay.opacity.toFloat().coerceIn(0f, 1f)
+
+    val activeSettings = OverlaySettings.Builder()
+      .setBackgroundFrameAnchor(bgX, bgY)
+      .setScale(scaleX, scaleY)
+      .setAlphaScale(alpha)
+      .build()
+
+    val tr = overlay.timeRange
+    if (tr == null) {
+      return BitmapOverlay.createStaticBitmapOverlay(overlay.bitmap, activeSettings)
+    }
+    // Time-ranged overlay: invisible (alpha 0) outside [startSec, endSec]. The
+    // presentation timestamps after clipping start at 0, matching the output
+    // timeline the public timeRange is expressed against.
+    val startUs = (tr.startSec * 1_000_000.0).toLong() - 1_000
+    val endUs = (tr.endSec * 1_000_000.0).toLong() + 1_000
+    val hiddenSettings = OverlaySettings.Builder().setAlphaScale(0f).build()
+    return object : BitmapOverlay() {
+      override fun getBitmap(presentationTimeUs: Long): Bitmap = overlay.bitmap
+      override fun getOverlaySettings(presentationTimeUs: Long): OverlaySettings =
+        if (presentationTimeUs in startUs..endUs) activeSettings else hiddenSettings
+    }
   }
 
   private fun toUri(uri: String): Uri = when {

@@ -6,7 +6,9 @@
 ///
 ///   - `render()` — routes synthesize (null-input, T041) and multi-clip
 ///     compressed-passthrough concat (T042). Single-clip + any transform /
-///     overlay / re-encode lands on the transcode path in T044.
+///     overlay / re-encode runs on Media3 Transformer ([TransformerRunner]),
+///     including native overlays (OverlayEffect) composited in the same pass as
+///     trim + transform; container metadata is applied in a follow-up remux.
 ///   - `trim()` — T042. Compressed passthrough via Remuxer.remuxTrim.
 ///   - `flip()` — horizontal/vertical mirror via Media3 Transformer. MediaMuxer
 ///     can't store a mirror (only `setOrientationHint(0|90|180|270)`), so the
@@ -30,6 +32,7 @@ import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
 import com.margelo.nitro.NitroModules
 import com.margelo.nitro.core.Promise
+import java.io.File
 import kotlin.math.roundToInt
 
 class VideoPipelineNotImplementedException(method: String) :
@@ -792,14 +795,13 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
   }
 
-  /// Single-clip re-encode. The trim + transform (rotate/flip/crop) +
-  /// output-side change path runs on Media3 Transformer ([TransformerRunner]) —
-  /// it preserves audio, transmuxes when possible, and (unlike the hand-rolled
-  /// MediaCodec pump) survives back-to-back renders. Specs that carry a native
-  /// overlay still use the hand-rolled [Transcoder] (Media3 overlay support is
-  /// follow-up work); overlay + trim in one pass is rejected rather than
-  /// silently dropping the trim. The iOS counterpart is the transcode branch of
-  /// VideoPipeline.mm::render.
+  /// Single-clip re-encode. The whole single-clip render path — trim, transform
+  /// (rotate/flip/crop), output-side change (size/fps/codec/bitrate), and native
+  /// overlays — runs on Media3 Transformer ([TransformerRunner]). It preserves
+  /// audio, transmuxes when possible, survives back-to-back renders (unlike the
+  /// retired hand-rolled MediaCodec pump), and composites overlays via
+  /// OverlayEffect, so overlay + trim in one pass is supported. The iOS
+  /// counterpart is the transcode branch of VideoPipeline.mm::render.
   private fun renderTranscodeSingle(
     spec: VideoSpec,
     clip: Clip,
@@ -814,7 +816,6 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       )
     }
     val outputPath = spec.output.path
-    val hasOverlays = spec.overlays?.isNotEmpty() == true
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     return Promise.parallel {
@@ -829,45 +830,63 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         val isRealTrim = clip.sourceStart > 1e-3 ||
           clip.sourceDuration < info.durationSec - 0.05
 
-        if (hasOverlays) {
-          if (isRealTrim) {
-            throw VideoPipelineInvalidSpecException(
-              "render: overlay + trim in one pass is not supported on Android " +
-                "yet — overlay the full clip, or trim first"
-            )
-          }
-          renderOverlayTranscode(spec, clip, info, outputPath, stopToken, onProgress)
-        } else {
-          val ctx = NitroModules.applicationContext?.applicationContext
-            ?: throw VideoPipelineInvalidSpecException(
-              "render: no application context available for the transcoder"
-            )
-          TransformerRunner.run(
-            context = ctx,
-            spec = TransformerRunner.Spec(
-              sourceUri = clip.uri,
-              outputPath = outputPath,
-              sourceWidth = info.codedWidth.roundToInt(),
-              sourceHeight = info.codedHeight.roundToInt(),
-              startSec = if (isRealTrim) clip.sourceStart else 0.0,
-              durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
-              rotate = rotateDeg,
-              flipH = t?.flipH ?: false,
-              flipV = t?.flipV ?: false,
-              cropX = t?.crop?.x ?: 0.0,
-              cropY = t?.crop?.y ?: 0.0,
-              cropW = t?.crop?.w ?: 0.0,
-              cropH = t?.crop?.h ?: 0.0,
-              outWidth = output.width?.roundToInt(),
-              outHeight = output.height?.roundToInt(),
-              fps = resolveMedia3TargetFps(output.fps, info.fps),
-              hevc = output.codec == VideoCodec.HEVC,
-              bitrate = output.bitrate?.roundToInt(),
-            ),
-            stopToken = stopToken,
-            progress = wrapTransformerProgress(onProgress),
+        val ctx = NitroModules.applicationContext?.applicationContext
+          ?: throw VideoPipelineInvalidSpecException(
+            "render: no application context available for the transcoder"
           )
-        }
+
+        // Resolve overlays (decode bitmaps / rasterize text) on the worker.
+        // TransformerRunner takes ownership and recycles the bitmaps on exit.
+        val resolvedOverlays = spec.overlays?.map { ov ->
+          when (ov) {
+            is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
+            is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
+          }
+        } ?: emptyList()
+
+        // Output canvas the overlays are anchored/scaled against = the final
+        // frame size after crop/rotate/presentation. Pinned dims win; otherwise
+        // it's the crop rect (or source), swapped for a quarter-turn rotation.
+        val swapDims = rotateDeg == 90 || rotateDeg == 270
+        val contentW = t?.crop?.w ?: info.width
+        val contentH = t?.crop?.h ?: info.height
+        val canvasW = (output.width ?: if (swapDims) contentH else contentW).roundToInt()
+        val canvasH = (output.height ?: if (swapDims) contentW else contentH).roundToInt()
+
+        TransformerRunner.run(
+          context = ctx,
+          spec = TransformerRunner.Spec(
+            sourceUri = clip.uri,
+            outputPath = outputPath,
+            sourceWidth = info.codedWidth.roundToInt(),
+            sourceHeight = info.codedHeight.roundToInt(),
+            startSec = if (isRealTrim) clip.sourceStart else 0.0,
+            durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
+            rotate = rotateDeg,
+            flipH = t?.flipH ?: false,
+            flipV = t?.flipV ?: false,
+            cropX = t?.crop?.x ?: 0.0,
+            cropY = t?.crop?.y ?: 0.0,
+            cropW = t?.crop?.w ?: 0.0,
+            cropH = t?.crop?.h ?: 0.0,
+            outWidth = output.width?.roundToInt(),
+            outHeight = output.height?.roundToInt(),
+            fps = resolveMedia3TargetFps(output.fps, info.fps),
+            hevc = output.codec == VideoCodec.HEVC,
+            bitrate = output.bitrate?.roundToInt(),
+            overlays = resolvedOverlays,
+            outCanvasW = canvasW,
+            outCanvasH = canvasH,
+          ),
+          stopToken = stopToken,
+          progress = wrapTransformerProgress(onProgress),
+        )
+
+        // Media3 Transformer has no API to author container metadata, so apply
+        // it in a second compressed-passthrough pass (audio + video copied,
+        // location written via MediaMuxer.setLocation). Mirrors the metadata
+        // that the metadata-only stamp path persists today.
+        spec.metadata?.let { applyRenderMetadata(outputPath, it) }
         Unit
       } catch (e: TransformerRunner.CancelledException) {
         throw VideoPipelineCancelledException()
@@ -882,70 +901,38 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
   }
 
-  /// Legacy overlay-on-render path: the hand-rolled GL [Transcoder] composites
-  /// the overlay onto a full-source re-encode. No trim window (rejected above)
-  /// and no audio passthrough yet — both land when overlays move to the Media3
-  /// path. Output dims default to the displayed content (crop rect or source,
-  /// swapped for a quarter-turn rotation).
-  private fun renderOverlayTranscode(
-    spec: VideoSpec,
-    clip: Clip,
-    info: VideoInfo,
-    outputPath: String,
-    stopToken: VideoPipelineStopToken?,
-    onProgress: ((p: Progress) -> Unit)?,
-  ) {
-    val output = spec.output
-    val t = clip.transform
-    val rotateDeg = t?.rotate?.roundToInt() ?: -1
-    val contentW = t?.crop?.w ?: info.width
-    val contentH = t?.crop?.h ?: info.height
-    val swapDims = rotateDeg == 90 || rotateDeg == 270
-    val fallbackW = if (swapDims) contentH else contentW
-    val fallbackH = if (swapDims) contentW else contentH
-    val progressSink: Transcoder.ProgressSink? = onProgress?.let { cb ->
-      Transcoder.ProgressSink { framesCompleted, nbFrames, elapsedMs, etaMs ->
-        cb(
-          Progress(
-            framesCompleted = framesCompleted.toDouble(),
-            nbFrames = nbFrames?.toDouble(),
-            elapsedMs = elapsedMs,
-            estimatedRemainingMs = etaMs,
-          )
-        )
-      }
+  /// Applies container metadata to an already-rendered file. Media3 Transformer
+  /// can't author metadata, so the rendered output is moved aside and rewritten
+  /// through [Remuxer.remuxStamp] (compressed passthrough — both tracks copied,
+  /// no re-encode). Persists what the muxer can express (GPS via setLocation),
+  /// matching the metadata-only stamp path.
+  private fun applyRenderMetadata(outputPath: String, metadata: MetadataSpec) {
+    val out = File(outputPath)
+    val tmp = File("$outputPath.meta-src.tmp")
+    tmp.delete()
+    // Move the rendered output aside; remuxStamp reads `tmp` and rewrites
+    // `outputPath`. Keeping the original in `tmp` lets us restore a valid render
+    // if the (rare) metadata pass fails, rather than losing it.
+    if (!out.renameTo(tmp)) {
+      out.copyTo(tmp, overwrite = true)
+      out.delete()
     }
-    val target = Transcoder.Target(
-      width = (output.width ?: fallbackW).roundToInt(),
-      height = (output.height ?: fallbackH).roundToInt(),
-      fps = output.fps ?: if (info.fps > 0.0) info.fps else 30.0,
-      codec = if (output.codec == VideoCodec.HEVC) Transcoder.Codec.HEVC
-        else Transcoder.Codec.H264,
-      bitrate = output.bitrate?.roundToInt() ?: 0,
-      rotate = rotateDeg,
-      flipH = t?.flipH ?: false,
-      flipV = t?.flipV ?: false,
-      cropX = t?.crop?.x ?: 0.0,
-      cropY = t?.crop?.y ?: 0.0,
-      cropWidth = t?.crop?.w ?: 0.0,
-      cropHeight = t?.crop?.h ?: 0.0,
-    )
-    val resolvedOverlays = spec.overlays?.map { ov ->
-      when (ov) {
-        is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
-        is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
-      }
-    } ?: emptyList()
-    val result = Transcoder.transcode(
-      sourceUri = clip.uri,
-      outputPath = outputPath,
-      target = target,
-      overlays = resolvedOverlays,
-      metadata = spec.metadata,
-      stopToken = stopToken,
-      progress = progressSink,
-    )
-    if (result.aborted) throw VideoPipelineCancelledException()
+    try {
+      Remuxer.remuxStamp(sourceUri = tmp.absolutePath, outputPath = outputPath, metadata = metadata)
+      tmp.delete()
+    } catch (t: Throwable) {
+      // Metadata is best-effort on render: if the second pass fails, restore the
+      // valid rendered output (dropping any partial metadata-pass file) rather
+      // than failing the whole render.
+      android.util.Log.w(
+        "HybridVideoPipeline",
+        "render metadata pass failed; keeping the un-stamped output",
+        t,
+      )
+      out.delete()
+      runCatching { if (tmp.exists()) tmp.renameTo(out) }
+      tmp.delete()
+    }
   }
 
   // --- helpers --------------------------------------------------------

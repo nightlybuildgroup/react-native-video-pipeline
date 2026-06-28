@@ -180,9 +180,22 @@ back-to-back renders in one process — the second export hung in the decode loo
 Media3's managed lifecycle eliminates that class of bug; the instrumented
 `backToBackTranscodesBothComplete` test guards it.
 
-**Overlays on render** still use the hand-rolled `Transcoder` (full-source
-only); overlay + trim in one pass is rejected for now. Migrating overlays to a
-Media3 `OverlayEffect` is follow-up work.
+**Overlays on render** run on Media3 `OverlayEffect` too — one `BitmapOverlay`
+per overlay, composited last (on the transformed + resized frame), so overlay +
+trim + transform happen in a single pass with the audio preserved. Each overlay
+maps to a Media3 `OverlaySettings`: the public `anchor` (image-space, treated as
+the overlay's center) becomes `backgroundFrameAnchor` in NDC; the resolved pixel
+size becomes `scale` (Media3 renders a bitmap at its native pixel size by
+default, so `scale = targetPx / bitmapPx`); `opacity` becomes `alphaScale`; and a
+`timeRange` is honored by a `BitmapOverlay` subclass that drops `alphaScale` to 0
+outside the window. Image overlays decode a bitmap; text overlays rasterize
+through `OverlayTextRasterizer` — both flatten to the same `ResolvedOverlay`.
+
+Container metadata (`spec.metadata`) can't be authored by Media3 Transformer, so
+when present it's applied in a second compressed-passthrough pass via
+`Remuxer.remuxStamp` (both tracks copied, no re-encode) — the same metadata the
+stamp path persists (GPS via `MediaMuxer.setLocation`). The legacy hand-rolled
+GL `Transcoder` is now used only by the watermark-`stamp` path.
 
 ## Potential improvements
 
