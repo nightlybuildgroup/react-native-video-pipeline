@@ -95,11 +95,32 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
     val clips = spec.clips
-    return if (clips == null || clips.isEmpty()) {
-      renderSynthesize(spec, renderToken, onProgress)
-    } else {
-      renderClips(spec, clips.toList(), renderToken)
+    return when {
+      clips == null || clips.isEmpty() ->
+        renderSynthesize(spec, renderToken, onProgress)
+      // Single clip needing a re-encode (a transform, an overlay, or an
+      // output-side change) goes through the transcoder — which also honors the
+      // clip's trim window. Everything else (plain trims, multi-clip concat)
+      // stays on the passthrough remux path.
+      isSingleClipTranscode(spec, clips.toList()) ->
+        renderTranscodeSingle(spec, clips.first(), renderToken, onProgress)
+      else -> renderClips(spec, clips.toList(), renderToken)
     }
+  }
+
+  /// True when a single-clip spec needs the re-encode path: a non-empty
+  /// transform (rotate/flip/crop), any overlay, or an output-side change
+  /// (width/height/fps/codec/bitrate). Multi-clip specs never match — their
+  /// transcode path is not wired (they stay on concat / get rejected).
+  private fun isSingleClipTranscode(spec: VideoSpec, clips: List<Clip>): Boolean {
+    if (clips.size != 1) return false
+    val t = clips[0].transform
+    val hasTransform = t != null && clipTransformIsNonEmpty(t)
+    val hasOverlays = spec.overlays?.isNotEmpty() == true
+    val o = spec.output
+    val outputReencode = o.width != null || o.height != null || o.fps != null ||
+      o.codec != null || o.bitrate != null
+    return hasTransform || hasOverlays || outputReencode
   }
 
   override fun cancelRender(renderToken: String) {
@@ -725,6 +746,98 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
   }
 
+  /// Single-clip re-encode: trim window + transform (rotate/flip/crop) +
+  /// optional overlays + output-side changes, all in one decode/encode pass.
+  /// The iOS counterpart is the transcode branch of VideoPipeline.mm::render.
+  private fun renderTranscodeSingle(
+    spec: VideoSpec,
+    clip: Clip,
+    renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
+  ): Promise<Unit> {
+    if (clip.outputStart > 1e-3) {
+      return Promise.rejected(
+        VideoPipelineInvalidSpecException(
+          "outputStart must be 0 on a single-clip render"
+        )
+      )
+    }
+    val outputPath = spec.output.path
+    val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
+    val progressSink: Transcoder.ProgressSink? = onProgress?.let { cb ->
+      Transcoder.ProgressSink { framesCompleted, nbFrames, elapsedMs, etaMs ->
+        cb(
+          Progress(
+            framesCompleted = framesCompleted.toDouble(),
+            nbFrames = nbFrames?.toDouble(),
+            elapsedMs = elapsedMs,
+            estimatedRemainingMs = etaMs,
+          )
+        )
+      }
+    }
+    return Promise.parallel {
+      try {
+        // Probe so unspecified output dims/fps inherit from the source.
+        val info = ProbeRunner.info(clip.uri)
+        val output = spec.output
+        val t = clip.transform
+        val rotateDeg = t?.rotate?.roundToInt() ?: -1
+        // Default output dims track the displayed content: the crop rect if
+        // present (else the source), with width/height swapped for a
+        // quarter-turn rotation. Avoids non-uniformly scaling a rotated/cropped
+        // frame back to the source shape when the caller omits output dims.
+        val contentW = t?.crop?.w ?: info.width
+        val contentH = t?.crop?.h ?: info.height
+        val swapDims = rotateDeg == 90 || rotateDeg == 270
+        val fallbackW = if (swapDims) contentH else contentW
+        val fallbackH = if (swapDims) contentW else contentH
+        val target = Transcoder.Target(
+          width = (output.width ?: fallbackW).roundToInt(),
+          height = (output.height ?: fallbackH).roundToInt(),
+          fps = output.fps ?: if (info.fps > 0.0) info.fps else 30.0,
+          codec = if (output.codec == VideoCodec.HEVC) Transcoder.Codec.HEVC
+            else Transcoder.Codec.H264,
+          bitrate = output.bitrate?.roundToInt() ?: 0,
+          rotate = rotateDeg,
+          flipH = t?.flipH ?: false,
+          flipV = t?.flipV ?: false,
+          cropX = t?.crop?.x ?: 0.0,
+          cropY = t?.crop?.y ?: 0.0,
+          cropWidth = t?.crop?.w ?: 0.0,
+          cropHeight = t?.crop?.h ?: 0.0,
+          sourceStartSec = clip.sourceStart,
+          sourceDurationSec = clip.sourceDuration,
+        )
+        val resolvedOverlays = spec.overlays?.map { ov ->
+          when (ov) {
+            is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
+            is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
+          }
+        } ?: emptyList()
+        val result = Transcoder.transcode(
+          sourceUri = clip.uri,
+          outputPath = outputPath,
+          target = target,
+          overlays = resolvedOverlays,
+          metadata = spec.metadata,
+          stopToken = stopToken,
+          progress = progressSink,
+        )
+        if (result.aborted) throw VideoPipelineCancelledException()
+        Unit
+      } catch (e: Transcoder.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.InvalidSpecException) {
+        throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
+      } finally {
+        guard.end()
+        RenderTokenRegistry.unregisterToken(renderToken)
+      }
+    }
+  }
+
   // --- helpers --------------------------------------------------------
 
   private fun wrapProgressCallback(
@@ -774,11 +887,14 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     return null
   }
 
-  /// Android v0.1 concat is passthrough-only. Any of these force the
-  /// transcode path, which isn't wired yet:
+  /// The concat path is multi-clip passthrough. Single-clip re-encode specs
+  /// (transform / overlay / output change) are routed to the transcoder before
+  /// they reach here, so any of these reaching `renderClips` mean a *multi-clip*
+  /// spec asking for a re-encode — which isn't wired (multi-clip transcode is a
+  /// later task). They reject:
   ///   - duration (concat infers duration from clips, not a spec field)
-  ///   - overlays (render-path overlays require encode)
-  ///   - a non-empty ClipTransform (rotate/flip/crop all need a GPU pass)
+  ///   - overlays (multi-clip overlays require the transcode path)
+  ///   - a non-empty ClipTransform on any clip (rotate/flip/crop need a GPU pass)
   ///   - output-side changes (width/height/fps/codec/bitrate)
   private fun describeConcatBranchRejection(
     spec: VideoSpec,
@@ -789,20 +905,24 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
     val overlays = spec.overlays
     if (overlays != null && overlays.isNotEmpty()) {
-      return "overlays on a multi-clip spec require the transcode path (T044)"
+      return "overlays on a multi-clip spec require the transcode path, which " +
+        "is not wired for multiple clips yet"
     }
     clips.forEachIndexed { i, clip ->
       val t = clip.transform
       if (t != null && clipTransformIsNonEmpty(t)) {
-        return "clip[$i].transform requires the transcode path (T044)"
+        return "clip[$i].transform on a multi-clip spec requires the transcode " +
+          "path, which is not wired for multiple clips yet — split into " +
+          "single-clip renders"
       }
     }
     val output = spec.output
     if (output.width != null || output.height != null || output.fps != null ||
       output.codec != null || output.bitrate != null
     ) {
-      return "output-side re-encode (width/height/fps/codec/bitrate) requires " +
-        "the transcode path (T044)"
+      return "output-side re-encode (width/height/fps/codec/bitrate) on a " +
+        "multi-clip spec requires the transcode path, which is not wired for " +
+        "multiple clips yet"
     }
     return null
   }

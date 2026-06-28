@@ -10,10 +10,10 @@
 /// `ImageOverlay`s on top via alpha-blended textured quads.
 ///
 /// Scope for v0.1 (T044):
-///   * Video track only. Source audio is not passed through — future-work
-///     TODO flagged alongside the iOS transcode audio path (T033 does
-///     passthrough via a second AVAssetWriterInput; Android needs a second
-///     MediaMuxer track sourced from the MediaExtractor's audio samples).
+///   * Audio passthrough. The source's compressed audio samples are copied
+///     verbatim to a second MediaMuxer track (no re-encode), honoring the same
+///     trim window as the video and rebasing PTS to the window start — matching
+///     the iOS transcode path's second-AVAssetWriterInput behavior.
 ///   * Image + text overlays. Both are resolved to an ARGB bitmap up front
 ///     (`ResolvedOverlay`) — text via `OverlayTextRasterizer` (T045) — and
 ///     composited through one shared alpha-blended RGBA quad path.
@@ -84,6 +84,12 @@ internal object Transcoder {
     val cropY: Double,
     val cropWidth: Double,
     val cropHeight: Double,
+    /// Source trim window, seconds. `sourceStartSec` defaults to 0; a
+    /// `sourceDurationSec <= 0` means "to the end of the source". The pump
+    /// seeks to the window start and PTS-gates decoded frames so the trim is
+    /// frame-exact; output PTS is rebased to frameIndex/fps independently.
+    val sourceStartSec: Double = 0.0,
+    val sourceDurationSec: Double = 0.0,
   )
 
   data class Result(val framesWritten: Int, val aborted: Boolean)
@@ -155,8 +161,14 @@ internal object Transcoder {
     File(outputPath).apply { if (exists()) delete() }
 
     val sourceDurationSec = probeDurationSec(sourcePath)
-    val estFrameCount = if (sourceDurationSec > 0.0 && target.fps > 0.0) {
-      (sourceDurationSec * target.fps).roundToLong().toInt().coerceAtLeast(1)
+    // Frame-count estimate honors the trim window so the progress bar sizes to
+    // the encoded output, not the whole source.
+    val effectiveDurationSec = when {
+      target.sourceDurationSec > 0.0 -> target.sourceDurationSec
+      else -> (sourceDurationSec - target.sourceStartSec).coerceAtLeast(0.0)
+    }
+    val estFrameCount = if (effectiveDurationSec > 0.0 && target.fps > 0.0) {
+      (effectiveDurationSec * target.fps).roundToLong().toInt().coerceAtLeast(1)
     } else 0
 
     try {
@@ -311,16 +323,31 @@ internal object Transcoder {
       )
     }
 
+    // Audio passthrough: a separate extractor reads the source's compressed
+    // audio samples (no re-encode) which are copied to a second muxer track,
+    // mirroring the iOS transcode path. `null` audioFormat → silent output
+    // (sourceless audio is the synthesize path's concern, not ours).
+    val audioExtractor = MediaExtractor().apply { setDataSource(sourcePath) }
+    val audioTrackIndex = selectAudioTrack(audioExtractor)
+    val audioFormat: MediaFormat? = if (audioTrackIndex >= 0) {
+      audioExtractor.selectTrack(audioTrackIndex)
+      audioExtractor.getTrackFormat(audioTrackIndex)
+    } else {
+      null
+    }
+
     val runnerState = RunnerState(
       targetFps = target.fps,
       estimatedFrameCount = estimatedFrameCount,
       stopToken = stopToken,
       progress = progress,
+      audioFormat = audioFormat,
     )
 
     return try {
       pump(
         extractor = extractor,
+        audioExtractor = if (audioFormat != null) audioExtractor else null,
         decoder = decoder,
         encoder = encoder,
         muxer = muxer,
@@ -345,6 +372,7 @@ internal object Transcoder {
       runCatching { gl.release() }
       runCatching { muxer.release() }
       runCatching { extractor.release() }
+      runCatching { audioExtractor.release() }
     }
   }
 
@@ -354,6 +382,14 @@ internal object Transcoder {
       if (mime.startsWith("video/")) return i
     }
     return null
+  }
+
+  private fun selectAudioTrack(extractor: MediaExtractor): Int {
+    for (i in 0 until extractor.trackCount) {
+      val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+      if (mime.startsWith("audio/")) return i
+    }
+    return -1
   }
 
   private fun estimateBitrate(width: Int, height: Int, fps: Int): Int {
@@ -366,6 +402,10 @@ internal object Transcoder {
     val estimatedFrameCount: Int,
     val stopToken: VideoPipelineStopToken?,
     val progress: ProgressSink?,
+    /// Source audio track format, or null when the source has no audio. When
+    /// set, the muxer adds a passthrough audio track alongside the video one
+    /// (both must be added before muxer.start()).
+    val audioFormat: MediaFormat? = null,
   ) {
     val startNanos: Long = System.nanoTime()
     var framesWritten: Int = 0
@@ -373,6 +413,7 @@ internal object Transcoder {
     var aborted: Boolean = false
     var muxerStarted: Boolean = false
     var outputVideoTrack: Int = -1
+    var outputAudioTrack: Int = -1
     val bufferInfo = MediaCodec.BufferInfo()
     val decodeBufferInfo = MediaCodec.BufferInfo()
 
@@ -409,6 +450,7 @@ internal object Transcoder {
 
   private fun pump(
     extractor: MediaExtractor,
+    audioExtractor: MediaExtractor?,
     decoder: MediaCodec,
     encoder: MediaCodec,
     muxer: MediaMuxer,
@@ -432,6 +474,23 @@ internal object Transcoder {
       cropW = target.cropWidth,
       cropH = target.cropHeight,
     )
+
+    // Trim window. Seek the extractor to the preceding sync sample, then gate
+    // each decoded frame by its source PTS so the trim is frame-exact (the
+    // pre-window frames decoded for GOP reasons are dropped, not rendered).
+    val windowStartSec = target.sourceStartSec.coerceAtLeast(0.0)
+    val hasWindowStart = windowStartSec > 1e-3
+    val hasWindowEnd = target.sourceDurationSec > 0.0
+    val windowEndSec =
+      if (hasWindowEnd) windowStartSec + target.sourceDurationSec else Double.MAX_VALUE
+    val hasWindow = hasWindowStart || hasWindowEnd
+    val ptsEpsilonSec = 0.5 / target.fps.coerceAtLeast(1.0)
+    if (hasWindowStart) {
+      extractor.seekTo(
+        (windowStartSec * 1_000_000.0).toLong(),
+        MediaExtractor.SEEK_TO_PREVIOUS_SYNC,
+      )
+    }
 
     var decoderInputDone = false
     var decoderOutputDone = false
@@ -482,8 +541,22 @@ internal object Transcoder {
         val eos = (state.decodeBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
         val hasData = state.decodeBufferInfo.size != 0 ||
           (state.decodeBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
-        val doRender = state.decodeBufferInfo.size != 0
+        // Frame-exact trim gating against the source PTS. Pre-window frames are
+        // decoded (GOP requirement) but not rendered; once we pass the window
+        // end we stop, treating it like EOS.
+        val ptsSec = state.decodeBufferInfo.presentationTimeUs / 1_000_000.0
+        val beforeWindow = hasWindow && ptsSec < windowStartSec - ptsEpsilonSec
+        val pastWindowEnd = hasWindow && ptsSec >= windowEndSec - ptsEpsilonSec
+        val doRender = state.decodeBufferInfo.size != 0 && !beforeWindow && !pastWindowEnd
         decoder.releaseOutputBuffer(outIdx, doRender)
+        if (pastWindowEnd) {
+          decoderOutputDone = true
+          break
+        }
+        if (beforeWindow) {
+          // Keep draining toward the window start without counting this frame.
+          continue
+        }
         if (doRender) {
           // releaseOutputBuffer(idx, true) enqueues a buffer on the
           // SurfaceTexture's producer queue — we must wait for the
@@ -524,9 +597,72 @@ internal object Transcoder {
     }
     drainEncoder(encoder, muxer, state, endOfStream = true)
 
+    // Copy the source audio (compressed passthrough) for the same trim window,
+    // rebasing its PTS to the window start so it stays aligned with the
+    // re-timed video. MediaMuxer tolerates writing the whole audio track after
+    // the video track — it interleaves on finalize.
+    if (state.muxerStarted && state.outputAudioTrack >= 0 && audioExtractor != null) {
+      copyAudioWindow(
+        audioExtractor = audioExtractor,
+        muxer = muxer,
+        audioTrackIndex = state.outputAudioTrack,
+        hasWindow = hasWindow,
+        windowStartSec = windowStartSec,
+        windowEndSec = windowEndSec,
+        ptsEpsilonSec = ptsEpsilonSec,
+        hasWindowStart = hasWindowStart,
+      )
+    }
+
     if (state.muxerStarted) muxer.stop()
     state.reportProgress(force = true)
     return Result(state.framesWritten, aborted = false)
+  }
+
+  /// Compressed-passthrough copy of the source audio samples inside the trim
+  /// window into [audioTrackIndex]. PTS is rebased so the first kept sample
+  /// lands near 0 — matching the video track, which restarts at 0.
+  private fun copyAudioWindow(
+    audioExtractor: MediaExtractor,
+    muxer: MediaMuxer,
+    audioTrackIndex: Int,
+    hasWindow: Boolean,
+    windowStartSec: Double,
+    windowEndSec: Double,
+    ptsEpsilonSec: Double,
+    hasWindowStart: Boolean,
+  ) {
+    val windowStartUs = (windowStartSec * 1_000_000.0).toLong()
+    if (hasWindowStart) {
+      audioExtractor.seekTo(windowStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+    }
+    // 256 KiB comfortably exceeds any single compressed audio frame (AAC
+    // frames are a few KiB); avoids depending on KEY_MAX_INPUT_SIZE being set.
+    val buffer = ByteBuffer.allocate(256 * 1024)
+    val info = MediaCodec.BufferInfo()
+    while (true) {
+      val size = audioExtractor.readSampleData(buffer, 0)
+      if (size < 0) break
+      val ptsUs = audioExtractor.sampleTime
+      val ptsSec = ptsUs / 1_000_000.0
+      if (hasWindow && ptsSec >= windowEndSec - ptsEpsilonSec) break
+      if (hasWindow && ptsSec < windowStartSec - ptsEpsilonSec) {
+        audioExtractor.advance()
+        continue
+      }
+      info.offset = 0
+      info.size = size
+      info.presentationTimeUs =
+        if (hasWindow) (ptsUs - windowStartUs).coerceAtLeast(0L) else ptsUs
+      info.flags =
+        if ((audioExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC) != 0) {
+          MediaCodec.BUFFER_FLAG_KEY_FRAME
+        } else {
+          0
+        }
+      muxer.writeSampleData(audioTrackIndex, buffer, info)
+      audioExtractor.advance()
+    }
   }
 
   private fun drainEncoder(
@@ -545,6 +681,9 @@ internal object Transcoder {
         check(!state.muxerStarted) { "encoder emitted format change after muxer started" }
         val newFormat = encoder.outputFormat
         state.outputVideoTrack = muxer.addTrack(newFormat)
+        // Add the passthrough audio track before start() — MediaMuxer requires
+        // every track to be added while it is still in the stopped state.
+        state.audioFormat?.let { state.outputAudioTrack = muxer.addTrack(it) }
         muxer.start()
         state.muxerStarted = true
         continue

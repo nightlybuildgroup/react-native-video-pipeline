@@ -361,25 +361,6 @@ RNVPTranscodeTarget* buildTranscodeTarget(const VideoSpec& spec,
                                           NSInteger sourceW,
                                           NSInteger sourceH,
                                           double sourceFps) {
-  const NSInteger width = spec.output.width.has_value()
-                              ? static_cast<NSInteger>(
-                                    std::lround(*spec.output.width))
-                              : sourceW;
-  const NSInteger height = spec.output.height.has_value()
-                               ? static_cast<NSInteger>(
-                                     std::lround(*spec.output.height))
-                               : sourceH;
-  const double fps =
-      spec.output.fps.has_value() ? *spec.output.fps : sourceFps;
-  const RNVPTranscodeCodec codec =
-      spec.output.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC
-          ? RNVPTranscodeCodecHEVC
-          : RNVPTranscodeCodecH264;
-  const NSInteger bitrate =
-      spec.output.bitrate.has_value()
-          ? static_cast<NSInteger>(std::lround(*spec.output.bitrate))
-          : 0;
-
   NSInteger rotate = -1;
   BOOL flipH = NO;
   BOOL flipV = NO;
@@ -403,6 +384,39 @@ RNVPTranscodeTarget* buildTranscodeTarget(const VideoSpec& spec,
       cropHeight = c.h;
     }
   }
+
+  // Default output dimensions track the *displayed* content when the caller
+  // doesn't pin them: the crop rect if present (else the source), with width
+  // and height swapped for a quarter-turn rotation. This keeps an unspecified
+  // crop / rotate from being non-uniformly scaled back to the source frame.
+  const NSInteger contentW = cropWidth > 0.0
+                                 ? static_cast<NSInteger>(std::lround(cropWidth))
+                                 : sourceW;
+  const NSInteger contentH =
+      cropHeight > 0.0 ? static_cast<NSInteger>(std::lround(cropHeight))
+                       : sourceH;
+  const BOOL swapDims = (rotate == 90 || rotate == 270);
+  const NSInteger fallbackW = swapDims ? contentH : contentW;
+  const NSInteger fallbackH = swapDims ? contentW : contentH;
+
+  const NSInteger width = spec.output.width.has_value()
+                              ? static_cast<NSInteger>(
+                                    std::lround(*spec.output.width))
+                              : fallbackW;
+  const NSInteger height = spec.output.height.has_value()
+                               ? static_cast<NSInteger>(
+                                     std::lround(*spec.output.height))
+                               : fallbackH;
+  const double fps =
+      spec.output.fps.has_value() ? *spec.output.fps : sourceFps;
+  const RNVPTranscodeCodec codec =
+      spec.output.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC
+          ? RNVPTranscodeCodecHEVC
+          : RNVPTranscodeCodecH264;
+  const NSInteger bitrate =
+      spec.output.bitrate.has_value()
+          ? static_cast<NSInteger>(std::lround(*spec.output.bitrate))
+          : 0;
 
   return [[RNVPTranscodeTarget alloc] initWithWidth:width
                                              height:height
