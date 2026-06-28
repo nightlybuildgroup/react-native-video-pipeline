@@ -1,0 +1,29 @@
+# Issue #32 / longer-high-fps coverage — Android end-to-end: a longer, high-fps
+# clip (5s @ 240fps = 1200 frames) must run through synthesize → trim (remux)
+# → transcode (resize) without any wall-clock deadline aborting the encode.
+# Android counterpart of e2e-highfps-ios.yaml; the legacy GL Transcoder's
+# per-frame onFrameAvailable wait is unbounded but cancellable (mirrors
+# TransformerRunner's latch.await()).
+#
+# Precondition: bare-example is built + installed and Metro is serving JS. See
+# the API-36 Maestro limitation in README.md. Run via
+# `yarn test:e2e:highfps:android`.
+appId: com.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- scrollUntilVisible:
+    element:
+      id: "run-highfps-smoke"
+    timeout: 10000
+- tapOn:
+    id: "run-highfps-smoke"
+- scrollUntilVisible:
+    element:
+      id: "result-ok"
+    timeout: 120000
+- assertVisible: ".*hifps-synth=.*rnvp-hifps-src\\.mp4.*"
+- assertVisible: ".*hifps-trim=.*rnvp-hifps-trim\\.mp4.*"
+- assertVisible: ".*hifps-reenc=.*rnvp-hifps-reenc\\.mp4.*"

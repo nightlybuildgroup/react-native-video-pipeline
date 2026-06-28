@@ -21,6 +21,22 @@ yarn test:e2e:android
 yarn test:e2e:ios
 ```
 
+## High-fps flows (longer 240fps coverage)
+
+`e2e-highfps-{ios,android}.yaml` drive the `run-highfps-smoke` button, which
+synthesizes a **5-second, 240fps (1200-frame)** clip and runs it through
+synthesize → trim (remux) → transcode (resize). Verifies a longer, high-fps
+encode completes end-to-end with no wall-clock deadline (the #32 native fix).
+Measured ~0.2ms/frame, so the chain is well under a second of native work. Run:
+
+```sh
+yarn test:e2e:highfps:ios
+yarn test:e2e:highfps:android
+```
+
+These flows `scrollUntilVisible` the result box (it sits below every button) —
+copy that pattern in new flows instead of a bare `assertVisible`.
+
 Other flows in this directory (`synthesize-probe*`, `stamp-watermark-android`,
 `frame-number-overlay`, `perf-*`, `bootstrap-fixtures-probe`) are
 single-purpose smokes from earlier tasks.

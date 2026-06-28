@@ -1,0 +1,29 @@
+# Issue #32 / longer-high-fps coverage — iOS end-to-end: a longer, high-fps
+# clip (5s @ 240fps = 1200 frames) must run through synthesize → trim (remux)
+# → transcode (resize) without any wall-clock deadline aborting the encode.
+# End-to-end counterpart to the host XCTests testTranscodeLongHighFps* /
+# testSynthesizeFixedHighFpsCompletes.
+#
+# Precondition: bare-example is built + installed on the booted simulator and
+# Metro is serving JS (`yarn smoke:ios` builds it). Run via
+# `yarn test:e2e:highfps:ios`. The result box sits below every button, so the
+# flow scrolls it into view while waiting for the async render to finish.
+appId: org.reactjs.native.example.bareexample
+---
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: "skia-boot-status"
+- scrollUntilVisible:
+    element:
+      id: "run-highfps-smoke"
+    timeout: 10000
+- tapOn:
+    id: "run-highfps-smoke"
+- scrollUntilVisible:
+    element:
+      id: "result-ok"
+    timeout: 120000
+- assertVisible: ".*hifps-synth=.*rnvp-hifps-src\\.mp4.*"
+- assertVisible: ".*hifps-trim=.*rnvp-hifps-trim\\.mp4.*"
+- assertVisible: ".*hifps-reenc=.*rnvp-hifps-reenc\\.mp4.*"
