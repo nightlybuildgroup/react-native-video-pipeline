@@ -18,10 +18,12 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.time.Instant
 import kotlin.math.abs
 
 @RunWith(AndroidJUnit4::class)
@@ -92,6 +94,76 @@ class Mp4MetadataInjectorInstrumentedTest {
     assertTrue(
       "shrink did not grow the file (got $sizeAfterBig -> ${File(path).length()})",
       File(path).length() <= sizeAfterBig,
+    )
+  }
+
+  /// #25: the full MetadataSpec (not just location) must survive a stamp and
+  /// read back through ProbeRunner — software in custom, description +
+  /// creationDate in their dedicated fields, custom verbatim, location via the
+  /// muxer. End-to-end: synthesize -> remuxStamp -> info.
+  @Test
+  fun stampPersistsFullMetadataSpecForProbe() {
+    val src = synthFixture("full-spec")
+    val out = File(ctx.cacheDir, "mdta-full-spec-out.mp4").absolutePath
+
+    val created = Instant.parse("2026-04-24T12:34:56Z")
+    val metadata = MetadataSpec(
+      location = WGS84Coordinate(latitude = 48.8584, longitude = 2.2945, altitude = null),
+      software = "react-native-video-pipeline-test",
+      creationDate = created,
+      description = "a stamped clip",
+      custom = mapOf("com.acme.shot" to "B-roll 7"),
+    )
+    Remuxer.remuxStamp(sourceUri = src, outputPath = out, metadata = metadata)
+
+    val info = ProbeRunner.info(out)
+    assertEquals("description round-trips", "a stamped clip", info.description)
+    assertEquals("creationDate round-trips", created, info.creationDate)
+    val custom = info.custom ?: emptyMap()
+    assertEquals("software surfaces in custom", "react-native-video-pipeline-test", custom["software"])
+    assertEquals("custom key round-trips", "B-roll 7", custom["com.acme.shot"])
+    assertNull("description not duplicated into custom", custom["description"])
+    assertNull("creationDate not duplicated into custom", custom["creationDate"])
+    assertNotNull("location persisted via setLocation", info.location)
+    val loc = info.location!!
+    assertTrue("latitude ~48.8584 (got ${loc.latitude})", abs(loc.latitude - 48.8584) < 0.01)
+    assertTrue("longitude ~2.2945 (got ${loc.longitude})", abs(loc.longitude - 2.2945) < 0.01)
+  }
+
+  /// Injector-level: injectSpec writes the canonical mdta keys read() exposes.
+  @Test
+  fun injectSpecWritesCanonicalKeys() {
+    val path = synthFixture("inject-spec")
+    Mp4MetadataInjector.injectSpec(
+      path,
+      MetadataSpec(
+        location = null,
+        software = "sw",
+        creationDate = Instant.parse("2026-01-02T03:04:05Z"),
+        description = "desc",
+        custom = mapOf("com.acme.k" to "v"),
+      ),
+    )
+    val items = Mp4MetadataInjector.read(path)
+    assertEquals("sw", items[Mp4MetadataInjector.KEY_SOFTWARE])
+    assertEquals("desc", items[Mp4MetadataInjector.KEY_DESCRIPTION])
+    assertEquals("2026-01-02T03:04:05Z", items[Mp4MetadataInjector.KEY_CREATION_DATE])
+    assertEquals("v", items["com.acme.k"])
+  }
+
+  /// A caller-authored custom key that collides with the canonical
+  /// `creationDate` key but isn't a parseable date must survive the probe
+  /// round-trip in `custom` (caller owns their keys), not be silently consumed
+  /// by the dedicated-field mapping.
+  @Test
+  fun unparseableCreationDateCustomKeyStaysInCustom() {
+    val path = synthFixture("bad-date")
+    Mp4MetadataInjector.inject(path, mapOf(Mp4MetadataInjector.KEY_CREATION_DATE to "not-a-date"))
+    val info = ProbeRunner.info(path)
+    assertEquals(
+      "non-date custom value preserved in custom",
+      "not-a-date",
+      (info.custom ?: emptyMap())[Mp4MetadataInjector.KEY_CREATION_DATE],
     )
   }
 

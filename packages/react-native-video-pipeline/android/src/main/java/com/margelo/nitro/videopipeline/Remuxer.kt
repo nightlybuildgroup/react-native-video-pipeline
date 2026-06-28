@@ -15,11 +15,10 @@
 ///     fallback (not wired yet in v0.1).
 ///   * `remuxStamp` — metadata-only stamp; compressed passthrough that
 ///     forwards the source sample stream and overlays new metadata items
-///     onto the writer. On Android v0.1 only GPS is settable via
-///     `MediaMuxer.setLocation(lat, lon)`; the other MetadataSpec fields
-///     (software, creationDate, description, custom) are accepted without
-///     error but aren't persisted to the container — the transcode stamp
-///     path (T044 follow-up) is where full metadata authoring lands.
+///     onto the writer. `location` goes through `MediaMuxer.setLocation`;
+///     the remaining MetadataSpec fields (software, creationDate,
+///     description, custom) are persisted as `moov.udta.meta` mdta items
+///     by `Mp4MetadataInjector` after the muxer closes — iOS parity.
 ///
 /// The implementation uses plain MediaExtractor + MediaMuxer from the
 /// Android SDK — no Media3 Transformer dependency. Transformer's
@@ -213,14 +212,15 @@ internal object Remuxer {
     }
   }
 
-  /// Metadata-only stamp. Copies compressed samples + sets whatever
-  /// metadata MediaMuxer can express natively — GPS today via setLocation.
-  /// Non-GPS fields in the provided MetadataSpec are accepted without
-  /// error but not persisted in v0.1; full metadata authoring (software,
-  /// creationDate, description, custom keys) lands on the transcode stamp
-  /// path in T044. This mirrors the iOS metadata-only remux in T032 which
-  /// has the full suite — Android catches up when the writer can express
-  /// more than the container default.
+  /// Metadata-only stamp. Copies compressed samples, sets `location` via
+  /// `MediaMuxer.setLocation`, then persists the rest of the `MetadataSpec`
+  /// (software / creationDate / description / custom) as `moov.udta.meta`
+  /// mdta items via [Mp4MetadataInjector.injectSpec] — the same store iOS's
+  /// AVAssetWriter writes, so the fields round-trip through `ProbeRunner`
+  /// (description/creationDate into the dedicated `VideoInfo` fields,
+  /// software/custom into `VideoInfo.custom`). Reaches iOS parity for
+  /// container metadata. Also reused by the render metadata post-pass
+  /// (`applyRenderMetadata`).
   fun remuxStamp(
     sourceUri: String,
     outputPath: String,
@@ -267,6 +267,13 @@ internal object Remuxer {
       } finally {
         muxer.release()
       }
+
+      // MediaMuxer can only express `location` (setLocation, above). Persist
+      // the rest of the MetadataSpec — software / creationDate / description /
+      // custom — as moov.udta.meta mdta items, the same store iOS's
+      // AVAssetWriter writes. Runs after the muxer closes the file; inside the
+      // outer try, so a failure still deletes the half-written output.
+      metadata?.let { Mp4MetadataInjector.injectSpec(outputPath, it) }
     } catch (t: Throwable) {
       File(outputPath).delete()
       throw t

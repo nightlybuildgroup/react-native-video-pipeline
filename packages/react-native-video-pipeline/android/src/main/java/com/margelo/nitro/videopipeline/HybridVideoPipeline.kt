@@ -172,15 +172,13 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             stopToken = stopToken,
             progress = progressSink,
           )
-          // Patch the freshly-written MP4 with caller-supplied custom
-          // metadata items. MediaMuxer doesn't expose an API for arbitrary
-          // moov.udta items, so we do it ourselves after finalize. iOS
-          // achieves the same via AVAssetWriter.metadata.
-          spec.metadata?.custom?.let { custom ->
-            if (custom.isNotEmpty()) {
-              Mp4MetadataInjector.inject(outputPath, custom)
-            }
-          }
+          // Patch the freshly-written MP4 with the caller's MetadataSpec —
+          // software / creationDate / description / custom as moov.udta.meta
+          // mdta items. MediaMuxer doesn't expose an API for arbitrary udta
+          // items, so we do it ourselves after finalize. iOS achieves the same
+          // via AVAssetWriter.metadata. (location is a setLocation/©xyz atom not
+          // written on the compose path today — pre-existing limitation.)
+          spec.metadata?.let { Mp4MetadataInjector.injectSpec(outputPath, it) }
         } finally {
           guard.end()
           RenderTokenRegistry.unregisterToken(renderToken)
@@ -237,11 +235,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           stopToken = stopToken,
           progress = progressSink,
         )
-        spec.metadata?.custom?.let { custom ->
-          if (custom.isNotEmpty()) {
-            Mp4MetadataInjector.inject(outputPath, custom)
-          }
-        }
+        spec.metadata?.let { Mp4MetadataInjector.injectSpec(outputPath, it) }
       } finally {
         guard.end()
         RenderTokenRegistry.unregisterToken(renderToken)
@@ -684,6 +678,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           progress = progressSink,
         )
         if (result.aborted) throw VideoPipelineCancelledException()
+        // Transcoder writes `location` via setLocation; persist the rest of the
+        // MetadataSpec (software/creationDate/description/custom) as mdta items,
+        // same as the metadata-only stamp and render paths.
+        metadata?.let { Mp4MetadataInjector.injectSpec(outPath, it) }
         Unit
       } catch (e: Transcoder.CancelledException) {
         throw VideoPipelineCancelledException()
@@ -748,6 +746,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           )
           if (result.aborted) throw VideoPipelineCancelledException()
         }
+        // Persist container metadata (software/creationDate/description/custom)
+        // as mdta items, same as the compose-synthesize path. `location` isn't
+        // written here yet (no setLocation on the synthesize muxer) — pre-existing.
+        spec.metadata?.let { Mp4MetadataInjector.injectSpec(outputPath, it) }
         Unit
       } finally {
         guard.end()
@@ -785,6 +787,11 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           outputPath = outputPath,
           stopToken = stopToken,
         )
+        // Author container metadata in a second compressed-passthrough pass
+        // (location via setLocation, the rest via Mp4MetadataInjector), same as
+        // the transcode render path. Covers both plain single-clip trim and
+        // multi-clip concat (both route here).
+        spec.metadata?.let { applyRenderMetadata(outputPath, it) }
         Unit
       } catch (e: Remuxer.CancelledException) {
         throw VideoPipelineCancelledException()
@@ -894,8 +901,8 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
 
         // Media3 Transformer has no API to author container metadata, so apply
         // it in a second compressed-passthrough pass (audio + video copied,
-        // location written via MediaMuxer.setLocation). Mirrors the metadata
-        // that the metadata-only stamp path persists today.
+        // location via MediaMuxer.setLocation, the rest via Mp4MetadataInjector).
+        // Mirrors the full MetadataSpec the metadata-only stamp path persists.
         spec.metadata?.let { applyRenderMetadata(outputPath, it) }
         Unit
       } catch (e: TransformerRunner.CancelledException) {
@@ -914,8 +921,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
   /// Applies container metadata to an already-rendered file. Media3 Transformer
   /// can't author metadata, so the rendered output is moved aside and rewritten
   /// through [Remuxer.remuxStamp] (compressed passthrough — both tracks copied,
-  /// no re-encode). Persists what the muxer can express (GPS via setLocation),
-  /// matching the metadata-only stamp path.
+  /// no re-encode). Persists the full MetadataSpec (location via setLocation,
+  /// software/creationDate/description/custom via Mp4MetadataInjector), matching
+  /// the metadata-only stamp path.
   private fun applyRenderMetadata(outputPath: String, metadata: MetadataSpec) {
     val out = File(outputPath)
     val tmp = File("$outputPath.meta-src.tmp")
