@@ -92,6 +92,16 @@ dependencies {
   implementation project(":react-native-nitro-modules")
   implementation "org.jetbrains.kotlin:kotlin-stdlib"
 
+  // Media3 Transformer is the canonical Android engine for trim + transform +
+  // re-encode (docs/architecture.md). The render-with-transform path uses it:
+  // it owns the decode→effects→encode pipeline (no hand-rolled codec pump),
+  // preserves audio by default, trims via ClippingConfiguration, and
+  // transmuxes when no re-encode is needed.
+  def media3Version = getExtOrDefault("media3Version", "1.5.1")
+  implementation "androidx.media3:media3-transformer:$media3Version"
+  implementation "androidx.media3:media3-effect:$media3Version"
+  implementation "androidx.media3:media3-common:$media3Version"
+
   // On-device (instrumented) tests for the pure-Kotlin media surface
   // (Transcoder / OverlayTextRasterizer / SynthesizeRunner). See
   // src/androidTest. Not shipped — androidTest deps never enter the AAR.

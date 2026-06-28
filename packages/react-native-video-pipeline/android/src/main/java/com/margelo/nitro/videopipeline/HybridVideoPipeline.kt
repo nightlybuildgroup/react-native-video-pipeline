@@ -28,6 +28,7 @@ package com.margelo.nitro.videopipeline
 
 import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
+import com.margelo.nitro.NitroModules
 import com.margelo.nitro.core.Promise
 import kotlin.math.roundToInt
 
@@ -746,9 +747,14 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
   }
 
-  /// Single-clip re-encode: trim window + transform (rotate/flip/crop) +
-  /// optional overlays + output-side changes, all in one decode/encode pass.
-  /// The iOS counterpart is the transcode branch of VideoPipeline.mm::render.
+  /// Single-clip re-encode. The trim + transform (rotate/flip/crop) +
+  /// output-side change path runs on Media3 Transformer ([TransformerRunner]) —
+  /// it preserves audio, transmuxes when possible, and (unlike the hand-rolled
+  /// MediaCodec pump) survives back-to-back renders. Specs that carry a native
+  /// overlay still use the hand-rolled [Transcoder] (Media3 overlay support is
+  /// follow-up work); overlay + trim in one pass is rejected rather than
+  /// silently dropping the trim. The iOS counterpart is the transcode branch of
+  /// VideoPipeline.mm::render.
   private fun renderTranscodeSingle(
     spec: VideoSpec,
     clip: Clip,
@@ -763,8 +769,106 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       )
     }
     val outputPath = spec.output.path
+    val hasOverlays = spec.overlays?.isNotEmpty() == true
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
+    return Promise.parallel {
+      try {
+        val info = ProbeRunner.info(clip.uri)
+        val output = spec.output
+        val t = clip.transform
+        val rotateDeg = t?.rotate?.roundToInt() ?: -1
+        // A real trim window (vs the clip spanning the whole source). Only a
+        // real window sets clipping — keeping a no-op range off the spec lets
+        // Media3 transmux a rotation-only edit.
+        val isRealTrim = clip.sourceStart > 1e-3 ||
+          clip.sourceDuration < info.durationSec - 0.05
+
+        if (hasOverlays) {
+          if (isRealTrim) {
+            throw VideoPipelineInvalidSpecException(
+              "render: overlay + trim in one pass is not supported on Android " +
+                "yet — overlay the full clip, or trim first"
+            )
+          }
+          renderOverlayTranscode(spec, clip, info, outputPath, stopToken, onProgress)
+        } else {
+          val ctx = NitroModules.applicationContext?.applicationContext
+            ?: throw VideoPipelineInvalidSpecException(
+              "render: no application context available for the transcoder"
+            )
+          val progressSink = onProgress?.let { cb ->
+            TransformerRunner.ProgressSink { pct ->
+              cb(
+                Progress(
+                  framesCompleted = pct.toDouble(),
+                  nbFrames = 100.0,
+                  elapsedMs = 0.0,
+                  estimatedRemainingMs = null,
+                )
+              )
+            }
+          }
+          TransformerRunner.run(
+            context = ctx,
+            spec = TransformerRunner.Spec(
+              sourceUri = clip.uri,
+              outputPath = outputPath,
+              sourceWidth = info.codedWidth.roundToInt(),
+              sourceHeight = info.codedHeight.roundToInt(),
+              startSec = if (isRealTrim) clip.sourceStart else 0.0,
+              durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
+              rotate = rotateDeg,
+              flipH = t?.flipH ?: false,
+              flipV = t?.flipV ?: false,
+              cropX = t?.crop?.x ?: 0.0,
+              cropY = t?.crop?.y ?: 0.0,
+              cropW = t?.crop?.w ?: 0.0,
+              cropH = t?.crop?.h ?: 0.0,
+              outWidth = output.width?.roundToInt(),
+              outHeight = output.height?.roundToInt(),
+              hevc = output.codec == VideoCodec.HEVC,
+              bitrate = output.bitrate?.roundToInt(),
+            ),
+            stopToken = stopToken,
+            progress = progressSink,
+          )
+        }
+        Unit
+      } catch (e: TransformerRunner.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.InvalidSpecException) {
+        throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
+      } finally {
+        guard.end()
+        RenderTokenRegistry.unregisterToken(renderToken)
+      }
+    }
+  }
+
+  /// Legacy overlay-on-render path: the hand-rolled GL [Transcoder] composites
+  /// the overlay onto a full-source re-encode. No trim window (rejected above)
+  /// and no audio passthrough yet — both land when overlays move to the Media3
+  /// path. Output dims default to the displayed content (crop rect or source,
+  /// swapped for a quarter-turn rotation).
+  private fun renderOverlayTranscode(
+    spec: VideoSpec,
+    clip: Clip,
+    info: VideoInfo,
+    outputPath: String,
+    stopToken: VideoPipelineStopToken?,
+    onProgress: ((p: Progress) -> Unit)?,
+  ) {
+    val output = spec.output
+    val t = clip.transform
+    val rotateDeg = t?.rotate?.roundToInt() ?: -1
+    val contentW = t?.crop?.w ?: info.width
+    val contentH = t?.crop?.h ?: info.height
+    val swapDims = rotateDeg == 90 || rotateDeg == 270
+    val fallbackW = if (swapDims) contentH else contentW
+    val fallbackH = if (swapDims) contentW else contentH
     val progressSink: Transcoder.ProgressSink? = onProgress?.let { cb ->
       Transcoder.ProgressSink { framesCompleted, nbFrames, elapsedMs, etaMs ->
         cb(
@@ -777,65 +881,37 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         )
       }
     }
-    return Promise.parallel {
-      try {
-        // Probe so unspecified output dims/fps inherit from the source.
-        val info = ProbeRunner.info(clip.uri)
-        val output = spec.output
-        val t = clip.transform
-        val rotateDeg = t?.rotate?.roundToInt() ?: -1
-        // Default output dims track the displayed content: the crop rect if
-        // present (else the source), with width/height swapped for a
-        // quarter-turn rotation. Avoids non-uniformly scaling a rotated/cropped
-        // frame back to the source shape when the caller omits output dims.
-        val contentW = t?.crop?.w ?: info.width
-        val contentH = t?.crop?.h ?: info.height
-        val swapDims = rotateDeg == 90 || rotateDeg == 270
-        val fallbackW = if (swapDims) contentH else contentW
-        val fallbackH = if (swapDims) contentW else contentH
-        val target = Transcoder.Target(
-          width = (output.width ?: fallbackW).roundToInt(),
-          height = (output.height ?: fallbackH).roundToInt(),
-          fps = output.fps ?: if (info.fps > 0.0) info.fps else 30.0,
-          codec = if (output.codec == VideoCodec.HEVC) Transcoder.Codec.HEVC
-            else Transcoder.Codec.H264,
-          bitrate = output.bitrate?.roundToInt() ?: 0,
-          rotate = rotateDeg,
-          flipH = t?.flipH ?: false,
-          flipV = t?.flipV ?: false,
-          cropX = t?.crop?.x ?: 0.0,
-          cropY = t?.crop?.y ?: 0.0,
-          cropWidth = t?.crop?.w ?: 0.0,
-          cropHeight = t?.crop?.h ?: 0.0,
-          sourceStartSec = clip.sourceStart,
-          sourceDurationSec = clip.sourceDuration,
-        )
-        val resolvedOverlays = spec.overlays?.map { ov ->
-          when (ov) {
-            is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
-            is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
-          }
-        } ?: emptyList()
-        val result = Transcoder.transcode(
-          sourceUri = clip.uri,
-          outputPath = outputPath,
-          target = target,
-          overlays = resolvedOverlays,
-          metadata = spec.metadata,
-          stopToken = stopToken,
-          progress = progressSink,
-        )
-        if (result.aborted) throw VideoPipelineCancelledException()
-        Unit
-      } catch (e: Transcoder.CancelledException) {
-        throw VideoPipelineCancelledException()
-      } catch (e: Transcoder.InvalidSpecException) {
-        throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
-      } finally {
-        guard.end()
-        RenderTokenRegistry.unregisterToken(renderToken)
+    val target = Transcoder.Target(
+      width = (output.width ?: fallbackW).roundToInt(),
+      height = (output.height ?: fallbackH).roundToInt(),
+      fps = output.fps ?: if (info.fps > 0.0) info.fps else 30.0,
+      codec = if (output.codec == VideoCodec.HEVC) Transcoder.Codec.HEVC
+        else Transcoder.Codec.H264,
+      bitrate = output.bitrate?.roundToInt() ?: 0,
+      rotate = rotateDeg,
+      flipH = t?.flipH ?: false,
+      flipV = t?.flipV ?: false,
+      cropX = t?.crop?.x ?: 0.0,
+      cropY = t?.crop?.y ?: 0.0,
+      cropWidth = t?.crop?.w ?: 0.0,
+      cropHeight = t?.crop?.h ?: 0.0,
+    )
+    val resolvedOverlays = spec.overlays?.map { ov ->
+      when (ov) {
+        is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
+        is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
       }
-    }
+    } ?: emptyList()
+    val result = Transcoder.transcode(
+      sourceUri = clip.uri,
+      outputPath = outputPath,
+      target = target,
+      overlays = resolvedOverlays,
+      metadata = spec.metadata,
+      stopToken = stopToken,
+      progress = progressSink,
+    )
+    if (result.aborted) throw VideoPipelineCancelledException()
   }
 
   // --- helpers --------------------------------------------------------
