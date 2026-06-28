@@ -6856,4 +6856,75 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
+// The trim remux runs through RNVPExportSession's source-passthrough branch,
+// which builds a windowed composition for mute/replace. A windowed mute trims
+// to the right length with no audio; a windowed replace swaps the soundtrack
+// aligned to the output's own t=0 (not the source window start), capped to the
+// output duration.
+- (void)testRemuxTrimMuteAndReplaceWindowed {
+  NSError *error = nil;
+  // 1.0s source: silent [0,0.5), tone [0.5,1.0).
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, 30, 30,
+                                                   @"trim-aud", &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+
+  // Mute a [0.5, 1.0) window: ~0.5s output, no audio track.
+  NSString *mutePath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"trim-mute-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
+                                        toURL:[NSURL fileURLWithPath:mutePath]
+                                     startSec:0.5
+                                  durationSec:0.5
+                                    audioMode:RNVPAudioModeMute
+                          audioReplacementURL:nil
+                                        error:&error],
+                @"windowed mute trim failed: %@", error);
+  XCTAssertEqual(audioTrackCount(mutePath), 0u,
+                 @"muted trim must have no audio track");
+  const double muteDur = CMTimeGetSeconds(
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:mutePath]].duration);
+  XCTAssertEqualWithAccuracy(muteDur, 0.5, 0.12,
+                             @"muted trim should keep the window length "
+                             @"(got %.3fs)",
+                             muteDur);
+
+  // Replace the whole soundtrack with an all-tone clip (the source's back
+  // half). The output's front window must be the swapped tone, not silence.
+  NSString *replPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"trim-repl-src-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
+                                        toURL:[NSURL fileURLWithPath:replPath]
+                                     startSec:0.5
+                                  durationSec:0.5
+                                        error:&error],
+                @"replacement-trim failed: %@", error);
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"trim-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
+                                        toURL:[NSURL fileURLWithPath:outPath]
+                                     startSec:0.0
+                                  durationSec:1.0
+                                    audioMode:RNVPAudioModeReplace
+                          audioReplacementURL:[NSURL fileURLWithPath:replPath]
+                                        error:&error],
+                @"replace trim failed: %@", error);
+  XCTAssertGreaterThanOrEqual(audioTrackCount(outPath), 1u,
+                              @"replace trim must carry a swapped audio track");
+  const double frontRMS = decodeAudioRMSWindow(outPath, 0.1, 0.35);
+  XCTAssertGreaterThan(frontRMS, 0.15,
+                       @"replaced soundtrack should make the front window a "
+                       @"tone (got %.4f) — proves the swap aligned to t=0",
+                       frontRMS);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:replPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
 @end

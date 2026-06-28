@@ -197,6 +197,10 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
   NSString *presetName = nil;
   AVMutableVideoComposition *videoComposition = nil;
   __block NSError *composerError = nil;
+  // Set when the mute/replace passthrough branch bakes the requested trim
+  // window into a composition at t=0; the session timeRange must then cover the
+  // whole composition (not re-window it).
+  BOOL audioWindowBakedIntoComposition = NO;
 
   if (request.composer != nil) {
     const CGSize canvas = displayedSize(sourceVideoTrack);
@@ -314,16 +318,22 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
     presetName = AVAssetExportPresetPassthrough;
   } else {
     // Mute / replace on the passthrough path. The Passthrough preset cannot
-    // drop or swap a track on a raw asset, so wrap the source video in a
-    // composition carrying exactly the requested soundtrack and copy that
-    // through verbatim. The session timeRange still windows the output.
+    // drop or swap a track on a raw asset, so wrap the requested trim window in
+    // a composition carrying exactly the soundtrack asked for and copy that
+    // through verbatim. The window is baked at t=0 (not via the session
+    // timeRange) so replacement audio aligns to the output's own t=0 and is
+    // capped to the output duration, not the full source.
+    const CMTimeRange window =
+        (CMTIMERANGE_IS_VALID(request.timeRange) &&
+         !CMTIMERANGE_IS_EMPTY(request.timeRange))
+            ? request.timeRange
+            : CMTimeRangeMake(kCMTimeZero, asset.duration);
     AVMutableComposition *composition = [AVMutableComposition composition];
     AVMutableCompositionTrack *videoComp = [composition
         addMutableTrackWithMediaType:AVMediaTypeVideo
                     preferredTrackID:kCMPersistentTrackID_Invalid];
-    const CMTimeRange fullRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
     NSError *insertError = nil;
-    if (![videoComp insertTimeRange:fullRange
+    if (![videoComp insertTimeRange:window
                             ofTrack:sourceVideoTrack
                              atTime:kCMTimeZero
                               error:&insertError]) {
@@ -340,10 +350,13 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
       return NO;
     }
     videoComp.preferredTransform = sourceVideoTrack.preferredTransform;
-    insertAudioForMode(composition, asset, fullRange, request.audioMode,
-                       request.audioReplacementURL);
+    // The composition timeline starts at 0; insert audio over [0, windowDur].
+    insertAudioForMode(composition, asset,
+                       CMTimeRangeMake(kCMTimeZero, window.duration),
+                       request.audioMode, request.audioReplacementURL);
     exportInput = composition;
     presetName = AVAssetExportPresetPassthrough;
+    audioWindowBakedIntoComposition = YES;
   }
 
   // Pre-clean the output path — AVAssetExportSession refuses to overwrite.
@@ -374,8 +387,13 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
   // AVAssetExportSession falls back to "every sample the video track contains"
   // — which on some sources is longer than @c asset.duration claims (a 2.66s
   // source produced a 2.99s output / +77 frames in commit cb7c972).
-  if (CMTIMERANGE_IS_VALID(request.timeRange) &&
-      !CMTIMERANGE_IS_EMPTY(request.timeRange)) {
+  if (audioWindowBakedIntoComposition) {
+    // The mute/replace branch already windowed the composition at t=0; export
+    // it whole, otherwise the window would be applied twice.
+    exportSession.timeRange =
+        CMTimeRangeMake(kCMTimeZero, exportInput.duration);
+  } else if (CMTIMERANGE_IS_VALID(request.timeRange) &&
+             !CMTIMERANGE_IS_EMPTY(request.timeRange)) {
     exportSession.timeRange = request.timeRange;
   } else {
     exportSession.timeRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
