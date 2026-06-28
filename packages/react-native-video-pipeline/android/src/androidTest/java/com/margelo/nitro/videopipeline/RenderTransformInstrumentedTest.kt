@@ -93,6 +93,30 @@ class RenderTransformInstrumentedTest {
     }
   }
 
+  /// Counts the video-track samples (= encoded frames) in an MP4 by walking the
+  /// extractor. Used to verify frame-rate downsampling drops frames.
+  private fun videoFrameCount(path: String): Int {
+    val ex = MediaExtractor()
+    return try {
+      ex.setDataSource(path)
+      var track = -1
+      for (i in 0 until ex.trackCount) {
+        val mime = ex.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+        if (mime.startsWith("video/")) { track = i; break }
+      }
+      if (track < 0) return 0
+      ex.selectTrack(track)
+      var n = 0
+      while (ex.sampleTime >= 0) {
+        n++
+        if (!ex.advance()) break
+      }
+      n
+    } finally {
+      runCatching { ex.release() }
+    }
+  }
+
   private fun trackMimes(path: String): List<String> {
     val ex = MediaExtractor()
     return try {
@@ -117,6 +141,7 @@ class RenderTransformInstrumentedTest {
     durationSec: Double = 0.0,
     outWidth: Int? = null,
     outHeight: Int? = null,
+    fps: Double? = null,
   ) = TransformerRunner.Spec(
     sourceUri = src,
     outputPath = out,
@@ -133,9 +158,27 @@ class RenderTransformInstrumentedTest {
     cropH = cropH,
     outWidth = outWidth,
     outHeight = outHeight,
+    fps = fps,
     hevc = false,
     bitrate = null,
   )
+
+  @Test
+  fun fpsDownsampleDropsFrames() {
+    val src = synthFixture("fps-down")
+    val srcFrames = videoFrameCount(src) // ~30 (30fps, 1.0s)
+    val out = File(ctx.cacheDir, "xform-fps-15.mp4").absolutePath
+    // Request 15fps on a 30fps source -> Media3 FrameDropEffect keeps ~half.
+    TransformerRunner.run(ctx, spec(src, out, fps = 15.0), stopToken = null, progress = null)
+    assertTrue("fps output authored", File(out).exists())
+    val outFrames = videoFrameCount(out)
+    assertTrue(
+      "downsample drops frames (src=$srcFrames, out=$outFrames)",
+      outFrames in 12..20,
+    )
+    // We drop frames, not time: the duration is preserved.
+    assertTrue("duration ~1.0s (got ${durationSec(out)})", abs(durationSec(out) - 1.0) < 0.2)
+  }
 
   @Test
   fun cropAndTrimWindow() {

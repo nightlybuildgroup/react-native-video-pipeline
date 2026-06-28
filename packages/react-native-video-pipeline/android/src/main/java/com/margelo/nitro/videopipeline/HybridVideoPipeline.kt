@@ -977,7 +977,12 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
   /// rejects an up-sample rather than silently keeping the source rate.
   private fun resolveMedia3TargetFps(requestedFps: Double?, sourceFps: Double): Double? {
     if (requestedFps == null || requestedFps <= 0.0) return null
-    if (sourceFps > 0.0 && requestedFps > sourceFps + 0.01) {
+    // Tolerance absorbs NTSC nominal-vs-actual pairs (29.97↔30, 59.94↔60,
+    // 23.976↔24) so e.g. requesting 30 on a 29.97 source is a no-op, not a
+    // reject. The largest such gap is ~0.06fps; 0.2 leaves margin without
+    // masking a genuine up-sample request like 30→60.
+    val tolerance = 0.2
+    if (sourceFps > 0.0 && requestedFps > sourceFps + tolerance) {
       throw VideoPipelineInvalidSpecException(
         "render: output.fps ($requestedFps) exceeds the source frame rate " +
           "($sourceFps). Android (Media3) can only reduce the frame rate — it " +
@@ -985,7 +990,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       )
     }
     // ≈ source (within tolerance): no-op, let Media3 keep the source cadence.
-    if (sourceFps > 0.0 && requestedFps >= sourceFps - 0.01) return null
+    if (sourceFps > 0.0 && requestedFps >= sourceFps - tolerance) return null
     return requestedFps
   }
 
