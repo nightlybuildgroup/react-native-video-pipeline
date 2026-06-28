@@ -550,11 +550,84 @@ describe('Video.render — validation', () => {
     ).toThrow(InvalidSpecError);
   });
 
-  it('rejects a non-zero track', () => {
+  it('forwards an overlay track (track + frame) onto the Nitro clips (#17)', () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'base.mp4', startSec: 0, durationSec: 5 },
+        {
+          uri: 'pip.mp4',
+          startSec: 0,
+          durationSec: 2,
+          track: 1,
+          outputStartSec: 1,
+          frame: { x: 0.7, y: 0.05, w: 0.25, h: 0.25 },
+        },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as {
+      clips: Array<{ track?: number; outputStart: number; frame?: { x: number } }>;
+    };
+    // Base clip has no track field; the overlay carries track + frame + its
+    // explicit position, and does not shift the base timeline.
+    expect(passed.clips[0]).not.toHaveProperty('track');
+    expect(passed.clips[1]?.track).toBe(1);
+    expect(passed.clips[1]?.outputStart).toBe(1);
+    expect(passed.clips[1]?.frame).toEqual({ x: 0.7, y: 0.05, w: 0.25, h: 0.25 });
+    fake.renderCalls[0]?.resolve();
+    return promise;
+  });
+
+  it('rejects an overlay track without an explicit outputStartSec (#17)', () => {
     expect(() =>
       Video.render({
         output: { path: '/tmp/out.mp4' },
-        clips: [{ uri: 'a.mp4', startSec: 0, durationSec: 1, track: 1 }],
+        clips: [
+          { uri: 'base.mp4', startSec: 0, durationSec: 5 },
+          { uri: 'pip.mp4', startSec: 0, durationSec: 2, track: 1 },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects an overlay track with no base track to composite onto (#17)', () => {
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [{ uri: 'pip.mp4', startSec: 0, durationSec: 2, track: 1, outputStartSec: 0 }],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects an overlay track that extends past the base timeline (#17)', () => {
+    // Base is 3s; the overlay [2,5) would run 2s past the base end.
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'base.mp4', startSec: 0, durationSec: 3 },
+          { uri: 'pip.mp4', startSec: 0, durationSec: 3, track: 1, outputStartSec: 2 },
+        ],
+      }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects a clip.frame outside the normalized 0..1 output (#17)', () => {
+    expect(() =>
+      Video.render({
+        output: { path: '/tmp/out.mp4' },
+        clips: [
+          { uri: 'base.mp4', startSec: 0, durationSec: 5 },
+          {
+            uri: 'pip.mp4',
+            startSec: 0,
+            durationSec: 2,
+            track: 1,
+            outputStartSec: 1,
+            frame: { x: 0.9, y: 0.0, w: 0.5, h: 0.5 },
+          },
+        ],
       }),
     ).toThrow(InvalidSpecError);
   });

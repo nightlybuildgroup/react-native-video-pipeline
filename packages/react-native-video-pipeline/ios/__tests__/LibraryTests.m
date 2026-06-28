@@ -240,6 +240,21 @@ typedef NS_ENUM(NSInteger, RNVPAudioMode) {
                       outputStart:(double)outputStart;
 @end
 
+@interface RNVPOverlayTrackSource : NSObject
+@property(nonatomic, readonly) NSURL *sourceURL;
+@property(nonatomic, readonly) double sourceStart;
+@property(nonatomic, readonly) double sourceDuration;
+@property(nonatomic, readonly) double outputStart;
+@property(nonatomic, readonly) CGRect frame;
+@property(nonatomic, readonly) NSInteger zOrder;
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                      sourceStart:(double)sourceStart
+                   sourceDuration:(double)sourceDuration
+                      outputStart:(double)outputStart
+                            frame:(CGRect)frame
+                           zOrder:(NSInteger)zOrder;
+@end
+
 @interface RNVPStampMetadata : NSObject
 @property(nonatomic, readonly) BOOL hasGps;
 @property(nonatomic, readonly) double gpsLatitude;
@@ -298,6 +313,13 @@ typedef NS_ENUM(NSInteger, RNVPAudioMode) {
                           toURL:(NSURL *)outputURL
                            stop:(nullable RNVPStopToken *)stop
                           error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)composeOverlayTracks:(NSURL *)baseURL
+              overlaySources:(NSArray<RNVPOverlayTrackSource *> *)overlays
+                  renderSize:(CGSize)renderSize
+               frameDuration:(CMTime)frameDuration
+                       toURL:(NSURL *)outputURL
+                        stop:(nullable RNVPStopToken *)stop
+                       error:(NSError *_Nullable __autoreleasing *)error;
 + (BOOL)remuxStampFromURL:(NSURL *)sourceURL
                     toURL:(NSURL *)outputURL
                  metadata:(nullable RNVPStampMetadata *)metadata
@@ -7268,6 +7290,41 @@ static BOOL rgbAtTime(NSString *path, double t, uint8_t outRgb[3]) {
   return YES;
 }
 
+// Sample the pixel at normalized (nx, ny) — origin TOP-LEFT — of the frame at
+// @p t into @p outRgb (each 0-255). The context is flipped so row 0 is the top
+// of the image, matching the overlay compositor's top-left frame convention.
+static BOOL rgbAtTimePoint(NSString *path, double t, double nx, double ny,
+                           uint8_t outRgb[3]) {
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+  AVAssetImageGenerator *gen =
+      [[AVAssetImageGenerator alloc] initWithAsset:asset];
+  gen.requestedTimeToleranceBefore = kCMTimeZero;
+  gen.requestedTimeToleranceAfter = kCMTimeZero;
+  CGImageRef img = [gen copyCGImageAtTime:CMTimeMakeWithSeconds(t, 600)
+                               actualTime:NULL
+                                    error:NULL];
+  if (img == NULL) return NO;
+  const size_t W = CGImageGetWidth(img), H = CGImageGetHeight(img);
+  uint8_t *buf = (uint8_t *)calloc(W * H * 4, 1);
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGContextRef ctx = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
+                                           kCGImageAlphaPremultipliedLast);
+  // Flip to a top-left origin so (nx,ny) reads as a viewer sees it.
+  CGContextTranslateCTM(ctx, 0, H);
+  CGContextScaleCTM(ctx, 1, -1);
+  CGContextDrawImage(ctx, CGRectMake(0, 0, W, H), img);
+  size_t px = (size_t)(nx * (W - 1)), py = (size_t)(ny * (H - 1));
+  uint8_t *p = buf + (py * W + px) * 4;
+  outRgb[0] = p[0];
+  outRgb[1] = p[1];
+  outRgb[2] = p[2];
+  CGContextRelease(ctx);
+  CGColorSpaceRelease(cs);
+  CGImageRelease(img);
+  free(buf);
+  return YES;
+}
+
 // Author a solid-colour, video-only clip at @p path via RNVPAVMuxer — the same
 // muxer the gap fill uses, but filled with a BGRA colour instead of black.
 static NSString *authorSolidColorClip(NSInteger w, NSInteger h, NSInteger fps,
@@ -7588,6 +7645,64 @@ static NSString *authorSolidColorClip(NSInteger w, NSInteger h, NSInteger fps,
 
   [[NSFileManager defaultManager] removeItemAtPath:red error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:blue error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
+}
+
+// Multi-track PiP (#17): a blue overlay clip is placed in the bottom-right
+// quadrant on top of a full-frame red base. Inside the PiP rect the output is
+// blue; outside it stays red — and only while the overlay's window is active.
+- (void)testMultiTrackPipOverlay {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *base = authorSolidColorClip(80, 80, kFps, 90, 0xFF, 0x00, 0x00, @"mt-base");
+  NSString *pip = authorSolidColorClip(80, 80, kFps, 30, 0x00, 0x00, 0xFF, @"mt-pip");
+  XCTAssertNotNil(base, @"base author failed");
+  XCTAssertNotNil(pip, @"pip author failed");
+
+  // Base is 3s; the PiP shows over [1,2) in the bottom-right 40% box.
+  NSArray<RNVPOverlayTrackSource *> *overlays = @[
+    [[RNVPOverlayTrackSource alloc] initWithSourceURL:[NSURL fileURLWithPath:pip]
+                                          sourceStart:0.0
+                                       sourceDuration:1.0
+                                          outputStart:1.0
+                                                frame:CGRectMake(0.6, 0.6, 0.4, 0.4)
+                                               zOrder:1],
+  ];
+  NSString *out = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"mt-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer composeOverlayTracks:[NSURL fileURLWithPath:base]
+                                   overlaySources:overlays
+                                       renderSize:CGSizeMake(80, 80)
+                                    frameDuration:CMTimeMake(1, (int32_t)kFps)
+                                            toURL:[NSURL fileURLWithPath:out]
+                                             stop:nil
+                                            error:&error],
+                @"overlay compose failed: %@", error);
+
+  RNVPAVDemuxer *demuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([demuxer openAtURL:[NSURL fileURLWithPath:out] error:&error],
+                @"open PiP output failed: %@", error);
+  XCTAssertEqualWithAccuracy(demuxer.durationSec, 3.0, 0.2,
+                             @"PiP output should match the base ~3.0s (got %f)",
+                             demuxer.durationSec);
+  [demuxer closeWithError:NULL];
+
+  uint8_t tl[3] = {0}, br[3] = {0}, brBefore[3] = {0};
+  // During the overlay window (t=1.5): top-left is base red, bottom-right is PiP blue.
+  XCTAssertTrue(rgbAtTimePoint(out, 1.5, 0.2, 0.2, tl), @"read top-left");
+  XCTAssertTrue(rgbAtTimePoint(out, 1.5, 0.85, 0.85, br), @"read bottom-right");
+  XCTAssertGreaterThan(tl[0], 200, @"top-left should be base red");
+  XCTAssertLessThan(tl[2], 60, @"top-left should not be blue");
+  XCTAssertGreaterThan(br[2], 200, @"bottom-right should be PiP blue");
+  XCTAssertLessThan(br[0], 60, @"PiP region should not be red");
+  // Before the overlay window (t=0.5): bottom-right is still base red.
+  XCTAssertTrue(rgbAtTimePoint(out, 0.5, 0.85, 0.85, brBefore), @"read pre-window");
+  XCTAssertGreaterThan(brBefore[0], 200, @"before the PiP window the box is red");
+  XCTAssertLessThan(brBefore[2], 60, @"before the PiP window the box is not blue");
+
+  [[NSFileManager defaultManager] removeItemAtPath:base error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:pip error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
 }
 

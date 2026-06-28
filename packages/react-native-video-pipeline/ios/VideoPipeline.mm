@@ -867,9 +867,20 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // clip's end) is crossfade-composited (#18 overlaps), which also forces a
     // re-encode (a blended frame can't be passthrough-concatenated).
     bool hasOverlap = false;
+    // Overlay/PiP tracks (#17): a clip with track > 0 layers spatially on top of
+    // the base (track 0) timeline. They don't participate in the base concat, so
+    // gap/overlap detection runs over base clips only.
+    bool hasOverlayTracks = false;
+    auto clipTrack = [](const Clip& c) -> double {
+      return c.track.value_or(0.0);
+    };
     {
       double prevEnd = 0.0;
       for (const auto& c : *spec.clips) {
+        if (clipTrack(c) > 0.5) {
+          hasOverlayTracks = true;
+          continue;
+        }
         if (c.outputStart > prevEnd + 1e-3) {
           hasGap = true;
         } else if (c.outputStart < prevEnd - 1e-3) {
@@ -883,7 +894,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // the fast remux-transform path below, which also carries any trim window.
     // A gap always re-encodes, so it never takes the single fast paths.
     const bool needsTranscode =
-        single && !hasGap &&
+        single && !hasGap && !hasOverlayTracks &&
         (clipHasCrop((*spec.clips)[0]) || outputAsksForReencode(spec.output) ||
          hasOverlays);
     if (needsTranscode) {
@@ -995,7 +1006,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // A gap routes here even on a single clip (a leading-gap render is
     // [black, clip]); otherwise multi-clip + any re-encode trigger.
     const bool multiNeedsTranscode =
-        hasGap || hasOverlap ||
+        hasGap || hasOverlap || hasOverlayTracks ||
         (!single && (anyClipTransform ||
                      outputAsksForReencode(spec.output) || hasOverlays));
     if (multiNeedsTranscode) {
@@ -1026,12 +1037,39 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       // re-encode runs through AVAssetExportPresetHighestQuality (H.264), so
       // neither can target an HEVC output yet. Reject gaps/overlaps + HEVC until
       // the fill / crossfade encode respects the output codec.
-      if ((hasGap || hasOverlap) &&
+      //
+      // Overlay/PiP tracks (#17) take the same HighestQuality composite path,
+      // so they share the HEVC limit; and that preset doesn't honor an explicit
+      // bitrate, so reject a pinned bitrate on the overlay path rather than
+      // silently ignoring it.
+      if ((hasGap || hasOverlap || hasOverlayTracks) &&
           spec.output.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC) {
         return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
-            "timeline gaps/overlaps with an HEVC output are not supported yet — "
-            "the black gap fill and crossfade re-encode are authored as H.264; "
-            "use the default H.264 output")));
+            "timeline gaps/overlaps/overlay tracks with an HEVC output are not "
+            "supported yet — the black gap fill and the crossfade/overlay "
+            "re-encode are authored as H.264; use the default H.264 output")));
+      }
+      if (hasOverlayTracks && spec.output.bitrate.has_value()) {
+        return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+            "an explicit output.bitrate is not supported with overlay tracks "
+            "yet — the PiP composite re-encodes at the encoder's quality "
+            "default; drop output.bitrate")));
+      }
+      // The base/overlay split below indexes baseClips[0]; a direct native
+      // caller could bypass the JS "overlay needs a base" check, so guard it.
+      if (hasOverlayTracks) {
+        bool anyBase = false;
+        for (const auto& c : *spec.clips) {
+          if (c.track.value_or(0.0) <= 0.5) {
+            anyBase = true;
+            break;
+          }
+        }
+        if (!anyBase) {
+          return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+              "an overlay track (clip.track > 0) requires at least one base "
+              "(track 0) clip to composite onto")));
+        }
       }
       NSMutableArray* nativeOverlays = nil;
       if (spec.overlays.has_value() && !spec.overlays->empty()) {
@@ -1074,7 +1112,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       return Promise<void>::async([clipsCopy, outputCopy, nativeOverlays,
                                    perClipAudio, concatAudio,
                                    concatReplacementURL, outputURL, runnerToken,
-                                   tokenCopy, guard, hasOverlap]() {
+                                   tokenCopy, guard, hasOverlap,
+                                   hasOverlayTracks]() {
         NSMutableArray<NSString*>* temps = [NSMutableArray array];
         void (^teardown)(void) = ^{
           RenderTokenRegistry::unregisterToken(tokenCopy);
@@ -1084,11 +1123,34 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           }
         };
 
+        // Split the base (track 0) timeline from overlay/PiP tracks (#17). The
+        // base joins as usual; overlays are composited on top afterwards. The
+        // join target is the real output for a plain render, or a temp when
+        // overlays still have to be layered on.
+        std::vector<Clip> baseClips, overlayClips;
+        for (const auto& c : clipsCopy) {
+          if (c.track.value_or(0.0) > 0.5) {
+            overlayClips.push_back(c);
+          } else {
+            baseClips.push_back(c);
+          }
+        }
+        NSString* baseTempPath = nil;
+        if (hasOverlayTracks) {
+          baseTempPath = [NSTemporaryDirectory()
+              stringByAppendingPathComponent:
+                  [NSString stringWithFormat:@"rnvp-mt-base-%@.mp4",
+                                             [[NSUUID UUID] UUIDString]]];
+          [temps addObject:baseTempPath];
+        }
+        NSURL* joinURL =
+            baseTempPath != nil ? [NSURL fileURLWithPath:baseTempPath] : outputURL;
+
         // Shared output dimensions: pinned values win, else derive from clip[0]
         // (post its own rotation) — the multi-clip analogue of the single-clip
         // fallback. Every clip re-encodes to these dims so the concat can join.
         NSError* probeErr = nil;
-        NSURL* clip0URL = urlFromUri(clipsCopy[0].uri);
+        NSURL* clip0URL = urlFromUri(baseClips[0].uri);
         RNVPAVDemuxer* d0 = [[RNVPAVDemuxer alloc] init];
         if (![d0 openAtURL:clip0URL error:&probeErr]) {
           teardown();
@@ -1104,8 +1166,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
 
         NSInteger rot0 = -1;
         double crop0W = 0.0, crop0H = 0.0;
-        if (clipsCopy[0].transform.has_value()) {
-          const auto& t = *clipsCopy[0].transform;
+        if (baseClips[0].transform.has_value()) {
+          const auto& t = *baseClips[0].transform;
           if (t.rotate.has_value()) rot0 = static_cast<NSInteger>(std::lround(*t.rotate));
           if (t.crop.has_value()) {
             crop0W = t.crop->w;
@@ -1140,7 +1202,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
         NSMutableArray<RNVPRemuxerConcatSource*>* sources =
             [NSMutableArray array];
         double cursor = 0.0;
-        for (size_t i = 0; i < clipsCopy.size(); i++) {
+        for (size_t i = 0; i < baseClips.size(); i++) {
           if (runnerToken.abortRequested) {
             teardown();
             throw makeCancelled();
@@ -1152,7 +1214,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           // itself, so no black temp is authored — each clip is positioned at its
           // true outputStart instead of the running concat cursor.
           const double gapSec =
-              hasOverlap ? 0.0 : (clipsCopy[i].outputStart - cursor);
+              hasOverlap ? 0.0 : (baseClips[i].outputStart - cursor);
           if (gapSec > 1e-3) {
             NSString* gapPath = [NSTemporaryDirectory()
                 stringByAppendingPathComponent:
@@ -1178,9 +1240,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                          sourceStart:0.0
                                       sourceDuration:gapSec
                                          outputStart:cursor]];
-            cursor = clipsCopy[i].outputStart;
+            cursor = baseClips[i].outputStart;
           }
-          NSURL* clipURL = urlFromUri(clipsCopy[i].uri);
+          NSURL* clipURL = urlFromUri(baseClips[i].uri);
           // Per-clip target fps: an explicit output.fps resamples every clip to
           // it; otherwise each clip keeps its OWN source cadence. Using clip[0]'s
           // fps for a clip recorded at a different rate would retime it (the
@@ -1201,7 +1263,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           [temps addObject:tempPath];
           NSURL* tempURL = [NSURL fileURLWithPath:tempPath];
           RNVPTranscodeTarget* target = buildTranscodeTargetForClip(
-              clipsCopy[i], outW, outH, clipTargetFps, codec, bitrate);
+              baseClips[i], outW, outH, clipTargetFps, codec, bitrate);
           NSError* tErr = nil;
           const BOOL ok = [RNVPTranscoder transcodeFromURL:clipURL
                                                      toURL:tempURL
@@ -1231,7 +1293,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           // composer positions it at its true outputStart so overlaps land where
           // the timeline asks.
           const double clipOutputStart =
-              hasOverlap ? clipsCopy[i].outputStart : cursor;
+              hasOverlap ? baseClips[i].outputStart : cursor;
           [sources addObject:[[RNVPRemuxerConcatSource alloc]
                                  initWithSourceURL:tempURL
                                        sourceStart:0.0
@@ -1240,35 +1302,32 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           cursor += dur;
         }
 
-        // Join the transcoded temps into the final output — a lossless concat
-        // for a contiguous/gapped timeline, a crossfade re-encode for overlaps.
+        // Join the base temps — a lossless concat for a contiguous/gapped
+        // timeline, a crossfade re-encode for overlaps. Writes to the real
+        // output, or to a base temp when overlay tracks still need layering.
+        const CMTime frameDuration =
+            CMTimeMake(1, static_cast<int32_t>(std::lround(fps)));
         NSError* cErr = nil;
         BOOL cok;
         if (hasOverlap) {
-          // Overlapping clips can't be losslessly concatenated — crossfade-
-          // composite the transcoded temps (opacity + volume ramps over each
-          // overlap window) and re-encode.
-          const CMTime frameDuration =
-              CMTimeMake(1, static_cast<int32_t>(std::lround(fps)));
           cok = [RNVPRemuxer composeCrossfadeSources:sources
                                           renderSize:CGSizeMake(outW, outH)
                                        frameDuration:frameDuration
                                            audioMode:concatAudio
                                  audioReplacementURL:concatReplacementURL
-                                               toURL:outputURL
+                                               toURL:joinURL
                                                 stop:runnerToken
                                                error:&cErr];
         } else {
-          // Losslessly concat the transcoded temps into the final output.
           cok = [RNVPRemuxer remuxConcatSources:sources
-                                          toURL:outputURL
+                                          toURL:joinURL
                                       audioMode:concatAudio
                             audioReplacementURL:concatReplacementURL
                                            stop:runnerToken
                                           error:&cErr];
         }
-        teardown();
         if (!cok) {
+          teardown();
           if (cErr != nil &&
               [cErr.domain isEqualToString:RNVPRemuxerErrorDomain] &&
               cErr.code == RNVPRemuxerErrorCodeCancelled) {
@@ -1280,6 +1339,79 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                   "VideoPipeline.render multi-transcode join failed: ") +
               desc);
         }
+
+        // Composite overlay/PiP tracks (#17) on top of the joined base. Each
+        // overlay clip transcodes to the shared output size (baking any per-clip
+        // transform); the compositor then scales it into its normalized frame.
+        if (hasOverlayTracks) {
+          NSMutableArray<RNVPOverlayTrackSource*>* ovSources =
+              [NSMutableArray array];
+          for (size_t k = 0; k < overlayClips.size(); k++) {
+            if (runnerToken.abortRequested) {
+              teardown();
+              throw makeCancelled();
+            }
+            const Clip& oc = overlayClips[k];
+            NSString* ovTemp = [NSTemporaryDirectory()
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"rnvp-mt-ov-%@-%zu.mp4",
+                                               [[NSUUID UUID] UUIDString], k]];
+            [temps addObject:ovTemp];
+            RNVPTranscodeTarget* ovTarget = buildTranscodeTargetForClip(
+                oc, outW, outH, fps, codec, bitrate);
+            NSError* ovErr = nil;
+            if (![RNVPTranscoder transcodeFromURL:urlFromUri(oc.uri)
+                                            toURL:[NSURL fileURLWithPath:ovTemp]
+                                           target:ovTarget
+                                         overlays:nil
+                                         metadata:nil
+                                        audioMode:RNVPAudioModeMute
+                              audioReplacementURL:nil
+                                             stop:runnerToken
+                                         progress:nil
+                                            error:&ovErr]) {
+              teardown();
+              if (runnerToken.abortRequested) throw makeCancelled();
+              const char* desc = ovErr.localizedDescription.UTF8String ?: "(nil)";
+              throw std::runtime_error(
+                  std::string("VideoPipeline.render overlay transcode failed: ") +
+                  desc);
+            }
+            CGRect frame = CGRectMake(0, 0, 1, 1);
+            if (oc.frame.has_value()) {
+              frame = CGRectMake(oc.frame->x, oc.frame->y, oc.frame->w,
+                                 oc.frame->h);
+            }
+            [ovSources addObject:[[RNVPOverlayTrackSource alloc]
+                                     initWithSourceURL:[NSURL fileURLWithPath:ovTemp]
+                                           sourceStart:0.0
+                                        sourceDuration:oc.sourceDuration
+                                           outputStart:oc.outputStart
+                                                 frame:frame
+                                                zOrder:static_cast<NSInteger>(
+                                                           oc.track.value_or(0.0))]];
+          }
+          NSError* mtErr = nil;
+          if (![RNVPRemuxer composeOverlayTracks:joinURL
+                                  overlaySources:ovSources
+                                      renderSize:CGSizeMake(outW, outH)
+                                   frameDuration:frameDuration
+                                           toURL:outputURL
+                                            stop:runnerToken
+                                           error:&mtErr]) {
+            teardown();
+            if (mtErr != nil &&
+                [mtErr.domain isEqualToString:RNVPRemuxerErrorDomain] &&
+                mtErr.code == RNVPRemuxerErrorCodeCancelled) {
+              throw makeCancelled();
+            }
+            const char* desc = mtErr.localizedDescription.UTF8String ?: "(nil)";
+            throw std::runtime_error(
+                std::string("VideoPipeline.render overlay composite failed: ") +
+                desc);
+          }
+        }
+        teardown();
       });
     }
 
@@ -1287,7 +1419,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // preferredTransform carries the rotation/flip and the composition carries
     // the trim window — no pixels are re-encoded, so trim + flip stays as cheap
     // as a plain trim.
-    if (single && clipHasRotateOrFlip((*spec.clips)[0])) {
+    if (single && !hasOverlayTracks && clipHasRotateOrFlip((*spec.clips)[0])) {
       const auto& clip = (*spec.clips)[0];
       NSInteger rotate = -1;
       BOOL flipH = NO;
