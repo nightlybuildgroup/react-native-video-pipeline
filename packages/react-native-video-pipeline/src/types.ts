@@ -146,9 +146,8 @@ export interface ClipInput {
   /**
    * Track index for multi-track composition (#17). `undefined`/`0` is the base
    * timeline; a higher index is an overlay/PiP track composited on top in
-   * ascending z-order. **iOS only** — Android rejects overlay tracks for now.
-   * An overlay-track clip plays over its own `[outputStartSec, +durationSec]`
-   * window on top of the base timeline.
+   * ascending z-order (**iOS + Android**). An overlay-track clip plays over its
+   * own `[outputStartSec, +durationSec]` window on top of the base timeline.
    */
   track?: number;
   /**

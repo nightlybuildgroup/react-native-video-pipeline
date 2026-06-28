@@ -47,6 +47,7 @@ import android.os.Looper
 import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.common.util.Size
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
 import androidx.media3.effect.Crop
@@ -56,6 +57,7 @@ import androidx.media3.effect.OverlaySettings
 import androidx.media3.effect.Presentation
 import androidx.media3.effect.ScaleAndRotateTransformation
 import androidx.media3.effect.TextureOverlay
+import androidx.media3.effect.VideoCompositorSettings
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
@@ -188,6 +190,195 @@ internal object TransformerRunner {
     return file
   }
 
+  /// Author a fully-transparent PNG at the shared canvas size, used to pad an
+  /// overlay / ping-pong sequence so it spans the whole output duration while
+  /// contributing nothing (alpha 0) outside its own window — the layer beneath
+  /// shows through (#43/#45). Media3's `addGap()` is an audio-raw gap and emits
+  /// no video, so a transparent image item is used instead (mirrors the
+  /// black-image gap-fill in [authorBlackImage]).
+  private fun authorTransparentImage(context: Context, w: Int, h: Int): File {
+    val bmp = Bitmap.createBitmap(w.coerceAtLeast(2), h.coerceAtLeast(2), Bitmap.Config.ARGB_8888)
+      .apply { eraseColor(Color.TRANSPARENT) }
+    val file = File.createTempFile("rnvp-pad-transparent", ".png", context.cacheDir)
+    java.io.FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    bmp.recycle()
+    return file
+  }
+
+  /// One overlay/PiP track to composite on top of the base timeline (#17/#45).
+  /// `spec` is the overlay clip's own trim/transform, presented to the shared
+  /// canvas; `frame*` is its normalized destination rect (top-left origin, 0..1);
+  /// `outputStartSec`/`effDurSec` place its window on the output timeline.
+  data class OverlayLayer(
+    val spec: Spec,
+    val frameX: Double,
+    val frameY: Double,
+    val frameW: Double,
+    val frameH: Double,
+    val outputStartSec: Double,
+    val effDurSec: Double,
+  )
+
+  /// Multi-track / PiP compositing (#45 — Android parity with iOS #17). Builds a
+  /// Media3 [Composition] with one [EditedMediaItemSequence] per layer:
+  ///
+  ///   * the base timeline (`baseSpecs`, the track-0 clips — single or multi-clip
+  ///     with gaps, built exactly like [runMulti]) as the BACK layer, and
+  ///   * one sequence per overlay track, each padded with transparent images
+  ///     before/after its window so every sequence spans the full output
+  ///     duration.
+  ///
+  /// Media3's [androidx.media3.effect.DefaultVideoCompositor] draws the FIRST
+  /// registered sequence on top and later ones beneath (reverse registration
+  /// order). To match the iOS z-order (base at the back, higher track index more
+  /// on top) the sequences are registered topmost-overlay-first, then descending,
+  /// with the base LAST. A [VideoCompositorSettings] scales + anchors each overlay
+  /// input into its `frame` rect; the base input is left full-frame.
+  ///
+  /// Overlay audio is dropped in v1 (mirrors iOS); the base audio follows
+  /// `baseSpecs.first()` (passthrough / mute / replace).
+  fun runCompositePip(
+    context: Context,
+    baseSpecs: List<Spec>,
+    overlays: List<OverlayLayer>,
+    totalDurationSec: Double,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    require(baseSpecs.isNotEmpty()) { "runCompositePip requires a base track" }
+    require(overlays.isNotEmpty()) { "runCompositePip requires at least one overlay" }
+    try {
+      runCompositePipInternal(context, baseSpecs, overlays, totalDurationSec, stopToken, progress)
+    } finally {
+      val all = baseSpecs.flatMap { it.overlays } + overlays.flatMap { it.spec.overlays }
+      all.toHashSet().forEach { runCatching { it.bitmap.recycle() } }
+    }
+  }
+
+  private fun runCompositePipInternal(
+    context: Context,
+    baseSpecs: List<Spec>,
+    overlays: List<OverlayLayer>,
+    totalDurationSec: Double,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    val first = baseSpecs.first()
+    val canvasW = first.outCanvasW.coerceAtLeast(2)
+    val canvasH = first.outCanvasH.coerceAtLeast(2)
+    File(first.outputPath).apply { if (exists()) delete() }
+
+    val needBaseGaps = baseSpecs.any { it.leadingGapSec > 1e-3 }
+    val blackImage: File? =
+      if (needBaseGaps) authorBlackImage(context, canvasW, canvasH) else null
+    val transparent = authorTransparentImage(context, canvasW, canvasH)
+    try {
+      // Base layer (back) — the track-0 clips, joined exactly like runMulti.
+      val baseSeq = buildClipSequence(baseSpecs, blackImage)
+
+      // Overlay layers, each padded to the full output duration so the
+      // Composition is not truncated to a single overlay's window.
+      val overlaySeqs = overlays.map { layer ->
+        val b = EditedMediaItemSequence.Builder()
+        val lead = layer.outputStartSec
+        val trail = totalDurationSec - layer.outputStartSec - layer.effDurSec
+        val padFps = (layer.spec.fps?.roundToInt() ?: 30).coerceAtLeast(1)
+        if (lead > 1e-3) b.addItem(transparentItem(transparent, lead, padFps))
+        b.addItem(
+          EditedMediaItem.Builder(buildMediaItem(layer.spec))
+            .setEffects(Effects(emptyList(), buildVideoEffects(layer.spec)))
+            // Overlay audio is dropped in v1 (mirrors iOS multi-track).
+            .setRemoveAudio(true)
+            .build()
+        )
+        if (trail > 1e-3) b.addItem(transparentItem(transparent, trail, padFps))
+        b.build()
+      }
+
+      // Registration order: topmost overlay first (drawn on top), then descending
+      // z, then the base last (drawn at the back). `overlays` is ascending z.
+      val orderedOverlays = overlays.reversed()
+      val orderedSeqs = overlaySeqs.reversed().toMutableList().apply { add(baseSeq) }
+      val baseInputId = orderedSeqs.size - 1
+
+      val compositor = object : VideoCompositorSettings {
+        override fun getOutputSize(inputSizes: MutableList<Size>): Size = Size(canvasW, canvasH)
+
+        override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
+          if (inputId == baseInputId) return OverlaySettings.Builder().build()
+          val layer = orderedOverlays[inputId]
+          return pipOverlaySettings(layer)
+        }
+      }
+
+      // The base's black gap-fill images carry no audio; for a gapped base with
+      // passthrough audio, force a continuous audio track so the source audio
+      // survives across the gaps as silence (same as runMulti). Never force it
+      // when the base is muted.
+      val composition = Composition.Builder(orderedSeqs)
+        .setVideoCompositorSettings(compositor)
+        .experimentalSetForceAudioTrack(needBaseGaps && !first.removeAudio)
+        .build()
+
+      runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
+        transformer.start(composition, first.outputPath)
+      }
+    } finally {
+      blackImage?.delete()
+      transparent.delete()
+    }
+  }
+
+  /// A transparent-pad image item of the given duration, used to position an
+  /// overlay clip on its sequence's timeline (see [authorTransparentImage]).
+  private fun transparentItem(image: File, durationSec: Double, fps: Int): EditedMediaItem =
+    EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(image)))
+      .setDurationUs((durationSec * 1_000_000.0).roundToLong())
+      .setFrameRate(fps.coerceAtLeast(1))
+      .build()
+
+  /// OverlaySettings that scale a full-canvas overlay input into its normalized
+  /// `frame` rect and anchor its center at the rect center. `setScale(w, h)`
+  /// shrinks the (canvas-sized) overlay to `w*canvasW × h*canvasH`; the anchor is
+  /// the rect center mapped to background NDC (origin center, y UP — so the
+  /// top-left `frame.y` is flipped). Mirrors the iOS CGAffineTransform placement.
+  private fun pipOverlaySettings(layer: OverlayLayer): OverlaySettings {
+    val cx = layer.frameX + layer.frameW / 2.0
+    val cy = layer.frameY + layer.frameH / 2.0
+    val ndcX = (cx * 2.0 - 1.0).toFloat()
+    val ndcY = (1.0 - cy * 2.0).toFloat()
+    return OverlaySettings.Builder()
+      .setScale(layer.frameW.toFloat(), layer.frameH.toFloat())
+      .setBackgroundFrameAnchor(ndcX, ndcY)
+      .build()
+  }
+
+  /// Builds one [EditedMediaItemSequence] from a list of clip specs, inserting a
+  /// black-image item before any clip carrying a `leadingGapSec` (#18). Shared by
+  /// [runMulti] and the composite base layer.
+  private fun buildClipSequence(clipSpecs: List<Spec>, blackImage: File?): EditedMediaItemSequence {
+    val first = clipSpecs.first()
+    val seqBuilder = EditedMediaItemSequence.Builder()
+    clipSpecs.forEach { clip ->
+      if (clip.leadingGapSec > 1e-3 && blackImage != null) {
+        val gapFps = (clip.fps?.roundToInt() ?: 30).coerceAtLeast(1)
+        seqBuilder.addItem(
+          EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(blackImage)))
+            .setDurationUs((clip.leadingGapSec * 1_000_000.0).roundToLong())
+            .setFrameRate(gapFps)
+            .build()
+        )
+      }
+      seqBuilder.addItem(
+        EditedMediaItem.Builder(buildMediaItem(clip))
+          .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
+          .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
+          .build()
+      )
+    }
+    return seqBuilder.build()
+  }
+
   private fun runMultiInternal(
     context: Context,
     clipSpecs: List<Spec>,
@@ -205,27 +396,9 @@ internal object TransformerRunner {
     val blackImage: File? =
       if (needGaps) authorBlackImage(context, first.outCanvasW, first.outCanvasH) else null
     try {
-      val seqBuilder = EditedMediaItemSequence.Builder()
-      clipSpecs.forEach { clip ->
-        if (clip.leadingGapSec > 1e-3 && blackImage != null) {
-          val gapFps = (clip.fps?.roundToInt() ?: 30).coerceAtLeast(1)
-          seqBuilder.addItem(
-            EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(blackImage)))
-              .setDurationUs((clip.leadingGapSec * 1_000_000.0).roundToLong())
-              .setFrameRate(gapFps)
-              .build()
-          )
-        }
-        seqBuilder.addItem(
-          EditedMediaItem.Builder(buildMediaItem(clip))
-            .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
-            // Passthrough keeps each clip's audio (Media3 concatenates the
-            // sequence); mute / replace drop it per item.
-            .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
-            .build()
-        )
-      }
-      val videoSeq = seqBuilder.build()
+      // Passthrough keeps each clip's audio (Media3 concatenates the sequence);
+      // mute / replace drop it per item (handled inside buildClipSequence).
+      val videoSeq = buildClipSequence(clipSpecs, blackImage)
 
       val replaceUri = first.audioReplacementUri
       val composition = if (replaceUri != null) {

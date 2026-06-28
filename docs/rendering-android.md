@@ -200,6 +200,41 @@ default, so `scale = targetPx / bitmapPx`); `opacity` becomes `alphaScale`; and 
 outside the window. Image overlays decode a bitmap; text overlays rasterize
 through `OverlayTextRasterizer` — both flatten to the same `ResolvedOverlay`.
 
+### Multi-track / PiP overlay tracks (#45, parity with iOS #17)
+
+An overlay clip (`clip.track > 0`, with a normalized `clip.frame` rect) is
+composited as a Picture-in-Picture box on top of the base timeline. This is a
+**video-on-video** composite, so it can't use `OverlayEffect` (that takes a
+bitmap, not a second decoded stream). Instead `TransformerRunner.runCompositePip`
+builds a Media3 **multi-sequence `Composition`** — one `EditedMediaItemSequence`
+per layer:
+
+- the **base** track (the `track == 0` clips, built exactly like the multi-clip
+  `runMulti` sequence, gaps included) as the **back** layer, and
+- one sequence per **overlay** track, each padded with a transparent image
+  (`authorTransparentImage`) before and after its `[outputStart, +duration]`
+  window so every sequence spans the full output duration (otherwise the
+  Composition would be truncated to a single overlay's window).
+
+Media3's `DefaultVideoCompositor` draws the **first-registered** sequence on top
+and later ones beneath (reverse registration order). To match the iOS z-order
+(base at the back, higher track index more on top) the sequences are registered
+**topmost-overlay-first, base last**. A `VideoCompositorSettings` then positions
+each overlay input: `getOverlaySettings(inputId, …)` returns `setScale(w, h)`
+(the overlay input is presented at the full canvas, so a `w × h` fraction shrinks
+it to the rect) plus `setBackgroundFrameAnchor` at the rect centre, mapped to NDC
+(origin centre, **y up** — so the top-left `frame.y` is flipped, the same flip
+the iOS `CGAffineTransform` does). The base input is left full-frame. During a
+transparent-pad frame the overlay contributes alpha 0, so the base shows through.
+
+v1 limits (mirror iOS, enforced in `renderCompositePip`): overlay audio is
+dropped; the base audio honours `passthrough`/`mute` (`audio.mode = 'replace'`
+with overlay tracks rejects — a follow-up); spec-level overlays (watermarks)
+combined with overlay tracks reject (ambiguous z-order against the PiP boxes).
+Unlike iOS — whose `HighestQuality` export preset is H.264-only — the Android
+Transformer re-encodes the composite directly, so an HEVC output and an explicit
+bitrate are honoured for PiP too.
+
 Container metadata (`spec.metadata`) can't be authored by Media3 Transformer, so
 when present it's applied in a second compressed-passthrough pass via
 `Remuxer.remuxStamp` (both tracks copied, no re-encode) — the same path the

@@ -199,6 +199,131 @@ class RenderTransformInstrumentedTest {
     )
   }
 
+  /// Author a SOLID-colour fixture (every frame the same RGB) so a composited
+  /// region can be asserted by channel dominance, robust to the codec's YUV
+  /// colour shift. Uses VideoEncoder directly (the synth pattern is per-frame
+  /// distinct, which can't separate base from overlay at one time point).
+  private fun solidFixture(tag: String, r: Int, g: Int, b: Int, frames: Int = frameCount): String {
+    val f = File(ctx.cacheDir, "solid-$tag.mp4")
+    f.delete()
+    val enc = VideoEncoder.open(f.absolutePath, width, height, fps)
+    try {
+      for (i in 0 until frames) {
+        enc.writeFlatFrame(r, g, b, ((i.toDouble() / fps) * 1_000_000_000.0).toLong())
+      }
+      enc.finish()
+    } catch (t: Throwable) {
+      enc.abort()
+      throw t
+    }
+    assertTrue("solid fixture authored", f.exists() && f.length() > 0)
+    return f.absolutePath
+  }
+
+  /// The pixel at a normalized point (0..1, top-left origin) of the decoded frame
+  /// closest to `atSec`. Used to assert a PiP box / crossfade blend at a region.
+  private fun pixelAt(path: String, normX: Double, normY: Double, atSec: Double): Int {
+    val r = MediaMetadataRetriever()
+    return try {
+      r.setDataSource(path)
+      val bmp = r.getFrameAtTime(
+        (atSec * 1_000_000.0).toLong(), MediaMetadataRetriever.OPTION_CLOSEST,
+      ) ?: error("no frame at ${atSec}s in $path")
+      val x = (normX * (bmp.width - 1)).roundToInt().coerceIn(0, bmp.width - 1)
+      val y = (normY * (bmp.height - 1)).roundToInt().coerceIn(0, bmp.height - 1)
+      bmp.getPixel(x, y)
+    } finally {
+      runCatching { r.release() }
+    }
+  }
+
+  // Multi-track / PiP compositing (#45 — Android parity with iOS #17). A solid
+  // BLUE overlay clip is scaled into a bottom-right frame rect and composited on
+  // top of a solid RED base over its [0.3s, 0.7s] window. Asserts: during the
+  // window the PiP region reads blue and the rest reads the base red; before and
+  // after the window the whole frame is the base red. Mirrors the iOS
+  // testMultiTrackPipOverlay.
+  @Test
+  fun multiTrackPipCompositesOverlayOverBase() {
+    val base = solidFixture("pip-base", 220, 0, 0) // red
+    val pip = solidFixture("pip-over", 0, 0, 220) // blue
+    val out = File(ctx.cacheDir, "multi-track-pip.mp4").absolutePath
+    File(out).delete()
+
+    val baseSpec = spec(base, out, outWidth = width, outHeight = height)
+    // Overlay trimmed to 0.4s, placed at outputStart 0.3s in a 0.3x0.3 box whose
+    // centre is the normalized point (0.75, 0.75).
+    val overlay = TransformerRunner.OverlayLayer(
+      spec = spec(pip, out, outWidth = width, outHeight = height, durationSec = 0.4),
+      frameX = 0.6, frameY = 0.6, frameW = 0.3, frameH = 0.3,
+      outputStartSec = 0.3, effDurSec = 0.4,
+    )
+    TransformerRunner.runCompositePip(
+      ctx, listOf(baseSpec), listOf(overlay),
+      totalDurationSec = frameCount / fps.toDouble(), stopToken = null, progress = null,
+    )
+    assertTrue("pip output exists", File(out).exists())
+    // Output spans the full base duration (~1.0s), not the overlay window.
+    assertEquals(1.0, durationSec(out), 0.25)
+
+    fun isBlue(c: Int) = Color.blue(c) > Color.red(c) + 40 && Color.blue(c) > Color.green(c) + 40
+    fun isRed(c: Int) = Color.red(c) > Color.blue(c) + 40 && Color.red(c) > Color.green(c) + 40
+
+    // Mid-window: PiP region blue, opposite corner base red.
+    val inPip = pixelAt(out, 0.75, 0.75, 0.5)
+    val inBase = pixelAt(out, 0.1, 0.1, 0.5)
+    assertTrue("PiP region is blue mid-window (got ${Integer.toHexString(inPip)})", isBlue(inPip))
+    assertTrue("base region is red mid-window (got ${Integer.toHexString(inBase)})", isRed(inBase))
+
+    // Before the window: PiP region shows the base.
+    val before = pixelAt(out, 0.75, 0.75, 0.1)
+    assertTrue("PiP region is base red before window (got ${Integer.toHexString(before)})", isRed(before))
+    // After the window: PiP region shows the base again.
+    val after = pixelAt(out, 0.75, 0.75, 0.9)
+    assertTrue("PiP region is base red after window (got ${Integer.toHexString(after)})", isRed(after))
+  }
+
+  // Two overlay tracks at the SAME frame rect over a base — the higher-z overlay
+  // must win (drawn on top). Exercises 3-input compositing and the topmost-first
+  // sequence registration. Mirrors the iOS ascending-z-order contract.
+  @Test
+  fun multiTrackPipRespectsZOrderAcrossOverlays() {
+    val base = solidFixture("z-base", 0, 180, 0) // green
+    val lowZ = solidFixture("z-low", 200, 0, 0) // red  (track 1, beneath)
+    val highZ = solidFixture("z-high", 0, 0, 200) // blue (track 2, on top)
+    val out = File(ctx.cacheDir, "multi-track-z.mp4").absolutePath
+    File(out).delete()
+
+    val total = frameCount / fps.toDouble()
+    val baseSpec = spec(base, out, outWidth = width, outHeight = height)
+    // Both overlays full-duration at the same centred 0.4x0.4 rect (centre
+    // 0.7,0.7). Passed ascending-z (low then high) as runCompositePip expects.
+    fun layer(src: String) = TransformerRunner.OverlayLayer(
+      spec = spec(src, out, outWidth = width, outHeight = height),
+      frameX = 0.5, frameY = 0.5, frameW = 0.4, frameH = 0.4,
+      outputStartSec = 0.0, effDurSec = total,
+    )
+    TransformerRunner.runCompositePip(
+      ctx, listOf(baseSpec), listOf(layer(lowZ), layer(highZ)),
+      totalDurationSec = total, stopToken = null, progress = null,
+    )
+    assertTrue("z-order output exists", File(out).exists())
+
+    fun isBlue(c: Int) = Color.blue(c) > Color.red(c) + 40 && Color.blue(c) > Color.green(c) + 40
+    fun isGreen(c: Int) = Color.green(c) > Color.red(c) + 40 && Color.green(c) > Color.blue(c) + 40
+
+    val inBox = pixelAt(out, 0.7, 0.7, 0.5)
+    val outside = pixelAt(out, 0.05, 0.05, 0.5)
+    assertTrue(
+      "higher-z overlay (blue) is on top in the box (got ${Integer.toHexString(inBox)})",
+      isBlue(inBox),
+    )
+    assertTrue(
+      "base (green) shows outside the overlays (got ${Integer.toHexString(outside)})",
+      isGreen(outside),
+    )
+  }
+
   @Test
   fun fpsDownsampleDropsFrames() {
     val src = synthFixture("fps-down")
