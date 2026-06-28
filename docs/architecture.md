@@ -11,6 +11,7 @@ This document describes how `react-native-video-pipeline` is organized internall
 - [Locked-in design decisions](#locked-in-design-decisions)
 - [Known limitations](#known-limitations)
 - [Tradeoffs](#tradeoffs)
+- [Future work](#future-work)
 
 ---
 
@@ -203,3 +204,27 @@ These are decisions that have been made and should not be re-litigated without a
 - **No FFmpeg.** Avoids the patent/license minefield that killed `ffmpeg-kit-react-native`, at the cost of some esoteric codec support (ProRes, AV1 encode on older Android). Acceptable — 99% of RN video needs are H.264 / HEVC.
 - **New Architecture only.** Cuts out apps that haven't migrated. By late 2026 this is a small minority; the alternative (two binding layers) isn't worth the cost.
 - **No raw `drawFrame` on the transcode path.** Consumers who want a "cheap dynamic overlay that changes once" must either accept re-draws per frame (compose) or pre-rasterize to a `Picture` and pass it as `Overlay.Image`. This simplifies the mental model.
+
+---
+
+## Future work
+
+Deliberately-deferred features, with the reasoning so we don't re-litigate them from scratch.
+
+### Off-thread compose: run `drawFrame` in a worklets-core runtime ([#34](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/34))
+
+**What it would be.** `Video.compose` / `Video.synthesize` invoke the consumer's `'worklet'` `drawFrame` once per output frame. Today that callback runs **on the React JS thread** (it crosses Nitro as an async `Promise<bool>` callback; the native pump blocks per frame on `promise->await().get()`). "Off-thread compose" would instead run `drawFrame` on a `react-native-worklets-core` context (a separate JS runtime on its own thread), so per-frame drawing never touches the React JS thread — matching the "compose is worklet-driven" framing in the architecture intent.
+
+**Why we did *not* do it (yet).** It is a real, narrow optimization that comes with a real cost, and on balance isn't worth shipping until a concrete use case demands it:
+
+- **It is not a performance/freeze problem.** Measured per-frame JS-thread cost is ~0.2ms for an empty drawer; 240 round-trips/sec is trivial (see #34). The "240fps freeze" once reported was a stale-Metro-bundle artifact, not a real slowdown.
+- **It trades throughput for responsiveness — and usually the wrong way.** Moving the draw off-thread does **not** make a render faster; the native pump still blocks per frame either way, and off-thread *adds* a per-frame box + cross-runtime thread hop **on the critical path**, so each frame takes *longer* wall-clock. What you buy is a free JS thread *during* the export, not speed. For the common "tap export → watch a progress bar → get a file" flow (progress can be native/UI-thread-driven), the JS thread being busy for a few seconds is invisible, and inline is both simpler and faster.
+- **The benefit is doubly-conditional.** It only helps when the per-frame draw is *genuinely heavy* (e.g. a complex Skia scene at multiple ms/frame) **and** the app needs the JS thread *live during* the export (interactive UI / JS-driven animation, not just a progress indicator). Frame count alone ("a long render") is not the driver — cost is `per-frame draw × frame count`, and a long render of a cheap drawer is still trivial.
+- **Verification is device/simulator-only.** The off-thread runner is itself a `'worklet'`, so it must be built with the worklets-core Babel plugin and exercised in a real JSI/Hermes runtime. The host XCTest path (`yarn test:native`) has no JS engine, so correctness can't be unit-tested there.
+
+**How to build it when the time comes** (so the next person skips the dead ends this was researched through):
+
+- The mechanism is Nitro's blessed **box/unbox** pattern, *not* an ArrayBuffer redesign, and it is **not** "architecturally blocked" (an earlier analysis wrongly concluded that). Nitro `HybridObject`s are runtime-agnostic — their JSI prototype is cached **per `jsi::Runtime`** (`HybridObjectPrototype`), and `NitroModules.box(obj)` wraps one in a `jsi::HostObject` that worklets-core *can* carry across runtimes; `.unbox()` inside the worklet returns the real `HybridObject` with its methods rebound. See the Nitro [Worklets guide](https://nitro.margelo.com/docs/guides/worklets).
+- Sketch: `const ctx = Worklets.createContext('rnvp-compose')`; per frame, `box` the `FrameTarget`/`FrameSource`, dispatch the worklet onto the context (`createRunAsync`), and `await` it (the native pump already awaits the returned promise, so the buffer-lifetime contract holds). `ctx.finish()` must bridge back to the JS thread via `createRunOnJS`, which makes it slightly latent vs. the frame-exact inline path.
+- Ship it as **default-with-fallback**, not a forked API: use the worklet context when worklets-core is present, fall back to inline otherwise, and share a single `buildFrameContext` so the inline and worklet paths can't drift. A per-frame benchmark should decide whether to ever flip it on by default (likely heavy-drawer-only, given the throughput cost above).
+- A foundation implementation (opt-in `RenderOptions.offthread`, the box/unbox dispatcher, and unit tests for the JS orchestration) was prototyped on the `feat/offthread-compose-worklet-34` branch (PR #47, parked unmerged) — a usable starting point.
