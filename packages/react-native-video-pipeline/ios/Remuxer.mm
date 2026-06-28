@@ -14,6 +14,8 @@
 #include "compose/StopToken.hpp"
 #include "engine/Remuxer.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -930,6 +932,284 @@ NSString *fourCCString(FourCharCode code) {
   // `totalDurationSec` is retained for the unused-variable guard; the
   // composition's own duration is what the export writes.
   (void)totalDurationSec;
+  return YES;
+}
+
++ (BOOL)composeCrossfadeSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
+                     renderSize:(CGSize)renderSize
+                  frameDuration:(CMTime)frameDuration
+                      audioMode:(RNVPAudioMode)audioMode
+            audioReplacementURL:(NSURL *)audioReplacementURL
+                          toURL:(NSURL *)outputURL
+                           stop:(nullable RNVPStopToken *)stopToken
+                          error:(NSError *_Nullable __autoreleasing *)error {
+  if (stopToken != nil && stopToken.abortRequested) {
+    if (error)
+      *error = makeError(RNVPRemuxerErrorCodeCancelled,
+                         @"Crossfade aborted before it started.");
+    return NO;
+  }
+  if (sources.count < 2) {
+    if (error)
+      *error = makeError(RNVPRemuxerErrorCodeInvalidSpec,
+                         @"crossfade requires at least two sources");
+    return NO;
+  }
+
+  // Presentation ranges on the output timeline + adjacent-pair overlap checks.
+  // Only consecutive clips may overlap; a clip overlapping two neighbours at
+  // once, a non-monotonic end, or full containment is rejected (the partition
+  // below assumes at most two clips are visible at any instant).
+  const double kEps = 1e-3;
+  NSMutableArray<AVURLAsset *> *assets =
+      [NSMutableArray arrayWithCapacity:sources.count];
+  std::vector<double> presStart(sources.count), presEnd(sources.count);
+  for (NSUInteger i = 0; i < sources.count; i++) {
+    RNVPRemuxerConcatSource *s = sources[i];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:s.sourceURL.path]) {
+      if (error)
+        *error = makeError(RNVPRemuxerErrorCodeNotFound,
+                           [NSString stringWithFormat:
+                                         @"crossfade: clip[%lu] not found at %@",
+                                         (unsigned long)i, s.sourceURL.path]);
+      return NO;
+    }
+    [assets addObject:[AVURLAsset assetWithURL:s.sourceURL]];
+    presStart[i] = s.outputStart;
+    presEnd[i] = s.outputStart + s.sourceDuration;
+    if (i > 0) {
+      if (presStart[i] < presStart[i - 1] - kEps ||
+          presEnd[i] < presEnd[i - 1] - kEps) {
+        if (error)
+          *error = makeError(
+              RNVPRemuxerErrorCodeInvalidSpec,
+              @"crossfade: clips must be sorted with non-decreasing starts and "
+              @"ends (a clip fully containing another is not supported)");
+        return NO;
+      }
+    }
+    if (i >= 2 && presStart[i] < presEnd[i - 2] - kEps) {
+      if (error)
+        *error = makeError(
+            RNVPRemuxerErrorCodeInvalidSpec,
+            @"crossfade: a clip overlapping more than its immediate neighbour "
+            @"is not supported");
+      return NO;
+    }
+  }
+
+  // Two ping-pong video tracks so overlapping neighbours land on distinct
+  // tracks; same-parity clips never overlap, so multiple clips per track is
+  // safe.
+  AVMutableComposition *composition = [AVMutableComposition composition];
+  AVMutableCompositionTrack *videoTracks[2] = {
+      [composition addMutableTrackWithMediaType:AVMediaTypeVideo
+                               preferredTrackID:kCMPersistentTrackID_Invalid],
+      [composition addMutableTrackWithMediaType:AVMediaTypeVideo
+                               preferredTrackID:kCMPersistentTrackID_Invalid]};
+  const BOOL splicePerClipAudio = audioMode == RNVPAudioModePassthrough;
+  AVMutableCompositionTrack *audioTracks[2] = {nil, nil};
+  if (splicePerClipAudio) {
+    audioTracks[0] =
+        [composition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                 preferredTrackID:kCMPersistentTrackID_Invalid];
+    audioTracks[1] =
+        [composition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                 preferredTrackID:kCMPersistentTrackID_Invalid];
+  }
+
+  for (NSUInteger i = 0; i < sources.count; i++) {
+    RNVPRemuxerConcatSource *s = sources[i];
+    AVURLAsset *asset = assets[i];
+    AVAssetTrack *vTrack =
+        [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+    if (vTrack == nil) {
+      if (error)
+        *error = makeError(
+            RNVPRemuxerErrorCodeSourceCorrupted,
+            [NSString stringWithFormat:@"crossfade: clip[%lu] has no video track",
+                                       (unsigned long)i]);
+      return NO;
+    }
+    const CMTime clipStart = CMTimeMakeWithSeconds(s.sourceStart, NSEC_PER_SEC);
+    const CMTime clipDuration =
+        CMTimeMakeWithSeconds(s.sourceDuration, NSEC_PER_SEC);
+    const CMTime at = CMTimeMakeWithSeconds(s.outputStart, NSEC_PER_SEC);
+    NSError *insertErr = nil;
+    if (![videoTracks[i % 2]
+            insertTimeRange:CMTimeRangeMake(clipStart, clipDuration)
+                    ofTrack:vTrack
+                     atTime:at
+                      error:&insertErr]) {
+      if (error)
+        *error = insertErr ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                                        @"crossfade: video splice failed");
+      return NO;
+    }
+    if (splicePerClipAudio) {
+      AVAssetTrack *aTrack =
+          [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+      if (aTrack != nil) {
+        const CMTimeRange avail = aTrack.timeRange;
+        const CMTime segStart = CMTimeMaximum(clipStart, avail.start);
+        const CMTime segEnd = CMTimeMinimum(CMTimeAdd(clipStart, clipDuration),
+                                            CMTimeRangeGetEnd(avail));
+        if (CMTimeCompare(segEnd, segStart) > 0) {
+          const CMTime atAudio =
+              CMTimeAdd(at, CMTimeSubtract(segStart, clipStart));
+          [audioTracks[i % 2]
+              insertTimeRange:CMTimeRangeMake(segStart,
+                                              CMTimeSubtract(segEnd, segStart))
+                      ofTrack:aTrack
+                       atTime:atAudio
+                        error:nil];
+        }
+      }
+    }
+  }
+
+  // Partition the timeline at every clip start/end; within each region at most
+  // two clips are visible (guaranteed by the adjacent-pair checks above).
+  std::vector<double> bounds;
+  // Always anchor the timeline at 0 so a leading gap (the first clip starting
+  // after 0, e.g. a gap+overlap spec) is covered by a black, layer-less region
+  // rather than left without a video-composition instruction.
+  bounds.push_back(0.0);
+  for (NSUInteger i = 0; i < sources.count; i++) {
+    bounds.push_back(presStart[i]);
+    bounds.push_back(presEnd[i]);
+  }
+  std::sort(bounds.begin(), bounds.end());
+  bounds.erase(std::unique(bounds.begin(), bounds.end(),
+                           [&](double a, double b) {
+                             return std::fabs(a - b) < kEps;
+                           }),
+               bounds.end());
+
+  NSMutableArray<AVMutableVideoCompositionInstruction *> *instructions =
+      [NSMutableArray array];
+  AVMutableAudioMix *audioMix = nil;
+  // Per-audio-track volume ramp params; built lazily for passthrough.
+  AVMutableAudioMixInputParameters *audioParams[2] = {nil, nil};
+  if (splicePerClipAudio) {
+    for (int t = 0; t < 2; t++) {
+      audioParams[t] = [AVMutableAudioMixInputParameters
+          audioMixInputParametersWithTrack:audioTracks[t]];
+      [audioParams[t] setVolume:1.0f atTime:kCMTimeZero];
+    }
+  }
+
+  for (size_t b = 0; b + 1 < bounds.size(); b++) {
+    const double r0 = bounds[b], r1 = bounds[b + 1];
+    if (r1 - r0 < kEps) continue;
+    const CMTime t0 = CMTimeMakeWithSeconds(r0, NSEC_PER_SEC);
+    const CMTime t1 = CMTimeMakeWithSeconds(r1, NSEC_PER_SEC);
+    const CMTimeRange region = CMTimeRangeMake(t0, CMTimeSubtract(t1, t0));
+    const double mid = (r0 + r1) / 2.0;
+    // Active clips: those whose presentation range covers the region midpoint.
+    std::vector<NSUInteger> active;
+    for (NSUInteger i = 0; i < sources.count; i++) {
+      if (presStart[i] <= mid && mid <= presEnd[i]) active.push_back(i);
+    }
+
+    AVMutableVideoCompositionInstruction *inst =
+        [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    inst.timeRange = region;
+    // backgroundColor defaults to black — a region with no active clip (a gap)
+    // renders black, which is the intended fill.
+
+    if (active.empty()) {
+      inst.layerInstructions = @[];
+    } else if (active.size() == 1) {
+      AVMutableVideoCompositionLayerInstruction *li =
+          [AVMutableVideoCompositionLayerInstruction
+              videoCompositionLayerInstructionWithAssetTrack:
+                  videoTracks[active[0] % 2]];
+      [li setOpacity:1.0f atTime:t0];
+      inst.layerInstructions = @[ li ];
+    } else {
+      // Overlap region: the earlier clip (smaller index) fades out in front of
+      // the later clip, which is fully opaque underneath — a crossfade dissolve.
+      const NSUInteger outgoing = active[0];
+      const NSUInteger incoming = active[1];
+      AVMutableVideoCompositionLayerInstruction *liOut =
+          [AVMutableVideoCompositionLayerInstruction
+              videoCompositionLayerInstructionWithAssetTrack:
+                  videoTracks[outgoing % 2]];
+      [liOut setOpacityRampFromStartOpacity:1.0f
+                                toEndOpacity:0.0f
+                                   timeRange:region];
+      AVMutableVideoCompositionLayerInstruction *liIn =
+          [AVMutableVideoCompositionLayerInstruction
+              videoCompositionLayerInstructionWithAssetTrack:
+                  videoTracks[incoming % 2]];
+      [liIn setOpacity:1.0f atTime:t0];
+      inst.layerInstructions = @[ liOut, liIn ];
+      if (splicePerClipAudio) {
+        [audioParams[outgoing % 2] setVolumeRampFromStartVolume:1.0f
+                                                    toEndVolume:0.0f
+                                                      timeRange:region];
+        [audioParams[incoming % 2] setVolumeRampFromStartVolume:0.0f
+                                                    toEndVolume:1.0f
+                                                      timeRange:region];
+      }
+    }
+    [instructions addObject:inst];
+  }
+
+  AVMutableVideoComposition *videoComposition =
+      [AVMutableVideoComposition videoComposition];
+  videoComposition.renderSize = renderSize;
+  videoComposition.frameDuration =
+      (CMTIME_IS_VALID(frameDuration) && CMTimeGetSeconds(frameDuration) > 0.0)
+          ? frameDuration
+          : CMTimeMake(1, 30);
+  videoComposition.instructions = instructions;
+
+  if (splicePerClipAudio) {
+    audioMix = [AVMutableAudioMix audioMix];
+    audioMix.inputParameters = @[ audioParams[0], audioParams[1] ];
+  } else if (audioMode == RNVPAudioModeReplace) {
+    // Replace: one soundtrack over the whole timeline, capped to the picture.
+    const CMTime total =
+        CMTimeMakeWithSeconds(presEnd[sources.count - 1], NSEC_PER_SEC);
+    if (![audioReplacementURL isKindOfClass:[NSURL class]] ||
+        [[AVURLAsset assetWithURL:audioReplacementURL]
+            tracksWithMediaType:AVMediaTypeAudio]
+                .firstObject == nil) {
+      if (error)
+        *error = makeError(
+            RNVPRemuxerErrorCodeSourceCorrupted,
+            @"crossfade audio replace: the replacement is missing or has no "
+            @"audio track");
+      return NO;
+    }
+    insertAudioIntoComposition(composition, /*sourceAsset=*/nil,
+                               CMTimeRangeMake(kCMTimeZero, total),
+                               RNVPAudioModeReplace, audioReplacementURL);
+  }
+
+  RNVPExportRequest *request = [[RNVPExportRequest alloc]
+      initWithComposedAsset:composition
+           videoComposition:videoComposition
+                   audioMix:audioMix
+                     output:outputURL
+                   metadata:assets.firstObject.metadata
+                       stop:stopToken
+                   progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
+    if (error) {
+      if ([exportError.domain isEqualToString:RNVPExportSessionErrorDomain] &&
+          exportError.code == RNVPExportSessionErrorCodeCancelled) {
+        *error = makeError(RNVPRemuxerErrorCodeCancelled, @"Crossfade aborted.");
+      } else {
+        *error = exportError ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
+                                          @"crossfade: export failed.");
+      }
+    }
+    return NO;
+  }
   return YES;
 }
 

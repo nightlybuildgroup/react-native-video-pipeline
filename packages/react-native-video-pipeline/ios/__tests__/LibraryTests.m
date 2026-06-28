@@ -290,6 +290,14 @@ typedef NS_ENUM(NSInteger, RNVPAudioMode) {
        audioReplacementURL:(nullable NSURL *)audioReplacementURL
                       stop:(nullable RNVPStopToken *)stop
                      error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)composeCrossfadeSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
+                     renderSize:(CGSize)renderSize
+                  frameDuration:(CMTime)frameDuration
+                      audioMode:(RNVPAudioMode)audioMode
+            audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                          toURL:(NSURL *)outputURL
+                           stop:(nullable RNVPStopToken *)stop
+                          error:(NSError *_Nullable __autoreleasing *)error;
 + (BOOL)remuxStampFromURL:(NSURL *)sourceURL
                     toURL:(NSURL *)outputURL
                  metadata:(nullable RNVPStampMetadata *)metadata
@@ -7233,6 +7241,82 @@ static int maxRgbAtTime(NSString *path, double t) {
   return MAX(px[0], MAX(px[1], px[2]));
 }
 
+// As @c maxRgbAtTime but returns the averaged R/G/B of the frame at @p t into
+// @p outRgb (each 0-255). Used to assert a crossfade midpoint blends two solid
+// colours. Returns NO if no frame could be read.
+static BOOL rgbAtTime(NSString *path, double t, uint8_t outRgb[3]) {
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+  AVAssetImageGenerator *gen =
+      [[AVAssetImageGenerator alloc] initWithAsset:asset];
+  gen.requestedTimeToleranceBefore = kCMTimeZero;
+  gen.requestedTimeToleranceAfter = kCMTimeZero;
+  CGImageRef img = [gen copyCGImageAtTime:CMTimeMakeWithSeconds(t, 600)
+                               actualTime:NULL
+                                    error:NULL];
+  if (img == NULL) return NO;
+  uint8_t px[4] = {0, 0, 0, 0};
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGContextRef ctx = CGBitmapContextCreate(px, 1, 1, 8, 4, cs,
+                                           kCGImageAlphaPremultipliedLast);
+  CGContextDrawImage(ctx, CGRectMake(0, 0, 1, 1), img);
+  CGContextRelease(ctx);
+  CGColorSpaceRelease(cs);
+  CGImageRelease(img);
+  outRgb[0] = px[0];
+  outRgb[1] = px[1];
+  outRgb[2] = px[2];
+  return YES;
+}
+
+// Author a solid-colour, video-only clip at @p path via RNVPAVMuxer — the same
+// muxer the gap fill uses, but filled with a BGRA colour instead of black.
+static NSString *authorSolidColorClip(NSInteger w, NSInteger h, NSInteger fps,
+                                      NSInteger frames, uint8_t r, uint8_t g,
+                                      uint8_t b, NSString *tag) {
+  NSString *path = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"solid-%@-%@.mp4", tag,
+                                     NSUUID.UUID.UUIDString]];
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  NSError *error = nil;
+  if (![muxer openVideoOnlyAtPath:path width:w height:h fps:fps error:&error]) {
+    return nil;
+  }
+  CVPixelBufferRef pb = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA,
+                      (__bridge CFDictionaryRef) @{
+                        (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
+                      },
+                      &pb);
+  CVPixelBufferLockBaseAddress(pb, 0);
+  uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+  const size_t stride = CVPixelBufferGetBytesPerRow(pb);
+  for (NSInteger y = 0; y < h; y++) {
+    uint8_t *row = base + y * stride;
+    for (NSInteger x = 0; x < w; x++) {
+      row[x * 4 + 0] = b;     // BGRA
+      row[x * 4 + 1] = g;
+      row[x * 4 + 2] = r;
+      row[x * 4 + 3] = 0xFF;
+    }
+  }
+  CVPixelBufferUnlockBaseAddress(pb, 0);
+  for (NSInteger i = 0; i < frames; i++) {
+    while (!muxer.videoInputIsReady && !muxer.videoInputFailed) {
+      [NSThread sleepForTimeInterval:0.001];
+    }
+    if (![muxer appendPixelBuffer:pb
+                 presentationTime:CMTimeMake(i, (int32_t)fps)
+                            error:&error]) {
+      CVPixelBufferRelease(pb);
+      return nil;
+    }
+  }
+  CVPixelBufferRelease(pb);
+  if (![muxer closeWithError:&error]) return nil;
+  return path;
+}
+
 // Timeline gaps (#18): mirrors the multi-clip transcode gap fill — a black,
 // silent segment authored via RNVPAVMuxer bridges two transcoded clips, and
 // the concat joins them into one timeline. The gap window decodes as black.
@@ -7438,6 +7522,124 @@ static int maxRgbAtTime(NSString *path, double t) {
   for (NSString *t in temps) {
     [[NSFileManager defaultManager] removeItemAtPath:t error:nil];
   }
+}
+
+// Timeline overlaps (#18): two solid-colour clips overlap by 0.5s. The
+// crossfade composer dissolves the overlap (opacity ramp), so the overlap
+// midpoint blends both colours where the outside windows stay pure.
+- (void)testMultiClipOverlapCrossfade {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  // Clip A = solid red [0,2s); clip B = solid blue, placed at 1.5s so [1.5,2)
+  // overlaps A. Joined duration = 1.5 + 2.0 = 3.5s.
+  NSString *red = authorSolidColorClip(80, 80, kFps, 60, 0xFF, 0x00, 0x00, @"xf-red");
+  NSString *blue = authorSolidColorClip(80, 80, kFps, 60, 0x00, 0x00, 0xFF, @"xf-blue");
+  XCTAssertNotNil(red, @"red author failed");
+  XCTAssertNotNil(blue, @"blue author failed");
+
+  NSArray<RNVPRemuxerConcatSource *> *sources = @[
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:red]
+                                           sourceStart:0.0
+                                        sourceDuration:2.0
+                                           outputStart:0.0],
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:blue]
+                                           sourceStart:0.0
+                                        sourceDuration:2.0
+                                           outputStart:1.5],
+  ];
+  NSString *out = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"xf-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer composeCrossfadeSources:sources
+                                          renderSize:CGSizeMake(80, 80)
+                                       frameDuration:CMTimeMake(1, (int32_t)kFps)
+                                           audioMode:RNVPAudioModeMute
+                                 audioReplacementURL:nil
+                                               toURL:[NSURL fileURLWithPath:out]
+                                                stop:nil
+                                               error:&error],
+                @"crossfade compose failed: %@", error);
+
+  RNVPAVDemuxer *demuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([demuxer openAtURL:[NSURL fileURLWithPath:out] error:&error],
+                @"open crossfade output failed: %@", error);
+  XCTAssertEqual(demuxer.width, 80);
+  XCTAssertEqual(demuxer.height, 80);
+  XCTAssertEqualWithAccuracy(demuxer.durationSec, 3.5, 0.2,
+                             @"overlapped timeline should be ~3.5s (got %f)",
+                             demuxer.durationSec);
+  [demuxer closeWithError:NULL];
+
+  // Pre-overlap (t=0.5) is pure red; post-overlap (t=3.0) is pure blue.
+  uint8_t early[3] = {0}, mid[3] = {0}, late[3] = {0};
+  XCTAssertTrue(rgbAtTime(out, 0.5, early), @"read early frame");
+  XCTAssertTrue(rgbAtTime(out, 3.0, late), @"read late frame");
+  XCTAssertGreaterThan(early[0], 200, @"pre-overlap should be red");
+  XCTAssertLessThan(early[2], 60, @"pre-overlap should have little blue");
+  XCTAssertGreaterThan(late[2], 200, @"post-overlap should be blue");
+  XCTAssertLessThan(late[0], 60, @"post-overlap should have little red");
+
+  // Overlap midpoint (t=1.75) blends both: red AND blue are both present and
+  // neither dominates the way it does in its own pure window.
+  XCTAssertTrue(rgbAtTime(out, 1.75, mid), @"read overlap-midpoint frame");
+  XCTAssertGreaterThan(mid[0], 60, @"overlap midpoint should still carry red");
+  XCTAssertGreaterThan(mid[2], 60, @"overlap midpoint should carry blue");
+  XCTAssertLessThan(mid[0], 220, @"overlap midpoint red should be dimmed by the fade");
+
+  [[NSFileManager defaultManager] removeItemAtPath:red error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:blue error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
+}
+
+// Leading gap + overlap in one spec (#18, codex review): the first clip starts
+// after 0 (a leading black gap) AND a later clip overlaps it. The crossfade
+// compositor must render [0, firstStart) black, not leave it uncovered.
+- (void)testMultiClipLeadingGapWithOverlap {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *red = authorSolidColorClip(80, 80, kFps, 60, 0xFF, 0x00, 0x00, @"lg-red");
+  NSString *blue = authorSolidColorClip(80, 80, kFps, 60, 0x00, 0x00, 0xFF, @"lg-blue");
+  XCTAssertNotNil(red, @"red author failed");
+  XCTAssertNotNil(blue, @"blue author failed");
+
+  // Red [1,3) — a 1s leading black gap. Blue at 2.5 overlaps red over [2.5,3).
+  NSArray<RNVPRemuxerConcatSource *> *sources = @[
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:red]
+                                           sourceStart:0.0
+                                        sourceDuration:2.0
+                                           outputStart:1.0],
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:blue]
+                                           sourceStart:0.0
+                                        sourceDuration:2.0
+                                           outputStart:2.5],
+  ];
+  NSString *out = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"lg-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer composeCrossfadeSources:sources
+                                          renderSize:CGSizeMake(80, 80)
+                                       frameDuration:CMTimeMake(1, (int32_t)kFps)
+                                           audioMode:RNVPAudioModeMute
+                                 audioReplacementURL:nil
+                                               toURL:[NSURL fileURLWithPath:out]
+                                                stop:nil
+                                               error:&error],
+                @"leading-gap+overlap compose failed: %@", error);
+
+  // The leading second is black; the red window is red; the overlap blends.
+  XCTAssertLessThan(maxRgbAtTime(out, 0.5), 24,
+                    @"the leading gap should be black");
+  uint8_t redPx[3] = {0}, mid[3] = {0}, bluePx[3] = {0};
+  XCTAssertTrue(rgbAtTime(out, 1.5, redPx), @"read red frame");
+  XCTAssertGreaterThan(redPx[0], 200, @"clip A window should be red");
+  XCTAssertTrue(rgbAtTime(out, 2.75, mid), @"read overlap-midpoint frame");
+  XCTAssertGreaterThan(mid[2], 60, @"overlap midpoint should carry blue");
+  XCTAssertTrue(rgbAtTime(out, 4.0, bluePx), @"read blue frame");
+  XCTAssertGreaterThan(bluePx[2], 200, @"clip B window should be blue");
+
+  [[NSFileManager defaultManager] removeItemAtPath:red error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:blue error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
 }
 
 @end

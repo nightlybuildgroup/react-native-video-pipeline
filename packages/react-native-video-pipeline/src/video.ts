@@ -185,26 +185,57 @@ function finalizeClips(
   resolved: ReadonlyArray<{ input: ClipInput; sourceDuration: number }>,
 ): NonEmptyArray<Clip> {
   const out: Clip[] = [];
+  // Running timeline cursor — the previous clip's end (its default next start).
   let outputStart = 0;
+  // Fields the overlap invariant is checked against, mirroring the native
+  // crossfade compositor: an overlap may reach back into the immediately
+  // preceding clip but no further, and may not fully contain it.
+  let prevClipStart = 0; // start of clip i-1
+  let prevClipEnd = 0; // end of clip i-1
+  let prevPrevClipEnd = 0; // end of clip i-2
+  let clipIndex = 0;
   for (const { input, sourceDuration } of resolved) {
     const sourceStart = input.startSec ?? 0;
     validateFileUri('clip.uri', input.uri);
     requireNonNeg('clip.startSec', sourceStart);
     requirePositive('clip.durationSec', sourceDuration);
     // An explicit outputStartSec at or after the running position opens a GAP
-    // before the clip (filled with black + silence by the render engine, which
-    // forces a re-encode). A value before it is an OVERLAP — blending two clips
-    // at once is still unsupported and rejects. Omit it for contiguous concat.
+    // before the clip (filled with black + silence). A value before it is an
+    // OVERLAP — the render engine crossfades the two clips over the overlap
+    // window (#18). Both force a re-encode. Omit it for contiguous concat.
+    //
+    // Only adjacent-pair overlaps are supported: an overlap that reaches back
+    // before the *previous* clip's own start would have a clip overlapping two
+    // neighbours at once (or fully contain one), which the crossfade compositor
+    // can't express — reject it here with the cumulative position for context.
     let clipOutputStart = outputStart;
     if (input.outputStartSec !== undefined) {
       requireNonNeg('clip.outputStartSec', input.outputStartSec);
-      if (input.outputStartSec < outputStart - OUTPUT_START_TOLERANCE_SEC) {
+      clipOutputStart = input.outputStartSec;
+    }
+    // Mirror the native crossfade compositor's adjacent-pair invariant so a bad
+    // overlap fails here, before any transcode work: non-decreasing starts and
+    // ends, and no reaching back past the clip two positions earlier.
+    const clipOutputEnd = clipOutputStart + sourceDuration;
+    if (clipIndex >= 1) {
+      if (clipOutputStart < prevClipStart - OUTPUT_START_TOLERANCE_SEC) {
         fail(
-          `clip.outputStartSec ${input.outputStartSec}s is before the previous clip's end (${outputStart}s) — overlaps are not supported`,
-          { outputStartSec: input.outputStartSec, position: outputStart },
+          `clip.outputStartSec ${clipOutputStart}s starts before the previous clip (${prevClipStart}s) — an overlap may only reach back into the immediately preceding clip, not span two`,
+          { outputStartSec: clipOutputStart, previousClipStart: prevClipStart },
         );
       }
-      clipOutputStart = input.outputStartSec;
+      if (clipOutputEnd < prevClipEnd - OUTPUT_START_TOLERANCE_SEC) {
+        fail(
+          `clip ends at ${clipOutputEnd}s, before the previous clip's end (${prevClipEnd}s) — a clip fully contained in another is not supported`,
+          { outputEnd: clipOutputEnd, previousClipEnd: prevClipEnd },
+        );
+      }
+    }
+    if (clipIndex >= 2 && clipOutputStart < prevPrevClipEnd - OUTPUT_START_TOLERANCE_SEC) {
+      fail(
+        `clip.outputStartSec ${clipOutputStart}s overlaps two clips back (which ends at ${prevPrevClipEnd}s) — only adjacent-pair overlaps are supported`,
+        { outputStartSec: clipOutputStart, clipTwoBackEnd: prevPrevClipEnd },
+      );
     }
     out.push({
       uri: input.uri,
@@ -213,7 +244,11 @@ function finalizeClips(
       outputStart: clipOutputStart,
       ...(input.transform !== undefined ? { transform: input.transform } : {}),
     });
-    outputStart = clipOutputStart + sourceDuration;
+    prevPrevClipEnd = prevClipEnd;
+    prevClipStart = clipOutputStart;
+    prevClipEnd = clipOutputEnd;
+    outputStart = clipOutputEnd;
+    clipIndex += 1;
   }
   // `inputs` came in as `NonEmptyArray<ClipInput>`, so `out` has length >= 1.
   return out as NonEmptyArray<Clip>;

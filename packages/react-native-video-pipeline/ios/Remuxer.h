@@ -37,6 +37,7 @@
 
 #import "RNVPAudio.h"
 
+#import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 
 @class RNVPStopToken;
@@ -229,6 +230,34 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
        audioReplacementURL:(nullable NSURL *)audioReplacementURL
                       stop:(nullable RNVPStopToken *)stop
                      error:(NSError *_Nullable __autoreleasing *)error;
+
+/// Crossfade-compose overlapping clips into @p outputURL (#18 overlaps). Unlike
+/// @c remuxConcatSources: this **re-encodes** (a blended frame can't be copied
+/// through): each @p source is laid onto one of two ping-pong composition
+/// tracks at its @c outputStart, and where consecutive clips overlap
+/// (@c outputStart of the later clip is before the earlier clip's end) the
+/// overlap window is dissolved via an opacity ramp on the outgoing clip and a
+/// matching volume ramp on its audio.
+///
+/// Expects every source to already share @p renderSize, codec and orientation
+/// (the multi-clip transcode path produces such temps), so there is no
+/// signature check. Only **adjacent-pair** overlaps are supported: a clip that
+/// overlaps two neighbours at once, or that fully contains another, rejects
+/// with @c RNVPRemuxerErrorCodeInvalidSpec. @p frameDuration sets the output
+/// composition's frame rate (1/fps). @c audioMode mirrors the concat variant
+/// (@c Passthrough crossfades each clip's audio, @c Mute drops it, @c Replace
+/// swaps the whole soundtrack — no ramp).
+///
+/// Returns @c YES on success; on failure populates @p error and deletes any
+/// partial output file.
++ (BOOL)composeCrossfadeSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
+                     renderSize:(CGSize)renderSize
+                  frameDuration:(CMTime)frameDuration
+                      audioMode:(RNVPAudioMode)audioMode
+            audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                          toURL:(NSURL *)outputURL
+                           stop:(nullable RNVPStopToken *)stop
+                          error:(NSError *_Nullable __autoreleasing *)error;
 
 @end
 

@@ -120,6 +120,18 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
 /// Non-nil only when @c audioMode is @c Replace.
 @property(nonatomic, readonly, nullable) NSURL *audioReplacementURL;
 
+/// Caller-built video composition for the @c composedAsset re-encode shape
+/// (multi-clip crossfade overlaps, #18). When non-nil alongside
+/// @c composedAsset, the driver re-encodes through the HighestQuality preset
+/// with this composition set on the session — the layer instructions'
+/// opacity ramps produce the crossfade. Nil on every other path.
+@property(nonatomic, readonly, nullable)
+    AVVideoComposition *videoComposition;
+/// Optional audio crossfade for the @c videoComposition shape. The caller
+/// builds the volume ramps over the overlap windows; the driver just hands it
+/// to the session. Nil leaves the composition's audio tracks at full volume.
+@property(nonatomic, readonly, nullable) AVAudioMix *audioMix;
+
 - (instancetype)initWithSource:(NSURL *)source
                         output:(NSURL *)output
                      timeRange:(CMTimeRange)timeRange
@@ -136,6 +148,20 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
 /// so there is no @c timeRange or @c composer — the export copies compressed
 /// samples verbatim and writes the composition track's transform.
 - (instancetype)initWithComposedAsset:(AVAsset *)composedAsset
+                               output:(NSURL *)output
+                             metadata:(nullable NSArray<AVMetadataItem *> *)metadata
+                                 stop:(nullable RNVPStopToken *)stop
+                             progress:(nullable RNVPExportSessionProgress)progress;
+
+/// Composition **re-encode** request (#18 crossfade overlaps). The composition
+/// carries the overlapping clip tracks; @p videoComposition supplies the
+/// per-region layer instructions (opacity ramps) that blend them, and the
+/// optional @p audioMix supplies the matching volume ramps. Unlike
+/// @c initWithComposedAsset: this re-encodes (HighestQuality preset) because a
+/// blended frame can't be copied through verbatim.
+- (instancetype)initWithComposedAsset:(AVAsset *)composedAsset
+                     videoComposition:(AVVideoComposition *)videoComposition
+                             audioMix:(nullable AVAudioMix *)audioMix
                                output:(NSURL *)output
                              metadata:(nullable NSArray<AVMetadataItem *> *)metadata
                                  stop:(nullable RNVPStopToken *)stop

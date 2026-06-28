@@ -133,11 +133,13 @@ export interface ClipInput {
   /**
    * Explicit position on the output timeline, in seconds.
    *
-   * v0.1 is concat-only: when provided, this MUST equal the cumulative
-   * position derived from preceding clips' durations (within 1ms). Gaps
-   * (`outputStartSec` beyond the cumulative position) and overlaps (before
-   * it) are rejected with `InvalidSpecError` until the pump learns to fill /
-   * blend them. Omit it to accept the computed concat position.
+   * Omit it to accept the computed concat position (each clip picks up where
+   * the previous ended). A value **beyond** the cumulative position opens a
+   * **gap**, filled with black + silence. A value **before** it is an
+   * **overlap**: on iOS the clips are crossfade-dissolved over the overlap
+   * window; on Android overlaps reject for now. Only adjacent-pair overlaps
+   * are allowed — an overlap reaching back before the previous clip's own
+   * start (spanning two clips) rejects with `InvalidSpecError`.
    */
   outputStartSec?: number;
   /**
