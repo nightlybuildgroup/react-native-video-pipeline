@@ -413,7 +413,7 @@ The native Nitro boundary still receives `{ sourceStart, sourceDuration, outputS
 **Transform routing.** On a single-clip render, both platforms produce the correct output and preserve source audio; the path differs:
 
 - **iOS** — rotation/flip-only stays in **remux** (lossless `preferredTransform`); `crop`, an output-side change, or an overlay forces **transcode**.
-- **Android** — the transform/trim/output path runs on **Media3 Transformer**, which transmuxes (copies compressed samples) when no pixel work is needed and re-encodes otherwise. Overlay-on-render uses the legacy GL transcoder (full-source only).
+- **Android** — the single-clip transform/trim/output/overlay path runs on **Media3 Transformer**, which transmuxes (copies compressed samples) when no pixel work is needed and re-encodes otherwise. Native overlays composite via Media3 `OverlayEffect` in the same pass as trim + transform (audio preserved); `spec.metadata` is applied in a follow-up compressed-passthrough remux.
 
 A trim window composes with the transform in the same pass on both.
 

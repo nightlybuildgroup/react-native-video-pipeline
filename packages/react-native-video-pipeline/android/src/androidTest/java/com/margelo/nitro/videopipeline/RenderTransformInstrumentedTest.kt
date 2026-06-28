@@ -14,6 +14,8 @@
 package com.margelo.nitro.videopipeline
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaExtractor
@@ -114,6 +116,19 @@ class RenderTransformInstrumentedTest {
       n
     } finally {
       runCatching { ex.release() }
+    }
+  }
+
+  /// The center pixel of the first decoded frame. Used to assert an overlay was
+  /// actually composited at its anchor.
+  private fun centerPixel(path: String): Int {
+    val r = MediaMetadataRetriever()
+    return try {
+      r.setDataSource(path)
+      val bmp = r.getFrameAtIndex(0) ?: error("no frame 0 in $path")
+      bmp.getPixel(bmp.width / 2, bmp.height / 2)
+    } finally {
+      runCatching { r.release() }
     }
   }
 
@@ -223,6 +238,52 @@ class RenderTransformInstrumentedTest {
     val mimes = trackMimes(out)
     assertTrue("output keeps a video track", mimes.any { it.startsWith("video/") })
     assertTrue("output keeps the audio track", mimes.any { it.startsWith("audio/") })
+  }
+
+  @Test
+  fun overlayWithTrimWindowKeepsAudio() {
+    // Regression for #12: overlay + trim in one pass used to be rejected (the
+    // overlay path was the legacy GL transcoder, full-source + video-only).
+    // It now runs on Media3 OverlayEffect, so it trims, overlays, and keeps
+    // the audio in a single pass.
+    val src = authorAudioVideoFixture("overlay-trim")
+    val out = File(ctx.cacheDir, "xform-overlay-trim-out.mp4").absolutePath
+    val overlayBmp = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)
+      .apply { eraseColor(Color.RED) }
+    val overlay = Transcoder.ResolvedOverlay(
+      bitmap = overlayBmp,
+      sizeW = null,
+      sizeH = null,
+      anchorX = 0.5,
+      anchorY = 0.5,
+      opacity = 1.0,
+      timeRange = null,
+    )
+    TransformerRunner.run(
+      ctx,
+      spec(src, out, startSec = 0.25, durationSec = 0.5).copy(
+        overlays = listOf(overlay),
+        outCanvasW = width,
+        outCanvasH = height,
+      ),
+      stopToken = null, progress = null,
+    )
+    assertTrue("overlay+trim output authored", File(out).exists())
+    assertTrue("output keeps the audio track", trackMimes(out).any { it.startsWith("audio/") })
+    assertTrue(
+      "windowed duration ~0.5s (got ${durationSec(out)})",
+      abs(durationSec(out) - 0.5) < 0.2,
+    )
+    // The opaque red overlay is anchored at the frame center (0.5, 0.5), so the
+    // center pixel must be red-dominant — proving the overlay is actually
+    // composited (not just that the file was produced).
+    val center = centerPixel(out)
+    assertTrue(
+      "center pixel is red (overlay composited) got #${Integer.toHexString(center)}",
+      Color.red(center) > 120 &&
+        Color.red(center) > Color.green(center) &&
+        Color.red(center) > Color.blue(center),
+    )
   }
 
   @Test
