@@ -104,9 +104,11 @@ internal object TransformerRunner {
     /// Native overlays composited on top of the transformed frame via Media3
     /// OverlayEffect. The runner owns these bitmaps and recycles them on exit.
     val overlays: List<Transcoder.ResolvedOverlay> = emptyList(),
-    /// The resolved output canvas size, used to convert RATIO overlay sizes and
-    /// to scale each overlay bitmap to its target pixel size. Only read when
-    /// `overlays` is non-empty.
+    /// The resolved output canvas size — `output.width ?: fallbackW`,
+    /// `output.height ?: fallbackH` (fallback = crop rect or source, swapped for
+    /// a quarter-turn rotation). Read when overlays are present (to convert RATIO
+    /// overlay sizes and scale each bitmap to its target pixel size) and to pin
+    /// the `Presentation` when a single output dimension is requested.
     val outCanvasW: Int = 0,
     val outCanvasH: Int = 0,
   )

@@ -30,6 +30,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.nio.ByteBuffer
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @RunWith(AndroidJUnit4::class)
 class RenderTransformInstrumentedTest {
@@ -163,10 +164,10 @@ class RenderTransformInstrumentedTest {
     // the crop rect (or source), swapped for a quarter-turn rotation. This is
     // what makes a single requested dimension fall back on the other axis.
     val swapDims = rotate == 90 || rotate == 270
-    val contentW = if (cropW > 0.0) cropW.toInt() else width
-    val contentH = if (cropH > 0.0) cropH.toInt() else height
-    val canvasW = outWidth ?: if (swapDims) contentH else contentW
-    val canvasH = outHeight ?: if (swapDims) contentW else contentH
+    val contentW = if (cropW > 0.0) cropW else width.toDouble()
+    val contentH = if (cropH > 0.0) cropH else height.toDouble()
+    val canvasW = (outWidth?.toDouble() ?: if (swapDims) contentH else contentW).roundToInt()
+    val canvasH = (outHeight?.toDouble() ?: if (swapDims) contentW else contentH).roundToInt()
     return TransformerRunner.Spec(
       sourceUri = src,
       outputPath = out,
