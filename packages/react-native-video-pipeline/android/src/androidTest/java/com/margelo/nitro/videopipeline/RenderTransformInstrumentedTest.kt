@@ -158,6 +158,7 @@ class RenderTransformInstrumentedTest {
     outWidth: Int? = null,
     outHeight: Int? = null,
     fps: Double? = null,
+    removeAudio: Boolean = false,
   ): TransformerRunner.Spec {
     // Resolve the output canvas exactly as the render router does
     // (HybridVideoPipeline.renderTranscodeSingle): pinned dims win, otherwise
@@ -189,6 +190,7 @@ class RenderTransformInstrumentedTest {
       bitrate = null,
       outCanvasW = canvasW,
       outCanvasH = canvasH,
+      removeAudio = removeAudio,
     )
   }
 
@@ -279,6 +281,29 @@ class RenderTransformInstrumentedTest {
     val mimes = trackMimes(out)
     assertTrue("output keeps a video track", mimes.any { it.startsWith("video/") })
     assertTrue("output keeps the audio track", mimes.any { it.startsWith("audio/") })
+  }
+
+  // audio.mode = 'mute' drops the audio track (setRemoveAudio on the
+  // EditedMediaItem); the video track survives. Mirrors the iOS
+  // testTranscodeMuteDropsAudioTrack / testRemuxTransformMuteDropsAudioTrack.
+  @Test
+  fun muteDropsAudioTrack() {
+    val src = authorAudioVideoFixture("mute")
+    assertTrue("fixture has audio", trackMimes(src).any { it.startsWith("audio/") })
+    val out = File(ctx.cacheDir, "xform-mute-out.mp4").absolutePath
+    // A flip forces a re-encode; with removeAudio the soundtrack is dropped.
+    TransformerRunner.run(
+      ctx,
+      spec(src, out, flipH = true, removeAudio = true),
+      stopToken = null,
+      progress = null,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("output keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue(
+      "muted output has no audio track",
+      mimes.none { it.startsWith("audio/") },
+    )
   }
 
   @Test

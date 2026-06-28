@@ -337,10 +337,12 @@ export interface AudioSpec {
 }
 
 /**
- * `passthrough` (default) keeps the source audio. `mute` (drop the track) and
- * `replace` (swap in `replaceUri`) are **not implemented yet** — the JS layer
- * rejects them with `InvalidSpecError` rather than silently producing output
- * with unchanged audio. Native support is tracked in #29.
+ * `passthrough` (default) keeps the source audio. `mute` drops the audio
+ * track so the output is video-only — wired into every audio-carrying render
+ * path on both platforms. `replace` (swap in `replaceUri`) is **not
+ * implemented yet** — the JS layer rejects it with `InvalidSpecError` rather
+ * than silently producing output with unchanged audio. Native support is
+ * tracked in #29.
  */
 export type AudioMode = 'passthrough' | 'mute' | 'replace';
 

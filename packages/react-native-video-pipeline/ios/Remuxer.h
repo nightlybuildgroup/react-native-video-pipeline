@@ -35,6 +35,8 @@
 
 #pragma once
 
+#import "RNVPAudio.h"
+
 #import <Foundation/Foundation.h>
 
 @class RNVPStopToken;
@@ -80,6 +82,18 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
              durationSec:(double)durationSec
                    error:(NSError *_Nullable __autoreleasing *)error;
 
+/// As @c remuxTrimFromURL:toURL:startSec:durationSec:error: but honouring an
+/// @c RNVPAudioMode: @c Passthrough keeps the source audio (identical to the
+/// shorter selector), @c Mute drops the audio track, @c Replace swaps in
+/// @p audioReplacementURL (capped to the trim window).
++ (BOOL)remuxTrimFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                startSec:(double)startSec
+             durationSec:(double)durationSec
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                   error:(NSError *_Nullable __autoreleasing *)error;
+
 /// Flip-by-remux: copy every compressed sample (video + optional audio)
 /// from @p sourceURL to @p outputURL and post-multiply a flip matrix onto
 /// the video track's @c preferredTransform so playback is mirrored on the
@@ -105,6 +119,15 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
 + (BOOL)remuxFlipFromURL:(NSURL *)sourceURL
                    toURL:(NSURL *)outputURL
                     axis:(RNVPFlipAxis)axis
+                   error:(NSError *_Nullable __autoreleasing *)error;
+
+/// As @c remuxFlipFromURL:toURL:axis:error: but honouring an
+/// @c RNVPAudioMode (see @c remuxTrimFromURL: variant).
++ (BOOL)remuxFlipFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                    axis:(RNVPFlipAxis)axis
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
                    error:(NSError *_Nullable __autoreleasing *)error;
 
 /// Trim + rotate/flip in one lossless remux pass. Copies the compressed
@@ -133,6 +156,19 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
                        rotate:(NSInteger)rotate
                         flipH:(BOOL)flipH
                         flipV:(BOOL)flipV
+                        error:(NSError *_Nullable __autoreleasing *)error;
+
+/// As @c remuxTransformFromURL:…:error: but honouring an @c RNVPAudioMode
+/// (see @c remuxTrimFromURL: variant). @c Replace is capped to the trim window.
++ (BOOL)remuxTransformFromURL:(NSURL *)sourceURL
+                        toURL:(NSURL *)outputURL
+                     startSec:(double)startSec
+                  durationSec:(double)durationSec
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                    audioMode:(RNVPAudioMode)audioMode
+          audioReplacementURL:(nullable NSURL *)audioReplacementURL
                         error:(NSError *_Nullable __autoreleasing *)error;
 
 @end
@@ -245,6 +281,15 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
 + (BOOL)remuxStampFromURL:(NSURL *)sourceURL
                     toURL:(NSURL *)outputURL
                  metadata:(nullable RNVPStampMetadata *)metadata
+                    error:(NSError *_Nullable __autoreleasing *)error;
+
+/// As @c remuxStampFromURL:toURL:metadata:error: but honouring an
+/// @c RNVPAudioMode (see @c remuxTrimFromURL: variant).
++ (BOOL)remuxStampFromURL:(NSURL *)sourceURL
+                    toURL:(NSURL *)outputURL
+                 metadata:(nullable RNVPStampMetadata *)metadata
+                audioMode:(RNVPAudioMode)audioMode
+      audioReplacementURL:(nullable NSURL *)audioReplacementURL
                     error:(NSError *_Nullable __autoreleasing *)error;
 
 @end

@@ -43,6 +43,43 @@ AVFileType fileTypeForOutputURL(NSURL *url) {
   return AVFileTypeMPEG4;
 }
 
+// Insert the soundtrack dictated by `mode` into the composition-passthrough
+// `composition` over `videoRange`. Passthrough copies `sourceAsset`'s own
+// audio; Replace pulls the first audio track from `replacementURL`, capped to
+// the video duration; Mute inserts nothing. Best-effort: a missing or
+// decode-failing audio track yields a silent (video-only) result rather than
+// failing the whole remux, matching the trim/flip passthrough leniency.
+void insertAudioIntoComposition(AVMutableComposition *composition,
+                                AVAsset *sourceAsset, CMTimeRange videoRange,
+                                RNVPAudioMode mode, NSURL *replacementURL) {
+  if (mode == RNVPAudioModeMute) return;
+
+  AVAsset *audioAsset = sourceAsset;
+  CMTime usable = videoRange.duration;
+  if (mode == RNVPAudioModeReplace) {
+    if (replacementURL == nil) return;
+    audioAsset = [AVURLAsset assetWithURL:replacementURL];
+    const CMTime replacementDuration = audioAsset.duration;
+    if (CMTimeCompare(replacementDuration, usable) < 0) usable = replacementDuration;
+  }
+
+  AVAssetTrack *audioTrack =
+      [audioAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+  if (audioTrack == nil) return;
+
+  AVMutableCompositionTrack *audioComp = [composition
+      addMutableTrackWithMediaType:AVMediaTypeAudio
+                  preferredTrackID:kCMPersistentTrackID_Invalid];
+  // Passthrough reads from the source window's start; replace from the
+  // replacement track's own t=0. Both land at the output's t=0.
+  const CMTime readStart =
+      mode == RNVPAudioModeReplace ? kCMTimeZero : videoRange.start;
+  [audioComp insertTimeRange:CMTimeRangeMake(readStart, usable)
+                     ofTrack:audioTrack
+                      atTime:kCMTimeZero
+                       error:nil];
+}
+
 // Pump every remaining sample from `output` into `input`. Samples are written
 // with their original source-time PTS; the writer session was started at the
 // source start time so no rebasing is needed (AVAssetWriter emits an edit
@@ -184,6 +221,22 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
                 startSec:(double)startSec
              durationSec:(double)durationSec
                    error:(NSError *_Nullable __autoreleasing *)error {
+  return [self remuxTrimFromURL:sourceURL
+                          toURL:outputURL
+                       startSec:startSec
+                    durationSec:durationSec
+                      audioMode:RNVPAudioModePassthrough
+            audioReplacementURL:nil
+                          error:error];
+}
+
++ (BOOL)remuxTrimFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                startSec:(double)startSec
+             durationSec:(double)durationSec
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(NSURL *)audioReplacementURL
+                   error:(NSError *_Nullable __autoreleasing *)error {
   if (![[NSFileManager defaultManager] fileExistsAtPath:sourceURL.path]) {
     if (error) {
       *error = makeError(
@@ -245,6 +298,8 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
                                       timeRange:timeRange
                                        metadata:asset.metadata
                                        composer:nil
+                                      audioMode:audioMode
+                            audioReplacementURL:audioReplacementURL
                                            stop:nil
                                        progress:nil];
   NSError *exportError = nil;
@@ -262,6 +317,20 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
 + (BOOL)remuxFlipFromURL:(NSURL *)sourceURL
                    toURL:(NSURL *)outputURL
                     axis:(RNVPFlipAxis)axis
+                   error:(NSError *_Nullable __autoreleasing *)error {
+  return [self remuxFlipFromURL:sourceURL
+                          toURL:outputURL
+                           axis:axis
+                      audioMode:RNVPAudioModePassthrough
+            audioReplacementURL:nil
+                          error:error];
+}
+
++ (BOOL)remuxFlipFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                    axis:(RNVPFlipAxis)axis
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(NSURL *)audioReplacementURL
                    error:(NSError *_Nullable __autoreleasing *)error {
   if (![[NSFileManager defaultManager] fileExistsAtPath:sourceURL.path]) {
     if (error) {
@@ -326,17 +395,8 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
   videoCompTrack.preferredTransform = flipTransformForAxis(
       axis, videoTrack.preferredTransform, videoTrack.naturalSize);
 
-  AVAssetTrack *audioTrack =
-      [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-  if (audioTrack != nil) {
-    AVMutableCompositionTrack *audioCompTrack = [composition
-        addMutableTrackWithMediaType:AVMediaTypeAudio
-                    preferredTrackID:kCMPersistentTrackID_Invalid];
-    [audioCompTrack insertTimeRange:sourceRange
-                            ofTrack:audioTrack
-                             atTime:kCMTimeZero
-                              error:nil];
-  }
+  insertAudioIntoComposition(composition, asset, sourceRange, audioMode,
+                             audioReplacementURL);
 
   RNVPExportRequest *request =
       [[RNVPExportRequest alloc] initWithComposedAsset:composition
@@ -363,6 +423,28 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
                        rotate:(NSInteger)rotate
                         flipH:(BOOL)flipH
                         flipV:(BOOL)flipV
+                        error:(NSError *_Nullable __autoreleasing *)error {
+  return [self remuxTransformFromURL:sourceURL
+                               toURL:outputURL
+                            startSec:startSec
+                         durationSec:durationSec
+                              rotate:rotate
+                               flipH:flipH
+                               flipV:flipV
+                           audioMode:RNVPAudioModePassthrough
+                 audioReplacementURL:nil
+                               error:error];
+}
+
++ (BOOL)remuxTransformFromURL:(NSURL *)sourceURL
+                        toURL:(NSURL *)outputURL
+                     startSec:(double)startSec
+                  durationSec:(double)durationSec
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                    audioMode:(RNVPAudioMode)audioMode
+          audioReplacementURL:(NSURL *)audioReplacementURL
                         error:(NSError *_Nullable __autoreleasing *)error {
   if (![[NSFileManager defaultManager] fileExistsAtPath:sourceURL.path]) {
     if (error) {
@@ -450,17 +532,8 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
       videoTrack.preferredTransform, videoTrack.naturalSize, rotate, flipH,
       flipV);
 
-  AVAssetTrack *audioTrack =
-      [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-  if (audioTrack != nil) {
-    AVMutableCompositionTrack *audioCompTrack = [composition
-        addMutableTrackWithMediaType:AVMediaTypeAudio
-                    preferredTrackID:kCMPersistentTrackID_Invalid];
-    [audioCompTrack insertTimeRange:window
-                            ofTrack:audioTrack
-                             atTime:kCMTimeZero
-                              error:nil];
-  }
+  insertAudioIntoComposition(composition, asset, window, audioMode,
+                             audioReplacementURL);
 
   // Passthrough export through the unified driver — copies compressed samples,
   // writes the overridden transform. The composition timeline already starts at
@@ -905,6 +978,20 @@ NSArray<AVMetadataItem *> *buildMergedMetadata(
                     toURL:(NSURL *)outputURL
                  metadata:(RNVPStampMetadata *)metadata
                     error:(NSError *_Nullable __autoreleasing *)error {
+  return [self remuxStampFromURL:sourceURL
+                           toURL:outputURL
+                        metadata:metadata
+                       audioMode:RNVPAudioModePassthrough
+             audioReplacementURL:nil
+                           error:error];
+}
+
++ (BOOL)remuxStampFromURL:(NSURL *)sourceURL
+                    toURL:(NSURL *)outputURL
+                 metadata:(RNVPStampMetadata *)metadata
+                audioMode:(RNVPAudioMode)audioMode
+      audioReplacementURL:(NSURL *)audioReplacementURL
+                    error:(NSError *_Nullable __autoreleasing *)error {
   if (![[NSFileManager defaultManager] fileExistsAtPath:sourceURL.path]) {
     if (error) {
       *error = makeError(
@@ -990,11 +1077,15 @@ NSArray<AVMetadataItem *> *buildMergedMetadata(
   [writer addInput:videoInput];
 
   // --- Optional audio (compressed passthrough) -----------------------------
+  // Passthrough copies the source audio; Mute drops it (skip the input
+  // entirely). Replace on this metadata-stamp pump needs a second reader on the
+  // replacement file — not wired here yet (#29 follow-up); it is unreachable
+  // while the JS layer rejects 'replace', so it conservatively drops audio.
   AVAssetReaderTrackOutput *audioOutput = nil;
   AVAssetWriterInput *audioInput = nil;
   NSArray<AVAssetTrack *> *audioTracks =
       [asset tracksWithMediaType:AVMediaTypeAudio];
-  if (audioTracks.count > 0) {
+  if (audioMode == RNVPAudioModePassthrough && audioTracks.count > 0) {
     AVAssetTrack *audioTrack = audioTracks.firstObject;
     AVAssetReaderTrackOutput *candidateOutput =
         [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack

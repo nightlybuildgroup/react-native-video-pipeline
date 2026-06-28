@@ -894,6 +894,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             overlays = resolvedOverlays,
             outCanvasW = canvasW,
             outCanvasH = canvasH,
+            removeAudio = spec.audio?.mode == AudioMode.MUTE,
           ),
           stopToken = stopToken,
           progress = wrapTransformerProgress(onProgress),

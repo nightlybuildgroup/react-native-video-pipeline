@@ -141,6 +141,8 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
                                       timeRange:kCMTimeRangeInvalid
                                        metadata:mergedMetadata
                                        composer:composer
+                                      audioMode:RNVPAudioModePassthrough
+                            audioReplacementURL:nil
                                            stop:nil
                                        progress:progress];
 

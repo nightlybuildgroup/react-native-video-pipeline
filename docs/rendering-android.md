@@ -173,7 +173,9 @@ hand-rolled MediaCodec/EOS plumbing:
   equal to the source is a no-op, and a target *above* the source rate is
   rejected (`InvalidSpec`) instead of silently keeping the source cadence. This
   differs from iOS, which resamples both directions as `outputIndex / fps`.
-- **Audio** → preserved automatically (Transformer copies the audio through).
+- **Audio** → preserved automatically (Transformer copies the audio through),
+  unless `audio.mode: 'mute'` is set, which drops the track via
+  `EditedMediaItem.Builder.setRemoveAudio(true)`.
 - **Transmux fast path** → when the requested edit needs no pixel work, Media3
   copies compressed samples without re-encoding.
 

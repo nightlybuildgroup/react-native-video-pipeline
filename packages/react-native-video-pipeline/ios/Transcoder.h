@@ -30,6 +30,8 @@
 
 #pragma once
 
+#import "RNVPAudio.h"
+
 #import <Foundation/Foundation.h>
 
 @class RNVPImageOverlay;
@@ -158,6 +160,22 @@ typedef NS_ENUM(NSInteger, RNVPTranscodeCodec) {
                   target:(RNVPTranscodeTarget *)target
                 overlays:(nullable NSArray *)overlays
                 metadata:(nullable RNVPStampMetadata *)metadata
+                    stop:(nullable RNVPStopToken *)stop
+                progress:(nullable RNVPTranscoderProgressBlock)progress
+                   error:(NSError *_Nullable __autoreleasing *)error;
+
+/// As @c transcodeFromURL:…:error: but honouring an @c RNVPAudioMode:
+/// @c Passthrough keeps the source audio (identical to the shorter selector),
+/// @c Mute drops the audio track. @c Replace is not wired on the transcode
+/// pump yet (needs a second reader on the replacement file) and conservatively
+/// drops the source audio — unreachable while the JS layer rejects 'replace'.
++ (BOOL)transcodeFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                  target:(RNVPTranscodeTarget *)target
+                overlays:(nullable NSArray *)overlays
+                metadata:(nullable RNVPStampMetadata *)metadata
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
                     stop:(nullable RNVPStopToken *)stop
                 progress:(nullable RNVPTranscoderProgressBlock)progress
                    error:(NSError *_Nullable __autoreleasing *)error;

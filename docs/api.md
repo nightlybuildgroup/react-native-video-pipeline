@@ -168,7 +168,7 @@ The full-spec native editing entry point. The native side picks the cheapest pat
   - crop, a native overlay, or an output-side change (`width`/`height`/`fps`/`codec`/`bitrate`) → **transcode** (re-encode), on both platforms.
   - A trim window (`startSec`/`durationSec` on the clip) composes with any of the above — render trims **and** transforms in one pass. Source audio is preserved through the transcode path on both platforms.
 
-**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on a **single-clip** spec. A **multi-clip** spec is passthrough-concat only — combining concat with a transform, an overlay, or an output-side change rejects with `InvalidSpecError` (multi-clip transcode is not wired yet; split into single-clip renders, or concat the transformed outputs). Audio `mute`/`replace` (`audio.mode`) are likewise not wired yet — they reject with `InvalidSpecError` (only `'passthrough'` is supported); see [`AudioSpec`](#audiospec).
+**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on a **single-clip** spec. A **multi-clip** spec is passthrough-concat only — combining concat with a transform, an overlay, or an output-side change rejects with `InvalidSpecError` (multi-clip transcode is not wired yet; split into single-clip renders, or concat the transformed outputs). Audio `mute` (`audio.mode: 'mute'`) drops the audio track on every audio-carrying render path (both platforms); `replace` is not wired yet and rejects with `InvalidSpecError`; see [`AudioSpec`](#audiospec).
 
 `RenderSpec` requires a non-empty `clips` array at compile time — synthesized renders go through [`Video.synthesize`](#videosynthesize) instead.
 
@@ -486,7 +486,7 @@ type AudioSpec =
 
 Discriminated by `mode`, so `replaceUri` is required at compile time when (and only when) `mode === 'replace'`.
 
-> **Status.** Only `'passthrough'` (keep the source audio — also the default when `audio` is omitted) is wired into the native engines. `'mute'` and `'replace'` currently **reject** with `InvalidSpecError`: no native code reads `spec.audio` yet, so accepting them would silently produce output with unchanged audio. Native implementation is tracked in [#29](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/29).
+> **Status.** `'passthrough'` (keep the source audio — also the default when `audio` is omitted) and `'mute'` (drop the audio track) are wired into both native engines. `'mute'` applies to every audio-carrying render path: the transcode re-encode (crop/resize/overlay/output change) and the rotation/flip transform-remux on iOS, and the Media3 Transformer re-encode on Android (`EditedMediaItem.setRemoveAudio`). `'replace'` (swap in `replaceUri`) currently **rejects** with `InvalidSpecError` — the native soundtrack swap is the remaining piece of [#29](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/29). A `replace` spec must carry a non-empty file-URI `replaceUri` (enforced once the reject is lifted).
 
 ### `Size`
 
