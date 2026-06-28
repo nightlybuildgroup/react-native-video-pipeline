@@ -283,6 +283,36 @@ class RenderTransformInstrumentedTest {
     assertTrue("output keeps the audio track", mimes.any { it.startsWith("audio/") })
   }
 
+  // Passthrough concat now splices each clip's audio onto the joined timeline
+  // (previously concat was video-only — the #16 "audio dropped" limit). Mute
+  // writes video only. Mirrors the iOS
+  // testRemuxConcatCarriesAudioPassthroughAndMuteDrops.
+  @Test
+  fun concatCarriesAudioPassthroughAndMuteDrops() {
+    val clipA = authorAudioVideoFixture("concat-a")
+    val clipB = authorAudioVideoFixture("concat-b")
+    assertTrue("fixture has audio", trackMimes(clipA).any { it.startsWith("audio/") })
+    val perClip = frameCount / fps.toDouble()
+    val sources = listOf(
+      Remuxer.ConcatSource(clipA, 0.0, perClip, 0.0),
+      Remuxer.ConcatSource(clipB, 0.0, perClip, perClip),
+    )
+
+    val keep = File(ctx.cacheDir, "concat-keep.mp4").absolutePath
+    File(keep).delete()
+    Remuxer.remuxConcat(sources, keep, stopToken = null, audioMode = AudioMode.PASSTHROUGH)
+    val keepMimes = trackMimes(keep)
+    assertTrue("concat keeps a video track", keepMimes.any { it.startsWith("video/") })
+    assertTrue("passthrough concat keeps audio", keepMimes.any { it.startsWith("audio/") })
+
+    val mute = File(ctx.cacheDir, "concat-mute.mp4").absolutePath
+    File(mute).delete()
+    Remuxer.remuxConcat(sources, mute, stopToken = null, audioMode = AudioMode.MUTE)
+    val muteMimes = trackMimes(mute)
+    assertTrue("concat keeps a video track", muteMimes.any { it.startsWith("video/") })
+    assertTrue("mute concat has no audio track", muteMimes.none { it.startsWith("audio/") })
+  }
+
   // audio.mode = 'mute' drops the audio track (setRemoveAudio on the
   // EditedMediaItem); the video track survives. Mirrors the iOS
   // testTranscodeMuteDropsAudioTrack / testRemuxTransformMuteDropsAudioTrack.

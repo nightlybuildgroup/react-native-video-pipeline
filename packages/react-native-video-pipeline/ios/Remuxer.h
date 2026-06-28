@@ -204,14 +204,28 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
 ///     fallback (not wired yet).
 ///   - the timeline must be contiguous and start at 0 — gaps and overlaps
 ///     are rejected with the same @c InvalidSpec rationale.
-///   - audio is dropped. Concat's silent-audio authoring lands on the
-///     transcode path in a later task.
+///   - each clip's audio is spliced onto the concatenated timeline
+///     (passthrough); a clip without an audio track leaves a silent gap.
+///     @c audio.mode = 'mute' writes video only. Use the
+///     @c …:audioMode:stop:error: variant to choose; this shorter selector
+///     keeps the audio (passthrough).
 ///   - container-level metadata is forwarded from the first source.
 ///
 /// Returns @c YES on success; on failure populates @p error and deletes any
 /// partial output file.
 + (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
                      toURL:(NSURL *)outputURL
+                      stop:(nullable RNVPStopToken *)stop
+                     error:(NSError *_Nullable __autoreleasing *)error;
+
+/// As @c remuxConcatSources:toURL:stop:error: but honouring an
+/// @c RNVPAudioMode. @c Passthrough splices each clip's own audio onto the
+/// concatenated timeline (a clip with no audio leaves a silent gap);
+/// @c Mute writes video only. (@c Replace is not wired on the concat path yet
+/// and is rejected upstream.)
++ (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
+                     toURL:(NSURL *)outputURL
+                 audioMode:(RNVPAudioMode)audioMode
                       stop:(nullable RNVPStopToken *)stop
                      error:(NSError *_Nullable __autoreleasing *)error;
 

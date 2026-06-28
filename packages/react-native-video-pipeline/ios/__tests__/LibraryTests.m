@@ -277,6 +277,11 @@ typedef NS_ENUM(NSInteger, RNVPAudioMode) {
                      toURL:(NSURL *)outputURL
                       stop:(nullable RNVPStopToken *)stop
                      error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
+                     toURL:(NSURL *)outputURL
+                 audioMode:(RNVPAudioMode)audioMode
+                      stop:(nullable RNVPStopToken *)stop
+                     error:(NSError *_Nullable __autoreleasing *)error;
 + (BOOL)remuxStampFromURL:(NSURL *)sourceURL
                     toURL:(NSURL *)outputURL
                  metadata:(nullable RNVPStampMetadata *)metadata
@@ -6929,6 +6934,75 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:replPath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+// Passthrough concat now splices each clip's audio onto the joined timeline
+// (previously concat was video-only — the #16 "audio dropped" limit). Two
+// stepped-audio clips (silent front half, tone back half) joined back-to-back
+// must carry a tone in *each* clip's back-half window; mute writes video only.
+- (void)testRemuxConcatCarriesAudioPassthroughAndMuteDrops {
+  const NSInteger kFps = 30;
+  const double kPerClip = 1.0;
+  NSError *error = nil;
+  NSString *clipA = authorSteppedAudioFixture(160, 120, kFps, 30, @"cat-a",
+                                              &error);
+  NSString *clipB = authorSteppedAudioFixture(160, 120, kFps, 30, @"cat-b",
+                                              &error);
+  XCTAssertNotNil(clipA, @"clipA author failed: %@", error);
+  XCTAssertNotNil(clipB, @"clipB author failed: %@", error);
+
+  RNVPRemuxerConcatSource *(^src)(NSString *, double) =
+      ^RNVPRemuxerConcatSource *(NSString *path, double outStart) {
+    return [[RNVPRemuxerConcatSource alloc]
+        initWithSourceURL:[NSURL fileURLWithPath:path]
+              sourceStart:0.0
+           sourceDuration:kPerClip
+              outputStart:outStart];
+  };
+  NSArray<RNVPRemuxerConcatSource *> *clips =
+      @[ src(clipA, 0.0), src(clipB, kPerClip) ];
+
+  NSString *keepPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"cat-keep-%@.mp4", NSUUID.UUID.UUIDString]];
+  NSString *mutePath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"cat-mute-%@.mp4", NSUUID.UUID.UUIDString]];
+
+  XCTAssertTrue([RNVPRemuxer remuxConcatSources:clips
+                                          toURL:[NSURL fileURLWithPath:keepPath]
+                                      audioMode:RNVPAudioModePassthrough
+                                           stop:nil
+                                          error:&error],
+                @"passthrough concat failed: %@", error);
+  XCTAssertTrue([RNVPRemuxer remuxConcatSources:clips
+                                          toURL:[NSURL fileURLWithPath:mutePath]
+                                      audioMode:RNVPAudioModeMute
+                                           stop:nil
+                                          error:&error],
+                @"mute concat failed: %@", error);
+
+  // Passthrough keeps audio; each clip's tone back-half survives on the joined
+  // timeline (clip A: [0.5,1.0); clip B: [1.5,2.0)).
+  XCTAssertGreaterThanOrEqual(audioTrackCount(keepPath), 1u,
+                              @"passthrough concat must keep audio");
+  const double aBackRMS = decodeAudioRMSWindow(keepPath, 0.6, 0.9);
+  const double bBackRMS = decodeAudioRMSWindow(keepPath, 1.6, 1.9);
+  XCTAssertGreaterThan(aBackRMS, 0.15,
+                       @"clip A's tone must survive the concat (got %.4f)",
+                       aBackRMS);
+  XCTAssertGreaterThan(bBackRMS, 0.15,
+                       @"clip B's tone must survive the concat (got %.4f) — "
+                       @"proves the second clip's audio was spliced too",
+                       bBackRMS);
+
+  XCTAssertEqual(audioTrackCount(mutePath), 0u,
+                 @"mute concat must write video only");
+
+  [[NSFileManager defaultManager] removeItemAtPath:clipA error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:clipB error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:keepPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
 }
 
 @end

@@ -786,6 +786,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           sources = sources,
           outputPath = outputPath,
           stopToken = stopToken,
+          audioMode = spec.audio?.mode ?: AudioMode.PASSTHROUGH,
         )
         // Author container metadata in a second compressed-passthrough pass
         // (location via setLocation, the rest via Mp4MetadataInjector), same as
