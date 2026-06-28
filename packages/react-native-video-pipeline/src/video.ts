@@ -249,11 +249,21 @@ function buildNativeSpecFromClipped(
 }
 
 function validateAudio(audio: NativeVideoSpec['audio']): void {
-  if (audio?.mode === 'replace') {
-    if (audio.replaceUri === undefined || audio.replaceUri === '') {
-      fail("audio.mode='replace' requires a non-empty replaceUri");
-    }
-    validateFileUri('audio.replaceUri', audio.replaceUri);
+  if (audio === undefined) return;
+  // Only 'passthrough' (keep the source audio, also the default) is wired into
+  // the native engines today. 'mute' and 'replace' are accepted by the type
+  // system but no native code reads `spec.audio` on either platform, so they
+  // used to be a silent no-op — output kept the source audio unchanged. Reject
+  // them explicitly instead of quietly lying about a documented field.
+  // Native implementation is tracked in #29; when it lands, lift this guard and
+  // restore the granular replaceUri validation below.
+  if (audio.mode === 'mute' || audio.mode === 'replace') {
+    fail(
+      `audio.mode='${audio.mode}' is not implemented yet — only 'passthrough' is ` +
+        'supported. Strip/replace audio in a separate step for now; native ' +
+        'support is tracked in https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/29',
+      { mode: audio.mode },
+    );
   }
 }
 

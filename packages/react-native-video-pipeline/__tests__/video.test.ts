@@ -338,16 +338,35 @@ describe('Video.render — validation', () => {
   // `validateNativeSpec` for the `Video.synthesize` internal path but are
   // unreachable from the public `Video.render` surface.
 
-  it("rejects audio.mode='replace' without replaceUri", async () => {
+  it("rejects audio.mode='replace' as not implemented (#11/#29)", async () => {
+    // No native code reads spec.audio yet, so replace/mute would be a silent
+    // no-op. The JS layer rejects them instead of producing output with
+    // unchanged audio. Even a well-formed replaceUri is rejected.
     await expect(
       Video.render({
         ...baseClipSpec,
-        // Cast through `unknown` — the public discriminated `AudioSpec`
-        // requires `replaceUri` on `'replace'` at compile time. The native
-        // boundary is structurally laxer, so we still defend at runtime.
-        audio: { mode: 'replace' } as unknown as RenderSpec['audio'],
+        audio: { mode: 'replace', replaceUri: 'file:///tmp/track.m4a' },
       }),
     ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it("rejects audio.mode='mute' as not implemented (#11/#29)", async () => {
+    await expect(
+      Video.render({
+        ...baseClipSpec,
+        audio: { mode: 'mute' },
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it("accepts audio.mode='passthrough' (the only wired mode)", async () => {
+    const promise = Video.render({
+      ...baseClipSpec,
+      audio: { mode: 'passthrough' },
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    fake.renderCalls[0]?.resolve();
+    await promise;
   });
 
   it('forwards a clip-based render to native and resolves', async () => {
@@ -703,14 +722,9 @@ describe('Source URI validation', () => {
     ).toThrow(InvalidSpecError);
   });
 
-  it("rejects content:// in audio.replaceUri when mode='replace'", async () => {
-    await expect(
-      Video.render({
-        ...baseClipSpec,
-        audio: { mode: 'replace', replaceUri: 'content://audio' },
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
-  });
+  // NOTE: granular audio.replaceUri validation (non-empty, file URI) is removed
+  // while replace is unimplemented — replace is rejected outright (see the
+  // "not implemented" tests above). Restore that coverage with #29.
 
   it('rejects non-file overlay uri on Video.render', () => {
     expect(() =>
