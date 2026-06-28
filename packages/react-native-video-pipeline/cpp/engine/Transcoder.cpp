@@ -29,6 +29,18 @@ std::optional<std::string> describeTranscodeRejection(
       return "transcode: transform.rotate must be one of {0, 90, 180, 270}";
     }
   }
+  if (!std::isfinite(target.sourceStart) || target.sourceStart < 0.0) {
+    return "transcode: sourceStart must be a finite, non-negative number";
+  }
+  if (target.sourceDuration.has_value() &&
+      (!std::isfinite(*target.sourceDuration) || *target.sourceDuration <= 0.0)) {
+    return "transcode: sourceDuration must be a positive finite number when "
+           "provided";
+  }
+  if (source.has_value() &&
+      target.sourceStart > source->durationSec + 1e-3) {
+    return "transcode: sourceStart is past the end of the source";
+  }
   if (target.crop.has_value()) {
     const auto& c = *target.crop;
     if (!std::isfinite(c.x) || c.x < 0.0 ||

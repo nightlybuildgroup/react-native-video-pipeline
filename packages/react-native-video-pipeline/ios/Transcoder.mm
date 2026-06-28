@@ -75,7 +75,9 @@ NSInteger defaultBitrate(NSInteger width, NSInteger height, double fps) {
                         cropX:(double)cropX
                         cropY:(double)cropY
                     cropWidth:(double)cropWidth
-                   cropHeight:(double)cropHeight {
+                   cropHeight:(double)cropHeight
+                  sourceStart:(double)sourceStart
+               sourceDuration:(double)sourceDuration {
   if ((self = [super init])) {
     _width = width;
     _height = height;
@@ -89,8 +91,38 @@ NSInteger defaultBitrate(NSInteger width, NSInteger height, double fps) {
     _cropY = cropY;
     _cropWidth = cropWidth;
     _cropHeight = cropHeight;
+    _sourceStart = sourceStart;
+    _sourceDuration = sourceDuration;
   }
   return self;
+}
+
+- (instancetype)initWithWidth:(NSInteger)width
+                       height:(NSInteger)height
+                          fps:(double)fps
+                        codec:(RNVPTranscodeCodec)codec
+                      bitrate:(NSInteger)bitrate
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                        cropX:(double)cropX
+                        cropY:(double)cropY
+                    cropWidth:(double)cropWidth
+                   cropHeight:(double)cropHeight {
+  return [self initWithWidth:width
+                      height:height
+                         fps:fps
+                       codec:codec
+                     bitrate:bitrate
+                      rotate:rotate
+                       flipH:flipH
+                       flipV:flipV
+                       cropX:cropX
+                       cropY:cropY
+                   cropWidth:cropWidth
+                  cropHeight:cropHeight
+                 sourceStart:0.0
+              sourceDuration:0.0];
 }
 
 @end
@@ -282,6 +314,24 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   const CGSize naturalSize = videoTrack.naturalSize;
   const double sourceDurationSec = CMTimeGetSeconds(asset.duration);
 
+  // Source trim window. `sourceStart` defaults to 0; `sourceDuration <= 0`
+  // means "to the end of the source". End-past-EOF is clamped (matches the
+  // remux trim leniency). When the window is the full source, `hasWindow` is
+  // NO and the reader reads everything — identical to the pre-trim behavior.
+  const double windowStart = target.sourceStart > 0.0 ? target.sourceStart : 0.0;
+  double windowDuration = target.sourceDuration > 0.0
+                              ? target.sourceDuration
+                              : (sourceDurationSec - windowStart);
+  if (windowStart + windowDuration > sourceDurationSec) {
+    windowDuration = sourceDurationSec - windowStart;
+  }
+  const BOOL hasWindow =
+      windowStart > 1e-3 ||
+      (target.sourceDuration > 0.0 && windowDuration + 1e-3 < sourceDurationSec);
+  // Duration of the encoded output, used for the progress frame-count estimate.
+  const double effectiveDurationSec = hasWindow ? windowDuration
+                                                : sourceDurationSec;
+
   // --- Validate target against source ---------------------------------------
   margelo::nitro::videopipeline::TranscodeTarget cppTarget;
   cppTarget.width = static_cast<int>(target.width);
@@ -302,6 +352,10 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
     cppTarget.crop = margelo::nitro::videopipeline::TranscodeCrop{
         target.cropX, target.cropY, target.cropWidth, target.cropHeight};
   }
+  cppTarget.sourceStart = windowStart;
+  if (target.sourceDuration > 0.0) {
+    cppTarget.sourceDuration = windowDuration;
+  }
   margelo::nitro::videopipeline::TranscodeSourceProbe probe{
       static_cast<int>(std::lround(naturalSize.width)),
       static_cast<int>(std::lround(naturalSize.height)),
@@ -321,6 +375,11 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   NSError *readerError = nil;
   AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset
                                                          error:&readerError];
+  // NOTE: we intentionally do NOT set reader.timeRange for the trim window.
+  // A timeRange both snaps its start back to the preceding sync sample *and*
+  // rebases the emitted sample PTS, which makes frame-exact gating by source
+  // PTS impossible. Instead the encode loop reads the full source and gates
+  // each decoded frame by its (un-rebased) source PTS — see the gate below.
   if (reader == nil) {
     if (error) {
       *error = readerError
@@ -486,7 +545,7 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   std::optional<margelo::nitro::videopipeline::ProgressEmitter> emitter;
   if (progressCopy != nil) {
     const double estimatedFrames =
-        std::max(1.0, std::round(sourceDurationSec * target.fps));
+        std::max(1.0, std::round(effectiveDurationSec * target.fps));
     emitter.emplace(
         [progressCopy](double framesCompleted,
                        std::optional<double> nbFrames, double elapsedMs,
@@ -616,6 +675,23 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
                                      @"state.");
       }
       break;
+    }
+    // Frame-exact trim gating. AVAssetReader's timeRange snaps its start back
+    // to a sync sample, so drop decoded frames before the window and stop once
+    // we pass the window end. `epsilon` is half a source frame so boundary PTS
+    // land inside the window. No-op when `hasWindow` is NO.
+    if (hasWindow) {
+      const double ptsSec =
+          CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample));
+      const double epsilon = 0.5 / std::max(1.0, target.fps);
+      if (ptsSec < windowStart - epsilon) {
+        CFRelease(sample);
+        continue;  // pre-roll before the window start
+      }
+      if (ptsSec >= windowStart + windowDuration - epsilon) {
+        CFRelease(sample);
+        break;  // past the window end
+      }
     }
     CVPixelBufferRef src = CMSampleBufferGetImageBuffer(sample);
     if (src == NULL) {

@@ -62,6 +62,13 @@ struct TranscodeTarget {
   bool flipH = false;
   bool flipV = false;
   std::optional<TranscodeCrop> crop;
+  /// Source trim window in seconds. `sourceStart` defaults to 0; a
+  /// `std::nullopt` `sourceDuration` means "to the end of the source". The
+  /// driver reads only samples inside [sourceStart, sourceStart+duration) and
+  /// rebases output PTS so playback starts at 0. This lets a single render
+  /// pass trim *and* transform without a separate `Video.trim` step.
+  double sourceStart = 0.0;
+  std::optional<double> sourceDuration;
 };
 
 /// Minimal source metadata the validator consults. Pass `std::nullopt` to

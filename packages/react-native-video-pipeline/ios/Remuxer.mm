@@ -117,6 +117,41 @@ CGAffineTransform flipTransformForAxis(RNVPFlipAxis axis,
   return CGAffineTransformConcat(preferred, flip);
 }
 
+// Compose `preferred → rotate → flip` into a single preferredTransform that
+// maps the source's natural-pixel frame onto a non-negative displayed frame.
+// Each step is applied in display space and the origin re-normalized to 0
+// afterward, so rotation/flip translations fall out automatically. Visual
+// order matches RNVPTranscoder's CIImage pipeline (rotate clockwise for a
+// positive @p rotateDeg, flips applied last) so the remux and transcode paths
+// agree on what "rotate 90 + flipH" looks like at playback.
+CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
+                                          CGSize naturalSize,
+                                          NSInteger rotateDeg, BOOL flipH,
+                                          BOOL flipV) {
+  const CGRect naturalRect =
+      CGRectMake(0, 0, naturalSize.width, naturalSize.height);
+  CGAffineTransform t = CGAffineTransformIdentity;
+  // Apply @p op after the accumulated transform, then translate so the mapped
+  // natural rect's origin returns to (0, 0).
+  auto step = [&](CGAffineTransform op) {
+    t = CGAffineTransformConcat(t, op);
+    const CGRect mapped = CGRectApplyAffineTransform(naturalRect, t);
+    t = CGAffineTransformConcat(
+        t, CGAffineTransformMakeTranslation(-mapped.origin.x, -mapped.origin.y));
+  };
+  step(preferred);
+  if (rotateDeg == 90 || rotateDeg == 180 || rotateDeg == 270) {
+    // CIImage / ClipTransform rotate clockwise for positive degrees; Core
+    // Graphics rotates counter-clockwise for positive radians, so negate.
+    step(CGAffineTransformMakeRotation(-static_cast<double>(rotateDeg) * M_PI /
+                                       180.0));
+  }
+  if (flipH || flipV) {
+    step(CGAffineTransformMakeScale(flipH ? -1.0 : 1.0, flipV ? -1.0 : 1.0));
+  }
+  return t;
+}
+
 } // namespace
 
 @implementation RNVPRemuxerConcatSource
@@ -416,6 +451,160 @@ CGAffineTransform flipTransformForAxis(RNVPFlipAxis axis,
                    ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
                                 @"AVAssetWriter did not reach the Completed "
                                 @"status.");
+    }
+    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    return NO;
+  }
+  return YES;
+}
+
++ (BOOL)remuxTransformFromURL:(NSURL *)sourceURL
+                        toURL:(NSURL *)outputURL
+                     startSec:(double)startSec
+                  durationSec:(double)durationSec
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                        error:(NSError *_Nullable __autoreleasing *)error {
+  if (![[NSFileManager defaultManager] fileExistsAtPath:sourceURL.path]) {
+    if (error) {
+      *error = makeError(
+          RNVPRemuxerErrorCodeNotFound,
+          [NSString stringWithFormat:@"No file at %@", sourceURL.path]);
+    }
+    return NO;
+  }
+
+  AVURLAsset *asset = [AVURLAsset assetWithURL:sourceURL];
+  NSArray<AVAssetTrack *> *videoTracks =
+      [asset tracksWithMediaType:AVMediaTypeVideo];
+  if (videoTracks.count == 0) {
+    if (error) {
+      *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                         @"Source has no video track.");
+    }
+    return NO;
+  }
+  AVAssetTrack *videoTrack = videoTracks.firstObject;
+
+  // Container-support gate — same as remuxFlip: preferredTransform is an
+  // mp4/mov track feature. Other containers route to the transcode fallback.
+  AVFileType outputType = fileTypeForOutputURL(outputURL);
+  if (![outputType isEqualToString:AVFileTypeMPEG4] &&
+      ![outputType isEqualToString:AVFileTypeQuickTimeMovie]) {
+    if (error) {
+      *error = makeError(
+          RNVPRemuxerErrorCodeInvalidSpec,
+          @"transform-remux: output container does not support a "
+          @"preferredTransform — re-encode via the transcode path.");
+    }
+    return NO;
+  }
+
+  // Resolve and validate the trim window (shared wording with the plain trim
+  // path). A durationSec <= 0 means "to the end of the source".
+  const double sourceDurationSec = CMTimeGetSeconds(asset.duration);
+  const double windowStart = startSec > 0.0 ? startSec : 0.0;
+  margelo::nitro::videopipeline::TrimSpec trim{
+      windowStart, durationSec > 0.0 ? durationSec
+                                     : (sourceDurationSec - windowStart)};
+  if (auto rejection = margelo::nitro::videopipeline::describeTrimRejection(
+          trim, std::optional<double>(sourceDurationSec));
+      rejection.has_value()) {
+    if (error) {
+      *error = makeError(RNVPRemuxerErrorCodeInvalidSpec, utf8(*rejection));
+    }
+    return NO;
+  }
+  const CMTime startTime = CMTimeMakeWithSeconds(windowStart, NSEC_PER_SEC);
+  CMTime windowDuration =
+      durationSec > 0.0
+          ? CMTimeMakeWithSeconds(durationSec, NSEC_PER_SEC)
+          : CMTimeSubtract(asset.duration, startTime);
+  if (CMTimeCompare(CMTimeAdd(startTime, windowDuration), asset.duration) > 0) {
+    windowDuration = CMTimeSubtract(asset.duration, startTime);  // clamp to EOF
+  }
+  const CMTimeRange window = CMTimeRangeMake(startTime, windowDuration);
+
+  // Build a single-clip composition so we can override the video track's
+  // preferredTransform (a raw passthrough export copies the source transform
+  // verbatim and gives us no override hook — same reason the concat path uses
+  // a composition).
+  AVMutableComposition *composition = [AVMutableComposition composition];
+  AVMutableCompositionTrack *videoCompTrack = [composition
+      addMutableTrackWithMediaType:AVMediaTypeVideo
+                  preferredTrackID:kCMPersistentTrackID_Invalid];
+  NSError *insertError = nil;
+  if (videoCompTrack == nil ||
+      ![videoCompTrack insertTimeRange:window
+                               ofTrack:videoTrack
+                                atTime:kCMTimeZero
+                                 error:&insertError]) {
+    if (error) {
+      *error = insertError
+                   ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                                @"Could not splice source video into the "
+                                @"transform composition.");
+    }
+    return NO;
+  }
+  videoCompTrack.preferredTransform = composeDisplayTransform(
+      videoTrack.preferredTransform, videoTrack.naturalSize, rotate, flipH,
+      flipV);
+
+  AVAssetTrack *audioTrack =
+      [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+  if (audioTrack != nil) {
+    AVMutableCompositionTrack *audioCompTrack = [composition
+        addMutableTrackWithMediaType:AVMediaTypeAudio
+                    preferredTrackID:kCMPersistentTrackID_Invalid];
+    [audioCompTrack insertTimeRange:window
+                            ofTrack:audioTrack
+                             atTime:kCMTimeZero
+                              error:nil];
+  }
+
+  // Passthrough export — copies compressed samples, writes the overridden
+  // transform. The composition timeline already starts at 0, so no explicit
+  // session timeRange is needed.
+  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+  AVAssetExportSession *session = [[AVAssetExportSession alloc]
+      initWithAsset:composition
+         presetName:AVAssetExportPresetPassthrough];
+  if (session == nil) {
+    if (error) {
+      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
+                         @"AVAssetExportSession refused the passthrough "
+                         @"preset for the transform remux.");
+    }
+    return NO;
+  }
+  session.outputURL = outputURL;
+  session.outputFileType = outputType;
+  session.shouldOptimizeForNetworkUse = NO;
+  session.metadata = asset.metadata;
+
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  [session exportAsynchronouslyWithCompletionHandler:^{
+    dispatch_semaphore_signal(done);
+  }];
+  const long timedOut = dispatch_semaphore_wait(
+      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)));
+  if (timedOut != 0) {
+    if (error) {
+      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
+                         @"Transform remux export did not complete within "
+                         @"60s.");
+    }
+    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    return NO;
+  }
+  if (session.status != AVAssetExportSessionStatusCompleted) {
+    if (error) {
+      *error = session.error
+                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
+                                @"Transform remux export did not reach "
+                                @"Completed.");
     }
     [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
     return NO;

@@ -258,6 +258,14 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
                    toURL:(NSURL *)outputURL
                     axis:(RNVPFlipAxis)axis
                    error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)remuxTransformFromURL:(NSURL *)sourceURL
+                        toURL:(NSURL *)outputURL
+                     startSec:(double)startSec
+                  durationSec:(double)durationSec
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                        error:(NSError *_Nullable __autoreleasing *)error;
 + (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
                      toURL:(NSURL *)outputURL
                       stop:(nullable RNVPStopToken *)stop
@@ -350,6 +358,20 @@ typedef NS_ENUM(NSInteger, RNVPTranscodeCodec) {
                         cropY:(double)cropY
                     cropWidth:(double)cropWidth
                    cropHeight:(double)cropHeight;
+- (instancetype)initWithWidth:(NSInteger)width
+                       height:(NSInteger)height
+                          fps:(double)fps
+                        codec:(RNVPTranscodeCodec)codec
+                      bitrate:(NSInteger)bitrate
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                        cropX:(double)cropX
+                        cropY:(double)cropY
+                    cropWidth:(double)cropWidth
+                   cropHeight:(double)cropHeight
+                  sourceStart:(double)sourceStart
+               sourceDuration:(double)sourceDuration;
 @end
 
 // Forward-declare RNVPImageOverlay + RNVPTextOverlay + RNVPOverlayRenderer
@@ -5892,6 +5914,249 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
     CFRelease(sb);
     idx++;
   }
+}
+
+#pragma mark - render trim + transform (remux fast path + transcode window)
+
+/// The fast remux path that `Video.render` picks for a rotation/flip-only
+/// single clip: trim window + horizontal flip in one passthrough pass. Asserts
+/// the window is honored (duration + first-frame content), the flip lands in
+/// the preferredTransform, and no re-encode happened (codec preserved).
+- (void)testRemuxTransformTrimAndFlipHorizontal
+{
+  const NSInteger kWidth = 160;
+  const NSInteger kHeight = 120;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 30;  // 1s; each frame's center R = i*4
+
+  NSError *error = nil;
+  NSString *sourcePath =
+      authorMotionFixture(kWidth, kHeight, kFps, kFrameCount, @"xform-flip",
+                          &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"xform-flip-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+  NSURL *outURL = [NSURL fileURLWithPath:outPath];
+  // Window: start at 0.5s (frame 15), keep 0.5s (15 frames).
+  XCTAssertTrue([RNVPRemuxer remuxTransformFromURL:sourceURL
+                                             toURL:outURL
+                                          startSec:0.5
+                                       durationSec:0.5
+                                            rotate:-1
+                                             flipH:YES
+                                             flipV:NO
+                                             error:&error],
+                @"remuxTransform trim+flip failed: %@", error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outPath]);
+
+  // --- preferredTransform reflects a pure horizontal flip ------------------
+  AVURLAsset *outAsset = [AVURLAsset assetWithURL:outURL];
+  AVAssetTrack *outTrack =
+      [outAsset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  XCTAssertNotNil(outTrack);
+  CGAffineTransform t = outTrack.preferredTransform;
+  XCTAssertEqualWithAccuracy(t.a, -1.0, 1e-6, @"flipH: a should be -1");
+  XCTAssertEqualWithAccuracy(t.d, 1.0, 1e-6);
+  XCTAssertEqualWithAccuracy(t.tx, (CGFloat)kWidth, 1e-3);
+
+  // --- window honored: duration ~0.5s, passthrough codec ------------------
+  RNVPAVDemuxer *srcDemuxer = [[RNVPAVDemuxer alloc] init];
+  RNVPAVDemuxer *outDemuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([srcDemuxer openAtURL:sourceURL error:&error]);
+  XCTAssertTrue([outDemuxer openAtURL:outURL error:&error]);
+  XCTAssertEqualObjects(outDemuxer.codec, srcDemuxer.codec,
+                        @"codec changed — transform remux re-encoded");
+  XCTAssertEqualWithAccuracy(outDemuxer.durationSec, 0.5, 2.0 / (double)kFps,
+                             @"trimmed output should be ~0.5s, got %.3f",
+                             outDemuxer.durationSec);
+  XCTAssertTrue([srcDemuxer closeWithError:&error]);
+  XCTAssertTrue([outDemuxer closeWithError:&error]);
+
+  // --- window start: first decoded frame's center R ~= frame 15 (= 60) -----
+  // A horizontal flip leaves the per-frame-uniform center R unchanged, so this
+  // confirms the trim landed on the window start, not frame 0.
+  NSArray<NSNumber *> *series = decodeCenterRSeries(outPath);
+  XCTAssertGreaterThan(series.count, 0u);
+  XCTAssertEqualWithAccuracy(series.firstObject.doubleValue, 15.0 * 4.0, 8.0,
+                             @"first output frame should come from ~frame 15");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// The same fast path with a rotation: trim window + rotate 90, lossless. The
+/// rotation must surface as a 90° preferredTransform (probed via the demuxer's
+/// orientation heuristic) and the window must be honored.
+- (void)testRemuxTransformTrimAndRotate90
+{
+  const NSInteger kWidth = 160;
+  const NSInteger kHeight = 120;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 30;
+
+  NSError *error = nil;
+  NSString *sourcePath =
+      authorMotionFixture(kWidth, kHeight, kFps, kFrameCount, @"xform-rot",
+                          &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"xform-rot-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+  NSURL *outURL = [NSURL fileURLWithPath:outPath];
+  XCTAssertTrue([RNVPRemuxer remuxTransformFromURL:sourceURL
+                                             toURL:outURL
+                                          startSec:0.0
+                                       durationSec:0.5
+                                            rotate:90
+                                             flipH:NO
+                                             flipV:NO
+                                             error:&error],
+                @"remuxTransform trim+rotate failed: %@", error);
+
+  // preferredTransform must be a real 90° rotation (a=d=0, |b|=|c|=1). The
+  // sign encodes direction — a clockwise rotate (matching the transcoder's
+  // ClipTransform CW convention) gives b=-1, c=+1. Asserting the matrix avoids
+  // the demuxer's lossy atan2 orientation heuristic, which labels CW-90 as
+  // 270°.
+  AVURLAsset *outAsset = [AVURLAsset assetWithURL:outURL];
+  AVAssetTrack *outTrack =
+      [outAsset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  XCTAssertNotNil(outTrack);
+  CGAffineTransform t = outTrack.preferredTransform;
+  XCTAssertEqualWithAccuracy(t.a, 0.0, 1e-6, @"rotate 90: a should be 0");
+  XCTAssertEqualWithAccuracy(t.d, 0.0, 1e-6, @"rotate 90: d should be 0");
+  XCTAssertEqualWithAccuracy(fabs(t.b), 1.0, 1e-6, @"rotate 90: |b| should be 1");
+  XCTAssertEqualWithAccuracy(fabs(t.c), 1.0, 1e-6, @"rotate 90: |c| should be 1");
+
+  RNVPAVDemuxer *srcDemuxer = [[RNVPAVDemuxer alloc] init];
+  RNVPAVDemuxer *outDemuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([srcDemuxer openAtURL:sourceURL error:&error]);
+  XCTAssertTrue([outDemuxer openAtURL:outURL error:&error]);
+  XCTAssertEqualObjects(outDemuxer.codec, srcDemuxer.codec,
+                        @"codec changed — rotate remux re-encoded");
+  XCTAssertEqualWithAccuracy(outDemuxer.durationSec, 0.5, 2.0 / (double)kFps);
+  XCTAssertTrue([srcDemuxer closeWithError:&error]);
+  XCTAssertTrue([outDemuxer closeWithError:&error]);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+/// The transcode path now honors a trim window (used by render for crop /
+/// resize / codec change combined with a trim). Crop forces the re-encode;
+/// the window must shorten the output and shift its first frame.
+- (void)testTranscodeTrimWindowProducesWindowedOutput
+{
+  const NSInteger kWidth = 160;
+  const NSInteger kHeight = 120;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 30;
+
+  NSError *error = nil;
+  NSString *sourcePath =
+      authorMotionFixture(kWidth, kHeight, kFps, kFrameCount, @"xcode-win",
+                          &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"xcode-win-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  NSString *fullPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"xcode-full-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:fullPath error:nil];
+
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+  NSURL *outURL = [NSURL fileURLWithPath:outPath];
+  NSURL *fullURL = [NSURL fileURLWithPath:fullPath];
+
+  // Crop to 80x80 forces the transcode (re-encode) path. Build two identical
+  // targets differing only in the trim window: one full-source, one windowed
+  // to [0.5s, 0.5s) — i.e. frames 15..29.
+  RNVPTranscodeTarget *(^makeTarget)(double, double) =
+      ^RNVPTranscodeTarget *(double start, double dur) {
+    return [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                               height:80
+                                                  fps:(double)kFps
+                                                codec:RNVPTranscodeCodecH264
+                                              bitrate:0
+                                               rotate:-1
+                                                flipH:NO
+                                                flipV:NO
+                                                cropX:0
+                                                cropY:0
+                                            cropWidth:80
+                                           cropHeight:80
+                                          sourceStart:start
+                                       sourceDuration:dur];
+  };
+
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:fullURL
+                                          target:makeTarget(0.0, 0.0)
+                                        overlays:nil
+                                        metadata:nil
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"full-source transcode failed: %@", error);
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:outURL
+                                          target:makeTarget(0.5, 0.5)
+                                        overlays:nil
+                                        metadata:nil
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"windowed transcode failed: %@", error);
+
+  RNVPAVDemuxer *outDemuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([outDemuxer openAtURL:outURL error:&error]);
+  XCTAssertEqual(outDemuxer.width, 80);
+  XCTAssertEqual(outDemuxer.height, 80);
+  XCTAssertEqualWithAccuracy(outDemuxer.durationSec, 0.5, 3.0 / (double)kFps,
+                             @"windowed transcode should be ~0.5s, got %.3f",
+                             outDemuxer.durationSec);
+  XCTAssertTrue([outDemuxer closeWithError:&error]);
+
+  // Frame-exact trim: the windowed output's first frame must match the
+  // full-source output's frame 15 (both double-encoded, so absolute R values
+  // are comparable — robust to the color shift that one extra encode adds).
+  NSArray<NSNumber *> *fullSeries = decodeCenterRSeries(fullPath);
+  NSArray<NSNumber *> *winSeries = decodeCenterRSeries(outPath);
+  XCTAssertEqual(fullSeries.count, (NSUInteger)kFrameCount,
+                 @"full transcode should emit every source frame");
+  XCTAssertEqualWithAccuracy((double)winSeries.count, 15.0, 2.0,
+                             @"windowed transcode should emit ~15 frames");
+  XCTAssertGreaterThan(fullSeries.count, (NSUInteger)15);
+  // The windowed output's first frame is re-encoded as a keyframe, so its
+  // decoded value differs slightly from the same source frame sitting deep in
+  // the full output's GOP — compare with a tolerance that absorbs that, while
+  // still pinning the start to ~frame 15 (the monotonic R series means a wrong
+  // start frame would miss by far more than this band).
+  XCTAssertEqualWithAccuracy(winSeries.firstObject.doubleValue,
+                             fullSeries[15].doubleValue, 8.0,
+                             @"windowed first frame should match full frame 15");
+  // And it must be clearly past frame 0 — proves the window moved the start.
+  XCTAssertGreaterThan(
+      fabs(winSeries.firstObject.doubleValue - fullSeries[0].doubleValue), 12.0,
+      @"windowed first frame should differ clearly from frame 0");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:fullPath error:nil];
 }
 
 @end

@@ -84,6 +84,12 @@ typedef NS_ENUM(NSInteger, RNVPTranscodeCodec) {
 @property(nonatomic, readonly) double cropY;
 @property(nonatomic, readonly) double cropWidth;
 @property(nonatomic, readonly) double cropHeight;
+/// Source trim window, seconds. @c sourceStart defaults to 0; a
+/// @c sourceDuration <= 0 means "to the end of the source". The driver reads
+/// only samples inside [sourceStart, sourceStart+duration) and rebases output
+/// PTS to start at 0 — so one transcode pass can trim *and* transform.
+@property(nonatomic, readonly) double sourceStart;
+@property(nonatomic, readonly) double sourceDuration;
 
 - (instancetype)initWithWidth:(NSInteger)width
                        height:(NSInteger)height
@@ -96,7 +102,26 @@ typedef NS_ENUM(NSInteger, RNVPTranscodeCodec) {
                         cropX:(double)cropX
                         cropY:(double)cropY
                     cropWidth:(double)cropWidth
-                   cropHeight:(double)cropHeight NS_DESIGNATED_INITIALIZER;
+                   cropHeight:(double)cropHeight
+                  sourceStart:(double)sourceStart
+               sourceDuration:(double)sourceDuration NS_DESIGNATED_INITIALIZER;
+
+/// Convenience initializer that transcodes the whole source — equivalent to
+/// the designated initializer with @c sourceStart = 0 and @c sourceDuration =
+/// 0 ("to the end of the source"). Retained so existing call sites that don't
+/// need a trim window stay unchanged.
+- (instancetype)initWithWidth:(NSInteger)width
+                       height:(NSInteger)height
+                          fps:(double)fps
+                        codec:(RNVPTranscodeCodec)codec
+                      bitrate:(NSInteger)bitrate
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                        cropX:(double)cropX
+                        cropY:(double)cropY
+                    cropWidth:(double)cropWidth
+                   cropHeight:(double)cropHeight;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

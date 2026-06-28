@@ -293,11 +293,17 @@ std::optional<std::string> describeConcatBranchRejection(const VideoSpec& spec) 
 // True when @p clip carries any transform field that would require the
 // transcode path (any one of rotate / flipH / flipV / crop set to a
 // non-default value).
-bool clipHasAnyTransform(const Clip& clip) {
+// Crop re-cuts the pixel grid, so it can only be honored by the transcode
+// (re-encode) path. Rotation and flip, by contrast, are container-transform
+// operations that the remux path expresses losslessly via preferredTransform.
+bool clipHasCrop(const Clip& clip) {
+  return clip.transform.has_value() && clip.transform->crop.has_value();
+}
+bool clipHasRotateOrFlip(const Clip& clip) {
   if (!clip.transform.has_value()) return false;
   const auto& t = *clip.transform;
   return t.rotate.has_value() || t.flipH.value_or(false) ||
-         t.flipV.value_or(false) || t.crop.has_value();
+         t.flipV.value_or(false);
 }
 
 // True when the caller's @c output section asks for encoder-side changes:
@@ -312,9 +318,9 @@ bool outputAsksForReencode(const OutputSpec& output) {
 // Returns a description of why the single-clip transcode branch cannot be
 // served, or std::nullopt when the spec is acceptable. v0.1 scope:
 //   - exactly one clip (multi-clip transcode lands in a later task),
-//   - the clip covers the full source (sourceStart = 0, sourceDuration
-//     matches the source duration within 1 ms). Trim+transcode is deferred;
-//     callers needing a window should @c Video.trim first.
+//   - a trim window (sourceStart / sourceDuration) is allowed — the transcoder
+//     restricts its reader to that range and rebases output PTS, so render can
+//     trim and transform (crop / resize / re-encode) in a single pass.
 //   - no overlays (T034/T035),
 //   - output.width/height/fps all finite positive when set.
 std::optional<std::string> describeTranscodeBranchRejection(
@@ -330,13 +336,11 @@ std::optional<std::string> describeTranscodeBranchRejection(
   // RNVPOverlayRenderer; no per-kind rejection needed here. Worklet overlays
   // are not part of NativeOverlay and never reach this validator.
   const auto& clip = (*spec.clips)[0];
-  if (clip.sourceStart > 1e-3) {
-    return "trim + transcode is not wired yet — call Video.trim before "
-           "Video.render";
-  }
-  if (clip.sourceDuration + 1e-3 < sourceDurationSec) {
-    return "trim + transcode is not wired yet — call Video.trim before "
-           "Video.render";
+  // A trim window (sourceStart / sourceDuration) is now honored by the
+  // transcoder via reader.timeRange, so it is no longer rejected here. Bound
+  // the window to the source: a start past EOF is unusable.
+  if (clip.sourceStart > sourceDurationSec + 1e-3) {
+    return "transcode: sourceStart is past the end of the source";
   }
   if (clip.outputStart > 1e-3) {
     return "outputStart must be 0 on a single-clip render";
@@ -411,7 +415,9 @@ RNVPTranscodeTarget* buildTranscodeTarget(const VideoSpec& spec,
                                               cropX:cropX
                                               cropY:cropY
                                           cropWidth:cropWidth
-                                         cropHeight:cropHeight];
+                                         cropHeight:cropHeight
+                                        sourceStart:clip.sourceStart
+                                     sourceDuration:clip.sourceDuration];
 }
 
 // Flatten one nitro NativeOverlay (@c ImageOverlay or @c TextOverlay) into
@@ -694,10 +700,13 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     const bool single = spec.clips->size() == 1;
     const bool hasOverlays =
         spec.overlays.has_value() && !spec.overlays->empty();
-    const bool needsReencode =
-        single && (clipHasAnyTransform((*spec.clips)[0]) ||
+    // Crop, an output-side re-encode (width/height/fps/codec/bitrate), or any
+    // overlay forces the transcode path. Rotation/flip alone do NOT — they take
+    // the fast remux-transform path below, which also carries any trim window.
+    const bool needsTranscode =
+        single && (clipHasCrop((*spec.clips)[0]) ||
                    outputAsksForReencode(spec.output) || hasOverlays);
-    if (needsReencode) {
+    if (needsTranscode) {
       // Probe the source so the transcode-branch validator can enforce the
       // "full-source-only" window and so the target inherits unspecified
       // dimensions from the source. Probe failure routes straight to a
@@ -780,6 +789,68 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
           throw std::runtime_error(std::string("VideoPipeline.render "
                                                 "transcode failed: ") +
+                                   desc);
+        }
+      });
+    }
+
+    // Fast remux path: single-clip rotation/flip-only (optionally windowed).
+    // preferredTransform carries the rotation/flip and the composition carries
+    // the trim window — no pixels are re-encoded, so trim + flip stays as cheap
+    // as a plain trim.
+    if (single && clipHasRotateOrFlip((*spec.clips)[0])) {
+      const auto& clip = (*spec.clips)[0];
+      NSInteger rotate = -1;
+      BOOL flipH = NO;
+      BOOL flipV = NO;
+      if (clip.transform.has_value()) {
+        const auto& t = *clip.transform;
+        if (t.rotate.has_value()) {
+          rotate = static_cast<NSInteger>(std::lround(*t.rotate));
+        }
+        flipH = t.flipH.value_or(false) ? YES : NO;
+        flipV = t.flipV.value_or(false) ? YES : NO;
+      }
+      NSURL* clipURL = urlFromUri(clip.uri);
+      NSURL* outputURLTransform = urlFromUri(spec.output.path);
+      const double startSec = clip.sourceStart;
+      const double durationSec = clip.sourceDuration;
+
+      const std::string transformTokenCopy = renderToken;
+      std::shared_ptr<StopToken> transformStop =
+          !renderToken.empty()
+              ? RenderTokenRegistry::registerToken(renderToken)
+              : std::make_shared<StopToken>();
+      RNVPStopToken* transformRunnerToken =
+          [RNVPStopToken tokenFromSharedPtr:transformStop];
+      NSString* transformJournalToken =
+          !renderToken.empty()
+              ? [NSString stringWithUTF8String:renderToken.c_str()]
+              : internalJournalToken("render-transform");
+      NSString* transformOutputPath =
+          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      RNVPBackgroundTaskGuard* transformGuard =
+          [RNVPBackgroundTaskGuard beginWithTokenId:transformJournalToken
+                                         outputPath:transformOutputPath
+                                          stopToken:transformRunnerToken];
+      return Promise<void>::async(
+          [clipURL, outputURLTransform, startSec, durationSec, rotate, flipH,
+           flipV, transformTokenCopy, transformGuard]() {
+        NSError* err = nil;
+        const BOOL ok = [RNVPRemuxer remuxTransformFromURL:clipURL
+                                                     toURL:outputURLTransform
+                                                  startSec:startSec
+                                               durationSec:durationSec
+                                                    rotate:rotate
+                                                     flipH:flipH
+                                                     flipV:flipV
+                                                     error:&err];
+        RenderTokenRegistry::unregisterToken(transformTokenCopy);
+        [transformGuard end];
+        if (!ok) {
+          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          throw std::runtime_error(std::string("VideoPipeline.render "
+                                                "transform remux failed: ") +
                                    desc);
         }
       });
