@@ -272,19 +272,18 @@ internal object TransformerRunner {
       )
     }
 
-    if (spec.outWidth != null && spec.outHeight != null) {
-      effects.add(
-        Presentation.createForWidthAndHeight(
-          spec.outWidth, spec.outHeight, Presentation.LAYOUT_SCALE_TO_FIT
-        )
-      )
-    } else if (spec.overlays.isNotEmpty() && spec.outCanvasW > 0 && spec.outCanvasH > 0) {
-      // Overlays always re-encode (no transmux to lose), so pin the resolved
-      // canvas — `output.width ?: fallback`, `output.height ?: fallback`,
-      // matching iOS's transcode-target sizing. This both honors a single
-      // requested dimension and guarantees the overlay anchor/size are relative
-      // to the actual output frame (Presentation == natural size = no-op resize
-      // when neither dimension is pinned).
+    // Pin the output canvas via Presentation whenever the output size is
+    // constrained: both dimensions pinned, a *single* dimension pinned (the
+    // fallback fills the other axis from content size, swapped for a quarter-turn
+    // rotation), or overlays present (anchored to the output frame). The router
+    // resolves `outCanvasW`/`outCanvasH` to `output.width ?: fallbackW` and
+    // `output.height ?: fallbackH`, mirroring iOS makeTranscodeTarget, so a
+    // single requested dimension produces a concrete output here too instead of
+    // being silently dropped. Skipped when nothing constrains the size (no dims,
+    // no overlays — e.g. flip/rotate-only), preserving the transmux fast path:
+    // a single dimension already forces a re-encode, so there is none to lose.
+    val pinCanvas = spec.outWidth != null || spec.outHeight != null || spec.overlays.isNotEmpty()
+    if (pinCanvas && spec.outCanvasW > 0 && spec.outCanvasH > 0) {
       effects.add(
         Presentation.createForWidthAndHeight(
           spec.outCanvasW, spec.outCanvasH, Presentation.LAYOUT_SCALE_TO_FIT

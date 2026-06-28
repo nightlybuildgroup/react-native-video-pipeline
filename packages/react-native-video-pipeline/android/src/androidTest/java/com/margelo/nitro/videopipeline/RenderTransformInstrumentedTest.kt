@@ -157,26 +157,39 @@ class RenderTransformInstrumentedTest {
     outWidth: Int? = null,
     outHeight: Int? = null,
     fps: Double? = null,
-  ) = TransformerRunner.Spec(
-    sourceUri = src,
-    outputPath = out,
-    sourceWidth = width,
-    sourceHeight = height,
-    startSec = startSec,
-    durationSec = durationSec,
-    rotate = rotate,
-    flipH = flipH,
-    flipV = flipV,
-    cropX = 0.0,
-    cropY = 0.0,
-    cropW = cropW,
-    cropH = cropH,
-    outWidth = outWidth,
-    outHeight = outHeight,
-    fps = fps,
-    hevc = false,
-    bitrate = null,
-  )
+  ): TransformerRunner.Spec {
+    // Resolve the output canvas exactly as the render router does
+    // (HybridVideoPipeline.renderTranscodeSingle): pinned dims win, otherwise
+    // the crop rect (or source), swapped for a quarter-turn rotation. This is
+    // what makes a single requested dimension fall back on the other axis.
+    val swapDims = rotate == 90 || rotate == 270
+    val contentW = if (cropW > 0.0) cropW.toInt() else width
+    val contentH = if (cropH > 0.0) cropH.toInt() else height
+    val canvasW = outWidth ?: if (swapDims) contentH else contentW
+    val canvasH = outHeight ?: if (swapDims) contentW else contentH
+    return TransformerRunner.Spec(
+      sourceUri = src,
+      outputPath = out,
+      sourceWidth = width,
+      sourceHeight = height,
+      startSec = startSec,
+      durationSec = durationSec,
+      rotate = rotate,
+      flipH = flipH,
+      flipV = flipV,
+      cropX = 0.0,
+      cropY = 0.0,
+      cropW = cropW,
+      cropH = cropH,
+      outWidth = outWidth,
+      outHeight = outHeight,
+      fps = fps,
+      hevc = false,
+      bitrate = null,
+      outCanvasW = canvasW,
+      outCanvasH = canvasH,
+    )
+  }
 
   @Test
   fun fpsDownsampleDropsFrames() {
@@ -226,6 +239,33 @@ class RenderTransformInstrumentedTest {
     val (w, h) = displayedDimensions(out)
     assertTrue("rotated to portrait (displayed ${w}x$h)", h > w)
     assertTrue("windowed duration ~0.5s (got ${durationSec(out)})", abs(durationSec(out) - 0.5) < 0.15)
+  }
+
+  /// Regression for #24: a single output dimension (width XOR height) used to be
+  /// silently ignored on the non-overlay path (Presentation was only added when
+  /// BOTH dims were pinned), so the output stayed source-sized. It must now honor
+  /// the requested axis and fall back on the other (stretch), matching iOS.
+  @Test
+  fun singleOutputWidthResizesAndFallsBackOnHeight() {
+    val src = synthFixture("out-w-only")
+    val out = File(ctx.cacheDir, "xform-out-w-only.mp4").absolutePath
+    // Request width=80 only on a 160x120 source. Height falls back to source
+    // (120). Media3 may align to even dims, so allow ±2px.
+    TransformerRunner.run(ctx, spec(src, out, outWidth = 80), stopToken = null, progress = null)
+    val (w, h) = dimensions(out)
+    assertTrue("requested width honored ~80 (got $w)", abs(w - 80) <= 2)
+    assertTrue("height falls back to source ~120 (got $h)", abs(h - 120) <= 2)
+  }
+
+  @Test
+  fun singleOutputHeightResizesAndFallsBackOnWidth() {
+    val src = synthFixture("out-h-only")
+    val out = File(ctx.cacheDir, "xform-out-h-only.mp4").absolutePath
+    // Request height=60 only on a 160x120 source. Width falls back to source (160).
+    TransformerRunner.run(ctx, spec(src, out, outHeight = 60), stopToken = null, progress = null)
+    val (w, h) = dimensions(out)
+    assertTrue("width falls back to source ~160 (got $w)", abs(w - 160) <= 2)
+    assertTrue("requested height honored ~60 (got $h)", abs(h - 60) <= 2)
   }
 
   @Test
