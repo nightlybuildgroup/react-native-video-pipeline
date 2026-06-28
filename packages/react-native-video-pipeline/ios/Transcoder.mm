@@ -251,8 +251,16 @@ BOOL pumpAudioPassthrough(
     // Failed state (which pins readiness at NO forever). A slow encoder is
     // legitimate and must not be killed.
     while (!audioInput.readyForMoreMediaData &&
-           writer.status != AVAssetWriterStatusFailed) {
+           writer.status != AVAssetWriterStatusFailed &&
+           !(stop && stop->abortRequested())) {
       [NSThread sleepForTimeInterval:0.001];
+    }
+    if (stop && stop->abortRequested()) {
+      if (error) {
+        *error = makeError(RNVPTranscoderErrorCodeCancelled,
+                           @"Transcode aborted during the audio pass.");
+      }
+      return NO;
     }
     if (!audioInput.readyForMoreMediaData) {
       if (error) {

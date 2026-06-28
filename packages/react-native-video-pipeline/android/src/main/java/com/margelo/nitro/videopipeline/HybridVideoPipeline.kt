@@ -911,9 +911,14 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             outCanvasH = canvasH,
             removeAudio = spec.audio?.mode == AudioMode.MUTE,
             audioReplacementUri = replaceUri,
-            // Output video duration, so a longer replacement soundtrack is
-            // clipped instead of extending the export with an audio-only tail.
-            outputDurationSec = if (isRealTrim) clip.sourceDuration else info.durationSec,
+            // Effective output video duration (a trim is clamped to the source
+            // EOF), so a longer replacement soundtrack is clipped instead of
+            // extending the export with an audio-only tail.
+            outputDurationSec = if (isRealTrim) {
+              minOf(clip.sourceDuration, info.durationSec - clip.sourceStart).coerceAtLeast(0.0)
+            } else {
+              info.durationSec
+            },
           ),
           stopToken = stopToken,
           progress = wrapTransformerProgress(onProgress),

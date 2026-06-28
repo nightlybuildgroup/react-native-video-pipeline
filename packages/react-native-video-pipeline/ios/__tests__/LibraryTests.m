@@ -7181,6 +7181,22 @@ static NSUInteger audioTrackCount(NSString *path) {
                  @"replace with a no-audio replacement must fail");
   XCTAssertNotNil(err, @"a failed replace must report an error");
 
+  // The composition-path transform-remux must fail the same way (not silently
+  // emit video-only).
+  NSError *xfErr = nil;
+  XCTAssertFalse([RNVPRemuxer remuxTransformFromURL:[NSURL fileURLWithPath:sourcePath]
+                                              toURL:[NSURL fileURLWithPath:outPath]
+                                           startSec:0.0
+                                        durationSec:0.0
+                                             rotate:90
+                                              flipH:NO
+                                              flipV:NO
+                                          audioMode:RNVPAudioModeReplace
+                                audioReplacementURL:[NSURL fileURLWithPath:videoOnly]
+                                              error:&xfErr],
+                 @"transform replace with a no-audio replacement must fail");
+  XCTAssertNotNil(xfErr, @"a failed transform replace must report an error");
+
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:videoOnly error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];

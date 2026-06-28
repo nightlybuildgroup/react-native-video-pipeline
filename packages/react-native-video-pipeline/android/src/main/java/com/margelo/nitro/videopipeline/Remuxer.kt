@@ -185,7 +185,10 @@ internal object Remuxer {
         if (!File(p).exists()) {
           throw RemuxerException("concat: audio replacement file not found at $p")
         }
-        replacementExtractor = MediaExtractor().apply { setDataSource(p) }
+        // Assign before setDataSource so a throwing setDataSource still leaves
+        // the extractor referenced for the finally to release.
+        replacementExtractor = MediaExtractor()
+        replacementExtractor.setDataSource(p)
       }
       val videoIndexes = extractors.map { selectVideoIndex(it) }
       val sharedFormat = enforceSharedSignature(extractors, videoIndexes, resolvedPaths)
