@@ -219,7 +219,8 @@ CIImage *applyTranscodePipeline(CIImage *sourceImage,
 }
 
 // Pump audio samples from @p audioOutput into @p audioInput, compressed
-// passthrough. Bounded-wait ready-spin mirrors the remux pumper.
+// passthrough. The ready-wait has no wall-clock deadline (issue #32); it
+// escapes only on writer.status == Failed, mirroring the remux pumper.
 //
 // On a trim window (@p hasWindow == YES) the audio is read from a dedicated
 // reader whose timeRange is already bounded to the window (see the caller), so
