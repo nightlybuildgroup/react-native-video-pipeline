@@ -159,8 +159,15 @@ hand-rolled MediaCodec/EOS plumbing:
 - **Crop / rotate / flip** → `Effects`: `Crop` (source-pixel rect mapped to
   NDC), `ScaleAndRotateTransformation` (rotation is clockwise per the public
   contract → negated for Media3; flips are scale ±1).
-- **Explicit output size** → `Presentation`; otherwise Media3 derives it (a 90°
-  rotation yields portrait output without the caller pinning dimensions).
+- **Explicit output size** → `Presentation`. Either dimension alone is enough:
+  the router resolves `(output.width ?: fallbackW, output.height ?: fallbackH)`
+  where the fallback is the crop rect (or source), swapped for a quarter-turn
+  rotation — so a single requested dimension stretches that axis and keeps the
+  other at content size, matching iOS `makeTranscodeTarget`. When neither
+  dimension is pinned (and there is no overlay), no `Presentation` is added and
+  Media3 derives the size (a 90° rotation yields portrait output without the
+  caller pinning dimensions). A single dimension already forces a re-encode, so
+  honoring it never costs the transmux fast path.
 - **Target fps** → `FrameDropEffect` when `output.fps` is **below** the source
   rate. Media3 has no frame interpolation, so it can only drop frames: a target
   equal to the source is a no-op, and a target *above* the source rate is
