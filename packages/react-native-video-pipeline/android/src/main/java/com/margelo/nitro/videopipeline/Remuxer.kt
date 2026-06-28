@@ -183,6 +183,13 @@ internal object Remuxer {
       val audioIndexes = extractors.map { selectTracks(it).audioIndex }
       val firstAudioClip =
         if (audioMode == AudioMode.MUTE) -1 else audioIndexes.indexOfFirst { it >= 0 }
+      // The joined timeline uses a single output audio track, so every clip
+      // that carries audio must share its format (a MediaMuxer track can hold
+      // only one). Reject mismatches up front with a clear error rather than
+      // letting writeSampleData fail late and leave a corrupt track.
+      if (firstAudioClip >= 0) {
+        enforceSharedAudioSignature(extractors, audioIndexes)
+      }
 
       File(outputPath).apply { if (exists()) delete() }
       val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
@@ -448,6 +455,40 @@ internal object Remuxer {
       }
     }
     return firstFormat
+  }
+
+  /// Enforce a shared audio format across every concat clip that carries audio
+  /// (clips without audio are skipped — they leave a silent gap). The joined
+  /// timeline muxes into one audio track, which can hold only a single format,
+  /// so a mismatch is rejected up front instead of failing late at
+  /// writeSampleData with a corrupt/unplayable track.
+  private fun enforceSharedAudioSignature(
+    extractors: List<MediaExtractor>,
+    audioIndexes: List<Int>,
+  ) {
+    fun intOrNull(format: MediaFormat, key: String): Int? =
+      if (format.containsKey(key)) format.getInteger(key) else null
+
+    val withAudio = audioIndexes.withIndex().filter { it.value >= 0 }
+    if (withAudio.size < 2) return
+    val firstFmt = extractors[withAudio[0].index].getTrackFormat(withAudio[0].value)
+    val firstMime = firstFmt.getString(MediaFormat.KEY_MIME) ?: "?"
+    val firstRate = intOrNull(firstFmt, MediaFormat.KEY_SAMPLE_RATE)
+    val firstChannels = intOrNull(firstFmt, MediaFormat.KEY_CHANNEL_COUNT)
+    for (entry in withAudio.drop(1)) {
+      val fmt = extractors[entry.index].getTrackFormat(entry.value)
+      val mime = fmt.getString(MediaFormat.KEY_MIME) ?: "?"
+      val rate = intOrNull(fmt, MediaFormat.KEY_SAMPLE_RATE)
+      val channels = intOrNull(fmt, MediaFormat.KEY_CHANNEL_COUNT)
+      if (mime != firstMime || rate != firstRate || channels != firstChannels) {
+        throw InvalidSpecException(
+          "concat: clip[${entry.index}] audio format ($mime ${rate}Hz ${channels}ch) " +
+            "differs from clip[${withAudio[0].index}] ($firstMime ${firstRate}Hz ${firstChannels}ch) — " +
+            "a single concat output audio track needs a shared format; the " +
+            "transcode fallback lands in a later task"
+        )
+      }
+    }
   }
 
   private fun validateConcatTimeline(sources: List<ConcatSource>) {

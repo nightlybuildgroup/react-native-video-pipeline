@@ -787,12 +787,10 @@ NSString *fourCCString(FourCharCode code) {
   // only; passthrough splices each clip's own audio onto the same timeline. A
   // clip without an audio track leaves a silent gap (the composition advances
   // the cursor regardless), so a mixed audio/no-audio concat stays in sync.
-  AVMutableCompositionTrack *compositionAudioTrack =
-      audioMode == RNVPAudioModeMute
-          ? nil
-          : [composition
-                addMutableTrackWithMediaType:AVMediaTypeAudio
-                            preferredTrackID:kCMPersistentTrackID_Invalid];
+  // Created lazily on the first real audio segment so an all-video-only concat
+  // emits zero audio tracks.
+  const BOOL wantAudio = audioMode != RNVPAudioModeMute;
+  AVMutableCompositionTrack *compositionAudioTrack = nil;
 
   CMTime cursor = kCMTimeZero;
   for (NSUInteger i = 0; i < sources.count; i++) {
@@ -818,17 +816,32 @@ NSString *fourCCString(FourCharCode code) {
       }
       return NO;
     }
-    // Splice the clip's audio over the same window. Best-effort: a clip with no
-    // audio (or a failed insert) just leaves silence for its span rather than
-    // failing the whole concat.
-    if (compositionAudioTrack != nil) {
+    // Splice the clip's audio over the same window. Clamp the requested range
+    // to the audio track's own available range: audio tracks routinely end a
+    // few ms before/after the video, and an over-long insertTimeRange would
+    // fail (silently dropping the clip's audio). Best-effort: a clip with no
+    // audio just leaves silence for its span, keeping later clips in sync.
+    if (wantAudio) {
       AVAssetTrack *clipAudio =
           [assets[i] tracksWithMediaType:AVMediaTypeAudio].firstObject;
       if (clipAudio != nil) {
-        [compositionAudioTrack insertTimeRange:range
-                                       ofTrack:clipAudio
-                                        atTime:cursor
-                                         error:nil];
+        const CMTime audioEnd = CMTimeRangeGetEnd(clipAudio.timeRange);
+        CMTime insertDuration = clipDuration;
+        if (CMTimeCompare(CMTimeAdd(clipStart, clipDuration), audioEnd) > 0) {
+          insertDuration = CMTimeSubtract(audioEnd, clipStart);
+        }
+        if (CMTimeCompare(insertDuration, kCMTimeZero) > 0) {
+          if (compositionAudioTrack == nil) {
+            compositionAudioTrack = [composition
+                addMutableTrackWithMediaType:AVMediaTypeAudio
+                            preferredTrackID:kCMPersistentTrackID_Invalid];
+          }
+          [compositionAudioTrack
+              insertTimeRange:CMTimeRangeMake(clipStart, insertDuration)
+                      ofTrack:clipAudio
+                       atTime:cursor
+                        error:nil];
+        }
       }
     }
     cursor = CMTimeAdd(cursor, clipDuration);
