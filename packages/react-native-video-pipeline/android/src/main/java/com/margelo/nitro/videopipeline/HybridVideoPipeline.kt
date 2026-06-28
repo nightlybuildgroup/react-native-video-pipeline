@@ -836,13 +836,23 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           )
 
         // Resolve overlays (decode bitmaps / rasterize text) on the worker.
-        // TransformerRunner takes ownership and recycles the bitmaps on exit.
-        val resolvedOverlays = spec.overlays?.map { ov ->
-          when (ov) {
-            is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
-            is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
+        // TransformerRunner takes ownership and recycles the bitmaps once run()
+        // returns; if resolving a later overlay throws first, recycle the ones
+        // already decoded here so they don't leak.
+        val resolvedOverlays = ArrayList<Transcoder.ResolvedOverlay>()
+        try {
+          spec.overlays?.forEach { ov ->
+            resolvedOverlays.add(
+              when (ov) {
+                is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
+                is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
+              }
+            )
           }
-        } ?: emptyList()
+        } catch (t: Throwable) {
+          resolvedOverlays.forEach { runCatching { it.bitmap.recycle() } }
+          throw t
+        }
 
         // Output canvas the overlays are anchored/scaled against = the final
         // frame size after crop/rotate/presentation. Pinned dims win; otherwise
@@ -926,12 +936,16 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       // than failing the whole render.
       android.util.Log.w(
         "HybridVideoPipeline",
-        "render metadata pass failed; keeping the un-stamped output",
+        "render metadata pass failed; restoring the un-stamped output",
         t,
       )
       out.delete()
-      runCatching { if (tmp.exists()) tmp.renameTo(out) }
+      val restored = runCatching { tmp.renameTo(out) }.getOrDefault(false) ||
+        runCatching { tmp.copyTo(out, overwrite = true); true }.getOrDefault(false)
       tmp.delete()
+      // If we couldn't get the valid render back to outputPath, the output is
+      // genuinely gone — surface the failure instead of reporting success.
+      if (!restored) throw t
     }
   }
 

@@ -278,6 +278,18 @@ internal object TransformerRunner {
           spec.outWidth, spec.outHeight, Presentation.LAYOUT_SCALE_TO_FIT
         )
       )
+    } else if (spec.overlays.isNotEmpty() && spec.outCanvasW > 0 && spec.outCanvasH > 0) {
+      // Overlays always re-encode (no transmux to lose), so pin the resolved
+      // canvas — `output.width ?: fallback`, `output.height ?: fallback`,
+      // matching iOS's transcode-target sizing. This both honors a single
+      // requested dimension and guarantees the overlay anchor/size are relative
+      // to the actual output frame (Presentation == natural size = no-op resize
+      // when neither dimension is pinned).
+      effects.add(
+        Presentation.createForWidthAndHeight(
+          spec.outCanvasW, spec.outCanvasH, Presentation.LAYOUT_SCALE_TO_FIT
+        )
+      )
     }
 
     // Overlays composite last, on top of the transformed + resized frame, so

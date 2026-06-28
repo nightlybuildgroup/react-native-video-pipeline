@@ -119,6 +119,19 @@ class RenderTransformInstrumentedTest {
     }
   }
 
+  /// The center pixel of the first decoded frame. Used to assert an overlay was
+  /// actually composited at its anchor.
+  private fun centerPixel(path: String): Int {
+    val r = MediaMetadataRetriever()
+    return try {
+      r.setDataSource(path)
+      val bmp = r.getFrameAtIndex(0) ?: error("no frame 0 in $path")
+      bmp.getPixel(bmp.width / 2, bmp.height / 2)
+    } finally {
+      runCatching { r.release() }
+    }
+  }
+
   private fun trackMimes(path: String): List<String> {
     val ex = MediaExtractor()
     return try {
@@ -260,6 +273,16 @@ class RenderTransformInstrumentedTest {
     assertTrue(
       "windowed duration ~0.5s (got ${durationSec(out)})",
       abs(durationSec(out) - 0.5) < 0.2,
+    )
+    // The opaque red overlay is anchored at the frame center (0.5, 0.5), so the
+    // center pixel must be red-dominant — proving the overlay is actually
+    // composited (not just that the file was produced).
+    val center = centerPixel(out)
+    assertTrue(
+      "center pixel is red (overlay composited) got #${Integer.toHexString(center)}",
+      Color.red(center) > 120 &&
+        Color.red(center) > Color.green(center) &&
+        Color.red(center) > Color.blue(center),
     )
   }
 
