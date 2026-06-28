@@ -2,12 +2,15 @@
 
 `Video.render` is the full-spec engine. For single-clip edits it doubles as the place to **trim and transform at the same time** — something `Video.trim` deliberately doesn't do (it stays a pure lossless cut).
 
-The native router picks the cheapest path automatically, and it does so **identically on iOS and Android**:
+You describe *what* you want; the native router picks the cheapest path that works on each platform and **produces the correct output on both**. Source audio is preserved, and a trim window composes with the transform in the same pass. The path differs only in speed/quality:
 
-- rotation-only transform → **remux** (lossless, no re-encode)
-- `flipH` / `flipV` / `crop` → **transcode** (re-encode)
+| transform | iOS | Android |
+| --- | --- | --- |
+| `rotate` | remux (lossless, fast) | transcode (re-encode) |
+| `flipH` / `flipV` | remux (lossless, fast) | transcode (re-encode) |
+| `crop` | transcode (re-encode) | transcode (re-encode) |
 
-So you describe *what* you want; the library decides remux vs transcode. No per-platform branching in your code.
+(Android's container can't store a mirror, and bakes rotation into pixels in the same pass — so it re-encodes for any transform. iOS expresses rotation/flip losslessly in the container transform.)
 
 ## Trim + horizontal flip
 
@@ -30,11 +33,11 @@ await Video.render({
 });
 ```
 
-Because `flipH` touches pixels, this routes to **transcode** on both platforms. (A standalone flip with no trim can stay on the cheaper `Video.flip` remux path on iOS — see [`flip.md`](./flip.md).)
+On iOS this is a lossless **remux** (the flip lives in the container transform); on Android it **transcodes** (the container can't store a mirror). Either way the output is a correctly-mirrored 5-second clip with its audio intact.
 
-## Trim + rotate (stays remux)
+## Trim + rotate
 
-Rotation is a container flag, so trimming and rotating together is still a lossless **remux** on both iOS and Android — no quality loss, near-instant:
+Trimming and rotating together — lossless **remux** on iOS, **transcode** on Android (both correct):
 
 ```ts
 await Video.render({
@@ -61,19 +64,23 @@ await Video.render({
 });
 ```
 
+## Multi-clip note
+
+Per-clip transforms apply to a **single-clip** render. A multi-clip spec is passthrough-concat only — combining concat with a transform (or overlay, or output-side change) rejects with `InvalidSpecError` until multi-clip transcode lands. To concat *and* transform, render each clip, then concat the results.
+
 ## Progress
 
-Transcode paths (`flipH` / `flipV` / `crop`) report per-frame progress; pass `onProgress` in the options argument:
+The transcode path reports per-frame progress; pass `onProgress` in the options argument:
 
 ```ts
 await Video.render(
-  { clips: [{ uri: sourceUri, startSec: 2, durationSec: 5, transform: { flipH: true } }],
-    output: { path: `${dir}/out.mp4` } },
+  { clips: [{ uri: sourceUri, startSec: 2, durationSec: 5, transform: { crop: { x: 0, y: 0, w: 640, h: 640 } } }],
+    output: { path: `${dir}/out.mp4`, width: 640, height: 640 } },
   { onProgress: ({ framesCompleted, nbFrames }) => console.log(`${framesCompleted}/${nbFrames}`) },
 );
 ```
 
-Remux paths (rotation-only) complete in milliseconds and don't report per-frame progress — just await the promise.
+A remux (iOS rotation/flip) completes in milliseconds and doesn't report per-frame progress — just await the promise.
 
 ## See also
 

@@ -146,6 +146,30 @@ a small red marker at top-left as a visual canary.
 
 ---
 
+## Render with transform (transcode)
+
+`Video.render` with a single-clip `transform` (rotate / flip / crop), an
+overlay, an output-side change, or a trim window runs through `Transcoder.kt`:
+MediaCodec decode → GL compose (the transform is baked into the OES texcoords)
+→ MediaCodec encode → MediaMuxer. Two Android-specific points:
+
+- **Rotation/flip re-encode here, unlike iOS.** iOS expresses a rotation or
+  flip losslessly in the container's `preferredTransform` (a remux). Android's
+  `MediaMuxer` only exposes an orientation *hint* (0/90/180/270) and cannot
+  store a mirror, so the transcoder bakes rotation **and** flip into pixels in
+  the same GL pass. The output is correct; it just isn't lossless or near-zero
+  cost the way iOS rotation/flip is. A future optimization could route a
+  rotation-only spec to a `setOrientationHint` remux.
+- **Audio is passthrough.** A second `MediaExtractor` copies the source's
+  compressed audio samples into a second `MediaMuxer` track (no re-encode),
+  honoring the same trim window as the video and rebasing PTS to the window
+  start. Both tracks are added before `muxer.start()`; the audio is written
+  after the video and MediaMuxer interleaves on finalize.
+- **Trim is frame-exact.** The extractor seeks to the sync sample at/ before
+  the window start; the pump decodes the GOP pre-roll but PTS-gates which
+  decoded frames are rendered, then stops at the window end. Output PTS is
+  rebased to `frameIndex / fps`.
+
 ## Potential improvements
 
 The remaining four per-frame copies all live on the encoder/output side:

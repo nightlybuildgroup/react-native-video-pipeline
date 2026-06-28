@@ -20,7 +20,7 @@ await Video.flip(sourceUri, {
 
 ## When you also want to trim
 
-`Video.trim` is a pure lossless cut and takes no transform. To cut **and** flip in one pass, use `Video.render` with a clip `transform` — the native router transcodes flip uniformly across platforms:
+`Video.trim` is a pure lossless cut and takes no transform. To cut **and** flip in one pass, use `Video.render` with a clip `transform` — a lossless remux on iOS, a re-encode on Android (both keep the audio):
 
 ```ts
 await Video.render({

@@ -39,7 +39,7 @@ Start here. The decision tree is shallow:
   - Single-clip horizontal/vertical flip → `Video.flip`.
   - Cut **and** transform (rotate/flip/crop) in one pass → `Video.render`.
   - Add a watermark image/text and/or write metadata onto one clip → `Video.stamp`.
-  - **Anything more complex** — multiple clips concatenated, multiple overlays, custom output codec/bitrate/dimensions, mixed transforms, audio replacement — → `Video.render` with a full `RenderSpec`.
+  - **A single clip with several of these at once** — trim + transform + overlays + a custom output codec/bitrate/dimensions, in one re-encode pass — → `Video.render` with a full `RenderSpec`. (Multi-clip concat is passthrough-only — see [`Video.render`](#videorender) scope.)
 - **Yes**, I want a worklet drawing on every frame:
   - Drawing *on top of* one or more source clips → `Video.compose`.
   - Generating frames from scratch with no source → `Video.synthesize`.
@@ -48,15 +48,18 @@ Start here. The decision tree is shallow:
 
 `Video.trim` / `Video.flip` / `Video.stamp` are fixed-signature sugar for the common single-clip cases. They exist because `Video.render({ clips: [{ uri, startSec, durationSec }], output: { ... } })` is verbose when all you want is one trim.
 
-Use `Video.render` directly the moment your spec needs *anything* the sugar doesn't carry:
+Use `Video.render` directly the moment your spec needs *anything* the sugar doesn't carry — for example, a single-clip trim + crop + overlay + codec change in one re-encode pass:
 
 ```ts
-// Concat three clips, two overlays, custom output codec — only `render` does this.
+// Trim, crop, watermark, and re-encode one clip — one decode/encode pass.
 await Video.render({
   clips: [
-    { uri: 'intro.mp4', startSec: 0, durationSec: 2 },
-    { uri: 'main.mp4', startSec: 5, durationSec: 30, transform: { crop: { x: 0, y: 0, w: 1920, h: 1080 } } },
-    { uri: 'outro.mp4', startSec: 0, durationSec: 3 },
+    {
+      uri: 'main.mp4',
+      startSec: 5,
+      durationSec: 30,
+      transform: { crop: { x: 0, y: 0, w: 1920, h: 1080 } },
+    },
   ],
   overlays: [
     Overlay.Image({
@@ -66,10 +69,11 @@ await Video.render({
     }),
     Overlay.Text({ text: '@username', anchor: 'br', style: { fontSize: 24, color: '#fff' } }),
   ],
-  audio: { mode: 'replace', replaceUri: 'soundtrack.m4a' },
   output: { path: '/tmp/out.mp4', width: 1920, height: 1080, fps: 30, codec: 'h264', bitrate: 8_000_000 },
 });
 ```
+
+> **Multi-clip note.** Per-clip transforms, overlays, and output-side changes apply to a **single-clip** render today. Multi-clip specs are passthrough-concat only — see [`Video.render`](#videorender) scope. To concat *and* transform, render each clip, then concat the results.
 
 Chaining `trim` → `stamp` → `render` through temp files would re-encode at every step (slow + lossy). One `Video.render` call decodes and encodes exactly once.
 
@@ -123,7 +127,7 @@ Cached encoder capability snapshot — supported codecs, max dimensions and fps,
 Video.trim(uri: string, options: TrimOptions): Promise<void>
 ```
 
-Lossless-cut a single clip. **Always remuxes** (passthrough — no re-encode), on both iOS and Android. `trim` deliberately takes no transform: it is the fast-cut primitive. To trim **and** transform (rotate/flip/crop) in one pass, use [`Video.render`](#videorender) — its native router picks remux (rotation-only) vs transcode (flip/crop) uniformly across platforms. See [Routing rules](#routing-rules) and the [trim + flip example](./examples/render.md).
+Lossless-cut a single clip. **Always remuxes** (passthrough — no re-encode), on both iOS and Android. `trim` deliberately takes no transform: it is the fast-cut primitive. To trim **and** transform (rotate/flip/crop) in one pass, use [`Video.render`](#videorender) — it produces the correct output on both platforms, taking the fast remux path where the platform allows (iOS rotation/flip) and transcoding otherwise (crop everywhere; flip on Android). See [Routing rules](#routing-rules) and the [trim + transform example](./examples/render.md).
 
 End-past-EOF requests (`startSec + durationSec > source duration`) are silently clamped to the source's actual duration — matches `AVAssetExportSession` and ffmpeg leniency. This absorbs muxer-vs-encoder rounding drift (e.g. recorders that report a target duration ~10ms shorter than the bytes they actually wrote). Only `startSec` past EOF rejects with `InvalidSpec`.
 
@@ -156,10 +160,15 @@ type StampOptions = { outPath: string } & (
 Video.render(spec: RenderSpec, options?: RenderOptions): Promise<void>
 ```
 
-The full-spec native editing entry point — multi-clip concat, multiple overlays, custom encoder settings, mixed per-clip transforms, audio replacement, all in one decode/encode pass. The native side picks the cheapest path based on `spec`:
+The full-spec native editing entry point. The native side picks the cheapest path that satisfies `spec`, identically on iOS and Android:
 
-- All-passthrough spec (no overlays, no transforms beyond rotation flags) → **remux**
-- Native-overlay or pixel-altering transform → **transcode**
+- **Passthrough spec** — one or more clips, no overlays, no pixel-altering transform, no output-side change → **remux** (no re-encode).
+- **Single clip + transform / overlay / output change** → the cheapest path that works:
+  - rotation/flip-only (no crop) → **remux** on iOS (lossless `preferredTransform`); **transcode** on Android (its container can't store a mirror, and rotation is baked in the same pass).
+  - crop, a native overlay, or an output-side change (`width`/`height`/`fps`/`codec`/`bitrate`) → **transcode** (re-encode), on both platforms.
+  - A trim window (`startSec`/`durationSec` on the clip) composes with any of the above — render trims **and** transforms in one pass. Source audio is preserved through the transcode path on both platforms.
+
+**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on a **single-clip** spec. A **multi-clip** spec is passthrough-concat only — combining concat with a transform, an overlay, or an output-side change rejects with `InvalidSpecError` (multi-clip transcode is not wired yet; split into single-clip renders, or concat the transformed outputs). Audio replacement (`audio.mode: 'replace'`) is likewise not wired yet.
 
 `RenderSpec` requires a non-empty `clips` array at compile time — synthesized renders go through [`Video.synthesize`](#videosynthesize) instead.
 
@@ -399,7 +408,7 @@ When `durationSec` is omitted, the library calls `Video.info(uri)` to probe the 
 
 The native Nitro boundary still receives `{ sourceStart, sourceDuration, outputStart }` — the library normalizes `ClipInput[]` into that shape before crossing. Direct consumers of the Nitro spec see the underlying form.
 
-A `transform` of rotation-only stays in remux. Any of `flipH`, `flipV`, or `crop` forces transcode.
+**Transform routing.** On a single-clip render: rotation/flip-only stays in **remux** on iOS (lossless) and goes through **transcode** on Android (its container can't store a mirror). `crop` — and any output-side change or overlay — forces **transcode** on both platforms. Source audio is preserved either way. A trim window composes with the transform in the same pass.
 
 ### `DurationSpec`
 
@@ -570,9 +579,11 @@ Each top-level operation maps to one of three internal execution paths. The deci
 
 | Path        | When                                                                                | Speed   |
 | ----------- | ----------------------------------------------------------------------------------- | ------- |
-| **remux**   | Passthrough — no overlays, no per-pixel transforms, output codec/container match    | Fastest |
-| **transcode** | Native-only overlays (`image`, `text`), transforms with `crop`/`flip`, codec change | Medium  |
+| **remux**   | Passthrough — no overlays, output codec/container match, and either no transform or a rotation/flip-only transform on iOS (lossless, with optional trim window) | Fastest |
+| **transcode** | Native overlays (`image`, `text`), `crop`, an output-side change (size/fps/codec/bitrate), or any rotation/flip on Android — re-encodes; preserves source audio and honors a trim window | Medium  |
 | **compose** | Worklet overlay or `drawFrame` callback present, OR no source clips (synthesize)    | Slowest |
+
+Per-clip transforms / overlays / output-side changes apply to **single-clip** renders; a multi-clip spec is passthrough-concat only (combining concat with a re-encode rejects until multi-clip transcode lands).
 
 The `Video.trim` / `Video.flip` / `Video.stamp` convenience wrappers exist so the routing decision lives in C++, not split across JS and native. `Video.render` is the explicit form.
 

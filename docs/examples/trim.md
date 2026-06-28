@@ -20,7 +20,7 @@ End-past-EOF requests (`startSec + durationSec` longer than the source) are sile
 
 ## Trim *and* transform → use `Video.render`
 
-`trim` deliberately stays a pure cut. The moment you also want to rotate, flip, or crop, reach for `Video.render` — its native router remuxes a rotation-only spec (lossless, both platforms) and transcodes flip/crop, picking the cheapest path uniformly across iOS and Android. See [`render.md`](./render.md).
+`trim` deliberately stays a pure cut. The moment you also want to rotate, flip, or crop, reach for `Video.render` — it produces the correct output on both platforms, taking the fast lossless remux path where it can (iOS rotation/flip) and re-encoding otherwise (crop everywhere; rotation/flip on Android), with the trim window applied in the same pass. See [`render.md`](./render.md).
 
 ## Errors
 
