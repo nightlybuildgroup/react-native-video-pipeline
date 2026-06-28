@@ -220,11 +220,22 @@ CIImage *applyTranscodePipeline(CIImage *sourceImage,
 
 // Pump audio samples from @p audioOutput into @p audioInput, compressed
 // passthrough. Bounded-wait ready-spin mirrors the remux pumper.
+//
+// On a trim window (@p hasWindow == YES) the audio is read from a dedicated
+// reader whose timeRange is already bounded to the window (see the caller), so
+// content selection is handled upstream — splitting a batched AAC buffer here
+// is impossible without re-encoding. This pump's only windowing job is to
+// rebase: it anchors on the first kept packet's PTS and shifts every packet by
+// it so audio starts at t=0, aligned with the video track (itself rebased to
+// start at 0). Without the shift the windowed audio would sit at the source
+// timeline (~windowStart) while video sits at 0, desyncing A/V.
 BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
                           AVAssetWriterInput *audioInput,
-                          AVAssetReader *reader, AVAssetWriter *writer,
+                          AVAssetReader *audioReader, AVAssetWriter *writer,
+                          BOOL hasWindow,
                           NSError *_Nullable __autoreleasing *error) {
   static const NSTimeInterval kReadyTimeout = 30.0;
+  CMTime shift = kCMTimeInvalid;  // anchored to the first kept packet's PTS
   while (YES) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kReadyTimeout];
     while (!audioInput.readyForMoreMediaData &&
@@ -242,9 +253,9 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
     }
     CMSampleBufferRef sample = [audioOutput copyNextSampleBuffer];
     if (sample == NULL) {
-      if (reader.status == AVAssetReaderStatusFailed) {
+      if (audioReader.status == AVAssetReaderStatusFailed) {
         if (error) {
-          *error = reader.error
+          *error = audioReader.error
                        ?: makeError(RNVPTranscoderErrorCodeSourceCorrupted,
                                     @"Audio reader entered the Failed state.");
         }
@@ -252,6 +263,58 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
       }
       return YES;
     }
+
+    if (hasWindow) {
+      const CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+      if (!CMTIME_IS_VALID(shift)) shift = CMTIME_IS_VALID(pts) ? pts
+                                                                : kCMTimeZero;
+      CMItemCount timingCount = 0;
+      CMSampleBufferGetSampleTimingInfoArray(sample, 0, NULL, &timingCount);
+      CMSampleTimingInfo stackTimings[1];
+      CMSampleTimingInfo *timings = stackTimings;
+      BOOL heapTimings = NO;
+      if (timingCount > 1) {
+        timings = (CMSampleTimingInfo *)malloc(sizeof(CMSampleTimingInfo) *
+                                               timingCount);
+        heapTimings = YES;
+      } else {
+        timingCount = 1;
+      }
+      if (CMSampleBufferGetSampleTimingInfoArray(sample, timingCount, timings,
+                                                 &timingCount) != noErr) {
+        // Fall back to the buffer-level timing if the array form is refused.
+        timings[0] = (CMSampleTimingInfo){
+            .duration = CMSampleBufferGetDuration(sample),
+            .presentationTimeStamp = pts,
+            .decodeTimeStamp = kCMTimeInvalid};
+        timingCount = 1;
+      }
+      for (CMItemCount i = 0; i < timingCount; i++) {
+        if (CMTIME_IS_VALID(timings[i].presentationTimeStamp)) {
+          timings[i].presentationTimeStamp = CMTimeMaximum(
+              kCMTimeZero,
+              CMTimeSubtract(timings[i].presentationTimeStamp, shift));
+        }
+        if (CMTIME_IS_VALID(timings[i].decodeTimeStamp)) {
+          timings[i].decodeTimeStamp = CMTimeMaximum(
+              kCMTimeZero, CMTimeSubtract(timings[i].decodeTimeStamp, shift));
+        }
+      }
+      CMSampleBufferRef shifted = NULL;
+      const OSStatus copyStatus = CMSampleBufferCreateCopyWithNewTiming(
+          kCFAllocatorDefault, sample, timingCount, timings, &shifted);
+      if (heapTimings) free(timings);
+      CFRelease(sample);
+      if (copyStatus != noErr || shifted == NULL) {
+        if (error) {
+          *error = makeError(RNVPTranscoderErrorCodeWriterFailed,
+                             @"Failed to retime windowed audio sample.");
+        }
+        return NO;
+      }
+      sample = shifted;
+    }
+
     const BOOL ok = [audioInput appendSampleBuffer:sample];
     CFRelease(sample);
     if (!ok) {
@@ -407,16 +470,36 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   }
   [reader addOutput:videoOutput];
 
+  // Audio passthrough rides a *dedicated* reader so its trim window can be set
+  // via timeRange without disturbing the video reader (which must read the full
+  // source and gate frames by PTS — see the note above). On a window the
+  // timeRange bounds the audio to [windowStart, windowDuration); the pump then
+  // rebases the emitted packets to start at 0. The two readers run
+  // sequentially (video loop fully drains before the audio pump starts), so
+  // there is no concurrent-read contention on the asset.
   AVAssetReaderTrackOutput *audioOutput = nil;
+  AVAssetReader *audioReader = nil;
   NSArray<AVAssetTrack *> *audioTracks =
       [asset tracksWithMediaType:AVMediaTypeAudio];
   if (audioTracks.count > 0) {
-    AVAssetReaderTrackOutput *candidate =
-        [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTracks.firstObject
-                                         outputSettings:nil];
-    if ([reader canAddOutput:candidate]) {
-      [reader addOutput:candidate];
-      audioOutput = candidate;
+    NSError *audioReaderError = nil;
+    audioReader = [[AVAssetReader alloc] initWithAsset:asset
+                                                 error:&audioReaderError];
+    if (audioReader != nil) {
+      if (hasWindow) {
+        audioReader.timeRange = CMTimeRangeMake(
+            CMTimeMakeWithSeconds(windowStart, 90000),
+            CMTimeMakeWithSeconds(windowDuration, 90000));
+      }
+      AVAssetReaderTrackOutput *candidate =
+          [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTracks.firstObject
+                                           outputSettings:nil];
+      if ([audioReader canAddOutput:candidate]) {
+        [audioReader addOutput:candidate];
+        audioOutput = candidate;
+      } else {
+        audioReader = nil;
+      }
     }
   }
 
@@ -510,6 +593,7 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
       audioInput = candidate;
     } else {
       audioOutput = nil;
+      audioReader = nil;
     }
   }
 
@@ -800,10 +884,24 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   }
 
   // --- Audio passthrough ----------------------------------------------------
+  // Start the dedicated audio reader now — the video loop has fully drained, so
+  // the two readers never read the asset concurrently.
+  if (audioInput != nil && audioOutput != nil && audioReader != nil &&
+      ![audioReader startReading]) {
+    [audioInput markAsFinished];
+    [writer cancelWriting];
+    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+    if (error) {
+      *error = audioReader.error
+                   ?: makeError(RNVPTranscoderErrorCodeSourceCorrupted,
+                                @"Audio reader startReading failed.");
+    }
+    return NO;
+  }
   if (audioInput != nil && audioOutput != nil) {
     NSError *audioErr = nil;
-    if (!pumpAudioPassthrough(audioOutput, audioInput, reader, writer,
-                              &audioErr)) {
+    if (!pumpAudioPassthrough(audioOutput, audioInput, audioReader, writer,
+                              hasWindow, &audioErr)) {
       [audioInput markAsFinished];
       [writer cancelWriting];
       [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];

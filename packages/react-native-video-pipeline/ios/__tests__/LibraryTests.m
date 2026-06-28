@@ -3778,6 +3778,224 @@ static BOOL withFirstDecodedFrame(NSString *videoPath,
   return YES;
 }
 
+/// Author a fixture whose audio carries a *time-varying* signal so a trim
+/// window's audio alignment is observable: the first half is digital silence,
+/// the second half is a 1 kHz sine. A correct trim of the back half therefore
+/// yields all-tone audio; a buggy trim that keeps the front-of-source audio
+/// (right duration, wrong content) yields silence. Video is the same per-frame
+/// R-ramp as @c authorMotionFixture so the existing frame-exactness checks
+/// still apply. Mono 16-bit LPCM @ 44.1 kHz fed to an AAC encoder input.
+static NSString *authorSteppedAudioFixture(NSInteger width, NSInteger height,
+                                           NSInteger fps, NSInteger frameCount,
+                                           NSString *tag,
+                                           NSError *_Nullable __autoreleasing *outError) {
+  const double kSampleRate = 44100.0;
+  NSString *path = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"stepaudio-src-%@-%@.mp4", tag,
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+  NSURL *url = [NSURL fileURLWithPath:path];
+
+  AVAssetWriter *writer = [[AVAssetWriter alloc] initWithURL:url
+                                                    fileType:AVFileTypeMPEG4
+                                                       error:outError];
+  if (writer == nil) return nil;
+
+  AVAssetWriterInput *videoInput = [AVAssetWriterInput
+      assetWriterInputWithMediaType:AVMediaTypeVideo
+                     outputSettings:@{
+                       AVVideoCodecKey : AVVideoCodecTypeH264,
+                       AVVideoWidthKey : @(width),
+                       AVVideoHeightKey : @(height),
+                     }];
+  videoInput.expectsMediaDataInRealTime = NO;
+  [writer addInput:videoInput];
+  AVAssetWriterInputPixelBufferAdaptor *adaptor =
+      [[AVAssetWriterInputPixelBufferAdaptor alloc]
+          initWithAssetWriterInput:videoInput
+          sourcePixelBufferAttributes:@{
+            (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferWidthKey : @(width),
+            (id)kCVPixelBufferHeightKey : @(height),
+          }];
+
+  AVAssetWriterInput *audioInput = [AVAssetWriterInput
+      assetWriterInputWithMediaType:AVMediaTypeAudio
+                     outputSettings:@{
+                       AVFormatIDKey : @(kAudioFormatMPEG4AAC),
+                       AVNumberOfChannelsKey : @(1),
+                       AVSampleRateKey : @(kSampleRate),
+                       AVEncoderBitRateKey : @(64000),
+                     }];
+  audioInput.expectsMediaDataInRealTime = NO;
+  [writer addInput:audioInput];
+
+  if (![writer startWriting]) {
+    if (outError) *outError = writer.error;
+    return nil;
+  }
+  [writer startSessionAtSourceTime:kCMTimeZero];
+
+  // --- Video: per-frame R-ramp, identical to authorMotionFixture. ----------
+  const int step = 4;
+  for (NSInteger i = 0; i < frameCount; i++) {
+    while (!videoInput.isReadyForMoreMediaData) {
+      [NSThread sleepForTimeInterval:0.001];
+    }
+    CVPixelBufferRef pb = NULL;
+    CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                        kCVPixelFormatType_32BGRA,
+                        (__bridge CFDictionaryRef) @{
+                          (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
+                        },
+                        &pb);
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+    const uint8_t r = (uint8_t)((i * step) & 0xFF);
+    for (NSInteger y = 0; y < height; y++) {
+      uint8_t *row = base + (size_t)y * bpr;
+      for (NSInteger x = 0; x < width; x++) {
+        uint8_t *px = row + (size_t)x * 4;
+        px[0] = 0x80;
+        px[1] = 0x80;
+        px[2] = r;
+        px[3] = 0xFF;
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    [adaptor appendPixelBuffer:pb
+          withPresentationTime:CMTimeMake((int64_t)i, (int32_t)fps)];
+    CVPixelBufferRelease(pb);
+  }
+  [videoInput markAsFinished];
+
+  // --- Audio: silence for [0, half), 1 kHz sine for [half, end). -----------
+  const double totalSec = (double)frameCount / (double)fps;
+  const UInt32 totalSamples = (UInt32)llround(totalSec * kSampleRate);
+  const UInt32 halfSample = totalSamples / 2;
+  int16_t *pcm = (int16_t *)calloc(totalSamples, sizeof(int16_t));
+  for (UInt32 n = halfSample; n < totalSamples; n++) {
+    const double t = (double)n / kSampleRate;
+    pcm[n] = (int16_t)llround(0.6 * 32767.0 * sin(2.0 * M_PI * 1000.0 * t));
+  }
+
+  AudioStreamBasicDescription asbd = {0};
+  asbd.mSampleRate = kSampleRate;
+  asbd.mFormatID = kAudioFormatLinearPCM;
+  asbd.mFormatFlags =
+      kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+  asbd.mBytesPerPacket = 2;
+  asbd.mFramesPerPacket = 1;
+  asbd.mBytesPerFrame = 2;
+  asbd.mChannelsPerFrame = 1;
+  asbd.mBitsPerChannel = 16;
+  CMAudioFormatDescriptionRef audioFormat = NULL;
+  CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, NULL, 0, NULL,
+                                 NULL, &audioFormat);
+
+  CMBlockBufferRef block = NULL;
+  CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL,
+                                     totalSamples * sizeof(int16_t), NULL, NULL,
+                                     0, totalSamples * sizeof(int16_t), 0,
+                                     &block);
+  CMBlockBufferReplaceDataBytes(pcm, block, 0, totalSamples * sizeof(int16_t));
+  free(pcm);
+
+  CMSampleTimingInfo timing = {
+      .duration = CMTimeMake(1, (int32_t)kSampleRate),
+      .presentationTimeStamp = kCMTimeZero,
+      .decodeTimeStamp = kCMTimeInvalid,
+  };
+  CMSampleBufferRef audioSample = NULL;
+  CMSampleBufferCreate(kCFAllocatorDefault, block, true, NULL, NULL,
+                       audioFormat, (CMItemCount)totalSamples, 1, &timing, 0,
+                       NULL, &audioSample);
+  while (!audioInput.isReadyForMoreMediaData) {
+    [NSThread sleepForTimeInterval:0.001];
+  }
+  const BOOL audioOk = [audioInput appendSampleBuffer:audioSample];
+  CFRelease(audioSample);
+  CFRelease(block);
+  CFRelease(audioFormat);
+  [audioInput markAsFinished];
+  if (!audioOk) {
+    if (outError) *outError = writer.error;
+    return nil;
+  }
+
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  [writer finishWritingWithCompletionHandler:^{
+    dispatch_semaphore_signal(done);
+  }];
+  dispatch_semaphore_wait(
+      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)));
+  if (writer.status != AVAssetWriterStatusCompleted) {
+    if (outError) *outError = writer.error;
+    return nil;
+  }
+  return path;
+}
+
+/// Decode @p path's audio track to mono 16-bit PCM and return the RMS
+/// amplitude (0..1) of the samples whose presentation time falls in
+/// [startSec, endSec). Used to detect whether a trimmed output carries the
+/// correct audio segment.
+static double decodeAudioRMSWindow(NSString *path, double startSec,
+                                   double endSec) {
+  const double kSampleRate = 44100.0;
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+  AVAssetTrack *audioTrack =
+      [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+  if (audioTrack == nil) return -1.0;
+  NSError *err = nil;
+  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&err];
+  if (reader == nil) return -1.0;
+  AVAssetReaderTrackOutput *output = [[AVAssetReaderTrackOutput alloc]
+      initWithTrack:audioTrack
+     outputSettings:@{
+       AVFormatIDKey : @(kAudioFormatLinearPCM),
+       AVSampleRateKey : @(kSampleRate),
+       AVNumberOfChannelsKey : @(1),
+       AVLinearPCMBitDepthKey : @(16),
+       AVLinearPCMIsFloatKey : @NO,
+       AVLinearPCMIsBigEndianKey : @NO,
+       AVLinearPCMIsNonInterleaved : @NO,
+     }];
+  [reader addOutput:output];
+  if (![reader startReading]) return -1.0;
+
+  double sumSquares = 0.0;
+  uint64_t counted = 0;
+  while (YES) {
+    CMSampleBufferRef sample = [output copyNextSampleBuffer];
+    if (sample == NULL) break;
+    const CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+    const double bufStartSec = CMTIME_IS_VALID(pts) ? CMTimeGetSeconds(pts) : 0.0;
+    const CMItemCount n = CMSampleBufferGetNumSamples(sample);
+    CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
+    size_t len = 0;
+    char *dataPtr = NULL;
+    if (block != NULL &&
+        CMBlockBufferGetDataPointer(block, 0, NULL, &len, &dataPtr) == noErr) {
+      const int16_t *samples = (const int16_t *)dataPtr;
+      const CMItemCount avail = (CMItemCount)(len / sizeof(int16_t));
+      for (CMItemCount i = 0; i < n && i < avail; i++) {
+        const double t = bufStartSec + (double)i / kSampleRate;
+        if (t >= startSec && t < endSec) {
+          const double v = (double)samples[i] / 32768.0;
+          sumSquares += v * v;
+          counted++;
+        }
+      }
+    }
+    CFRelease(sample);
+  }
+  if (counted == 0) return 0.0;
+  return sqrt(sumSquares / (double)counted);
+}
+
 /// T034 acceptance: transcode a flat-gray fixture with a solid-red Overlay.Image
 /// anchored at center. The decoded output should have red pixels at the frame
 /// center and unmodified gray pixels near the corners. Tolerance covers the
@@ -6156,6 +6374,106 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
 
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:fullPath error:nil];
+}
+
+/// A trim window that routes to the transcode (re-encode) path must carry the
+/// *windowed* audio segment, not the front of the source clipped to the right
+/// length. The source's audio is silent in [0, 0.5) and a 1 kHz tone in
+/// [0.5, 1.0); cropping forces the transcoder. A correct trim of [0.5, 1.0)
+/// therefore produces all-tone audio, while the regression (audio passed
+/// through unshifted, then tail-clipped by endSession) produces silence — same
+/// duration, wrong content. The existing duration-only check cannot see this.
+- (void)testTranscodeTrimWindowAlignsAudioToWindow
+{
+  const NSInteger kWidth = 160;
+  const NSInteger kHeight = 120;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 30;  // 1.0s total
+
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(kWidth, kHeight, kFps,
+                                                   kFrameCount, @"aud-align",
+                                                   &error);
+  XCTAssertNotNil(sourcePath, @"stepped-audio fixture author failed: %@", error);
+
+  NSString *winPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"aud-win-%@.mp4", NSUUID.UUID.UUIDString]];
+  NSString *fullPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"aud-full-%@.mp4", NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:winPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:fullPath error:nil];
+
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+
+  // Crop to 80x80 forces the transcode path (where the audio bug lives).
+  RNVPTranscodeTarget *(^makeTarget)(double, double) =
+      ^RNVPTranscodeTarget *(double start, double dur) {
+    return [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                               height:80
+                                                  fps:(double)kFps
+                                                codec:RNVPTranscodeCodecH264
+                                              bitrate:0
+                                               rotate:-1
+                                                flipH:NO
+                                                flipV:NO
+                                                cropX:0
+                                                cropY:0
+                                            cropWidth:80
+                                           cropHeight:80
+                                          sourceStart:start
+                                       sourceDuration:dur];
+  };
+
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:[NSURL fileURLWithPath:fullPath]
+                                          target:makeTarget(0.0, 0.0)
+                                        overlays:nil
+                                        metadata:nil
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"full-source transcode failed: %@", error);
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:[NSURL fileURLWithPath:winPath]
+                                          target:makeTarget(0.5, 0.5)
+                                        overlays:nil
+                                        metadata:nil
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"windowed transcode failed: %@", error);
+
+  // Sanity: authoring really put silence up front and a tone in the back half,
+  // and the full transcode preserves both (guards against a no-op fixture).
+  const double fullFrontRMS = decodeAudioRMSWindow(fullPath, 0.1, 0.4);
+  const double fullBackRMS = decodeAudioRMSWindow(fullPath, 0.6, 0.9);
+  XCTAssertLessThan(fullFrontRMS, 0.05,
+                    @"source/full first-half audio should be silent (got %.4f)",
+                    fullFrontRMS);
+  XCTAssertGreaterThan(fullBackRMS, 0.15,
+                       @"source/full second-half audio should be a tone "
+                       @"(got %.4f)",
+                       fullBackRMS);
+
+  // The window [0.5, 1.0) is entirely tone. Measured away from the AAC
+  // priming edges, the trimmed output's audio must be that tone — not the
+  // front-of-source silence the regression would leave behind.
+  const double winRMS = decodeAudioRMSWindow(winPath, 0.1, 0.4);
+  XCTAssertGreaterThan(winRMS, 0.15,
+                       @"trimmed output should carry the windowed tone, not "
+                       @"front-of-source silence (got %.4f)",
+                       winRMS);
+  XCTAssertGreaterThan(winRMS, fullFrontRMS * 4.0,
+                       @"trimmed audio (%.4f) should be far louder than the "
+                       @"silent front half (%.4f) — proves the window shifted "
+                       @"the audio, not just clipped its tail",
+                       winRMS, fullFrontRMS);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:winPath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:fullPath error:nil];
 }
 

@@ -337,8 +337,9 @@ std::optional<std::string> describeTranscodeBranchRejection(
   // are not part of NativeOverlay and never reach this validator.
   const auto& clip = (*spec.clips)[0];
   // A trim window (sourceStart / sourceDuration) is now honored by the
-  // transcoder via reader.timeRange, so it is no longer rejected here. Bound
-  // the window to the source: a start past EOF is unusable.
+  // transcoder — video frames are gated by source PTS and the audio passthrough
+  // is gated and PTS-shifted to the same window — so it is no longer rejected
+  // here. Bound the window to the source: a start past EOF is unusable.
   if (clip.sourceStart > sourceDurationSec + 1e-3) {
     return "transcode: sourceStart is past the end of the source";
   }
