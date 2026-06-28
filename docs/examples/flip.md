@@ -1,6 +1,8 @@
 # Flip horizontally or vertically
 
-`Video.flip` mirrors a clip along one axis. mp4 / mov containers can express horizontal flip as a rotation flag — that path is a remux. Vertical flip and any container without a rotation flag fall into transcode.
+`Video.flip` mirrors a clip along one axis, on **both iOS and Android**.
+
+**Platform behavior.** A mirror is an affine transform (scale by −1), not a plain rotation. iOS stores it losslessly in the container's `preferredTransform`, so `Video.flip` is a passthrough **remux** (no re-encode, no progress events). Android's `MediaMuxer` can only store an orientation hint (0/90/180/270), never a mirror, so on Android `Video.flip` re-encodes the pixels via **Media3 Transformer** — audio and the source codec (H.264 → H.264, HEVC → HEVC) are preserved, and `onProgress` fires.
 
 ```ts
 import { Video } from 'react-native-video-pipeline';
@@ -14,7 +16,7 @@ await Video.flip(sourceUri, {
 ```ts
 await Video.flip(sourceUri, {
   outPath: `${dir}/flipped-v.mp4`,
-  axis: 'vertical', // forces transcode in mp4
+  axis: 'vertical',
 });
 ```
 

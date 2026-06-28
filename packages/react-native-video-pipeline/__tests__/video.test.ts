@@ -202,9 +202,14 @@ describe('Video.trim / flip / stamp', () => {
     ).toThrow(InvalidSpecError);
   });
 
-  it('forwards flip', async () => {
+  it('forwards flip with the requested axis', async () => {
     await Video.flip('in.mp4', { outPath: '/tmp/out.mp4', axis: 'horizontal' });
-    expect(fake.flipCalls).toHaveLength(1);
+    await Video.flip('in.mp4', { outPath: '/tmp/out-v.mp4', axis: 'vertical' });
+    expect(fake.flipCalls).toHaveLength(2);
+    const [, , horizontalAxis] = fake.flipCalls[0] as unknown[];
+    const [, , verticalAxis] = fake.flipCalls[1] as unknown[];
+    expect(horizontalAxis).toBe('horizontal');
+    expect(verticalAxis).toBe('vertical');
   });
 
   it('forwards stamp with metadata only', async () => {
