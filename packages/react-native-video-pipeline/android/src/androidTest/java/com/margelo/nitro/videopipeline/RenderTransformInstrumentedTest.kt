@@ -283,6 +283,47 @@ class RenderTransformInstrumentedTest {
     assertTrue("PiP region is base red after window (got ${Integer.toHexString(after)})", isRed(after))
   }
 
+  // Two overlay tracks at the SAME frame rect over a base — the higher-z overlay
+  // must win (drawn on top). Exercises 3-input compositing and the topmost-first
+  // sequence registration. Mirrors the iOS ascending-z-order contract.
+  @Test
+  fun multiTrackPipRespectsZOrderAcrossOverlays() {
+    val base = solidFixture("z-base", 0, 180, 0) // green
+    val lowZ = solidFixture("z-low", 200, 0, 0) // red  (track 1, beneath)
+    val highZ = solidFixture("z-high", 0, 0, 200) // blue (track 2, on top)
+    val out = File(ctx.cacheDir, "multi-track-z.mp4").absolutePath
+    File(out).delete()
+
+    val total = frameCount / fps.toDouble()
+    val baseSpec = spec(base, out, outWidth = width, outHeight = height)
+    // Both overlays full-duration at the same centred 0.4x0.4 rect (centre
+    // 0.7,0.7). Passed ascending-z (low then high) as runCompositePip expects.
+    fun layer(src: String) = TransformerRunner.OverlayLayer(
+      spec = spec(src, out, outWidth = width, outHeight = height),
+      frameX = 0.5, frameY = 0.5, frameW = 0.4, frameH = 0.4,
+      outputStartSec = 0.0, effDurSec = total,
+    )
+    TransformerRunner.runCompositePip(
+      ctx, listOf(baseSpec), listOf(layer(lowZ), layer(highZ)),
+      totalDurationSec = total, stopToken = null, progress = null,
+    )
+    assertTrue("z-order output exists", File(out).exists())
+
+    fun isBlue(c: Int) = Color.blue(c) > Color.red(c) + 40 && Color.blue(c) > Color.green(c) + 40
+    fun isGreen(c: Int) = Color.green(c) > Color.red(c) + 40 && Color.green(c) > Color.blue(c) + 40
+
+    val inBox = pixelAt(out, 0.7, 0.7, 0.5)
+    val outside = pixelAt(out, 0.05, 0.05, 0.5)
+    assertTrue(
+      "higher-z overlay (blue) is on top in the box (got ${Integer.toHexString(inBox)})",
+      isBlue(inBox),
+    )
+    assertTrue(
+      "base (green) shows outside the overlays (got ${Integer.toHexString(outside)})",
+      isGreen(outside),
+    )
+  }
+
   @Test
   fun fpsDownsampleDropsFrames() {
     val src = synthFixture("fps-down")

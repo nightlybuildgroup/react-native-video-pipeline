@@ -311,8 +311,13 @@ internal object TransformerRunner {
         }
       }
 
+      // The base's black gap-fill images carry no audio; for a gapped base with
+      // passthrough audio, force a continuous audio track so the source audio
+      // survives across the gaps as silence (same as runMulti). Never force it
+      // when the base is muted.
       val composition = Composition.Builder(orderedSeqs)
         .setVideoCompositorSettings(compositor)
+        .experimentalSetForceAudioTrack(needBaseGaps && !first.removeAudio)
         .build()
 
       runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->

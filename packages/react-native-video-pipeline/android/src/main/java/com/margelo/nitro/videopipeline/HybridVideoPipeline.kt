@@ -1014,7 +1014,12 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           throw VideoPipelineInvalidSpecException("duration is only valid when clips is empty")
         }
         val baseClips = clips.filter { (it.track ?: 0.0) <= 0.5 }
+        // Sort overlays by track index ASCENDING (stable, so equal tracks keep
+        // array order) — runCompositePip registers them topmost-first, so the
+        // z-order must come from `track`, not the spec's clip order. Mirrors the
+        // iOS sort-by-z compositor.
         val overlayClips = clips.filter { (it.track ?: 0.0) > 0.5 }
+          .sortedBy { it.track ?: 0.0 }
         if (baseClips.isEmpty()) {
           throw VideoPipelineInvalidSpecException(
             "overlay tracks (track > 0) require at least one base-track (track 0) clip"
