@@ -108,6 +108,11 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
 @property(nonatomic, readonly, nullable) RNVPExportSessionComposer composer;
 @property(nonatomic, readonly, nullable) RNVPStopToken *stop;
 @property(nonatomic, readonly, nullable) RNVPExportSessionProgress progress;
+/// Hard upper bound on the export wall-clock before the driver cancels and
+/// fails. Single-clip URL passthrough (trim) uses a tighter bound; the
+/// composition-passthrough path (concat/transform/flip) allows longer because a
+/// multi-clip stitch legitimately copies more samples.
+@property(nonatomic, readonly) NSTimeInterval exportDeadlineSeconds;
 
 - (instancetype)initWithSource:(NSURL *)source
                         output:(NSURL *)output

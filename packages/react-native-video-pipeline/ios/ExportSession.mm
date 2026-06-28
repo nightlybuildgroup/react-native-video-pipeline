@@ -81,6 +81,7 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
     _composer = composer;
     _stop = stop;
     _progress = progress;
+    _exportDeadlineSeconds = 30.0;
   }
   return self;
 }
@@ -100,6 +101,9 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
     _composer = nil; // passthrough — no per-frame re-encode
     _stop = stop;
     _progress = progress;
+    // Match the pre-refactor inline concat/transform budget (60s), looser than
+    // the single-clip trim path, since a multi-clip stitch copies more samples.
+    _exportDeadlineSeconds = 60.0;
   }
   return self;
 }
@@ -320,10 +324,12 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
   }];
   // Poll the stop token alongside the semaphore so a cancellation reaches the
   // export within ~50ms of the request, not whenever the export finishes on
-  // its own. 30s is the hard upper bound — wedged session fails the xcodebuild
-  // per-test budget rather than the harness budget.
-  const uint64_t deadlineNs =
-      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC));
+  // its own. The deadline is the hard upper bound — a wedged session fails
+  // fast rather than burning the harness/xcodebuild budget. It's per-request
+  // (composition-passthrough concat/transform allow longer than a single-clip
+  // trim) — see RNVPExportRequest.exportDeadlineSeconds.
+  const uint64_t deadlineNs = dispatch_time(
+      DISPATCH_TIME_NOW, (int64_t)(request.exportDeadlineSeconds * NSEC_PER_SEC));
   while (YES) {
     const long signaled = dispatch_semaphore_wait(
         sem, dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC));
@@ -335,7 +341,9 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
       if (error) {
         *error = makeError(
             RNVPExportSessionErrorCodeExportFailed,
-            @"AVAssetExportSession did not complete within 30s.");
+            [NSString stringWithFormat:
+                          @"AVAssetExportSession did not complete within %.0fs.",
+                          request.exportDeadlineSeconds]);
       }
       return NO;
     }
