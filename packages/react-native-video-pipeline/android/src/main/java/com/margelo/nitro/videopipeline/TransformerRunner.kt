@@ -433,43 +433,73 @@ internal object TransformerRunner {
     // outgoing (earlier) clip i is on sequence 0 (even index) — then seq0's alpha
     // ramps 1→0; otherwise seq0 holds the incoming clip and ramps 0→1.
     val overlaps = ArrayList<OverlapWindow>()
-    var hasInteriorGap = false
     for (i in 0 until clips.size - 1) {
       val end = clipEnd(i)
       val nextStart = clips[i + 1].outputStartSec
       if (nextStart < end - 1e-3) {
         overlaps.add(OverlapWindow(nextStart, end, seq0IsOutgoing = i % 2 == 0))
-      } else if (nextStart > end + 1e-3) {
-        hasInteriorGap = true
       }
     }
-    val needGaps = clips.first().outputStartSec > 1e-3 || hasInteriorGap
 
+    // Passthrough audio (not muted) is carried on SEPARATE audio-only sequences,
+    // not on the video sequences. A video ping-pong sequence leads with a
+    // transparent image pad, and Media3 cannot reconcile a sequence whose first
+    // item (an image) has no audio while a later item does — it throws an
+    // asset-loader error with or without a forced audio track. So the video
+    // sequences are always audio-stripped, and the audio rides its own pair of
+    // ping-pong sequences positioned with `addGap` (proper silent audio).
+    // Build the audio sequences only when audio is actually carried: passthrough
+    // (not muted) AND at least one source clip has an audio track. A clip with no
+    // audio contributes silence (an `addGap` of its span) so the envelope on the
+    // audio-bearing clips stays time-aligned.
+    val clipHasAudio = clips.map { runCatching { Remuxer.hasAudioTrack(it.spec.sourceUri) }.getOrDefault(false) }
+    val buildAudio = !first.removeAudio && clipHasAudio.any { it }
     val transparent = authorTransparentImage(context, canvasW, canvasH)
     try {
-      val seqBuilders = Array(2) { EditedMediaItemSequence.Builder() }
-      val cursor = doubleArrayOf(0.0, 0.0)
+      val videoBuilders = Array(2) { EditedMediaItemSequence.Builder() }
+      val audioBuilders = Array(2) { EditedMediaItemSequence.Builder() }
+      val vCursor = doubleArrayOf(0.0, 0.0)
+      val aCursor = doubleArrayOf(0.0, 0.0)
       val padFps = (first.fps?.roundToInt() ?: 30).coerceAtLeast(1)
       clips.forEachIndexed { i, clip ->
         val p = i % 2
-        val lead = (clip.outputStartSec - cursor[p]).coerceAtLeast(0.0)
-        if (lead > 1e-3) seqBuilders[p].addItem(transparentItem(transparent, lead, padFps))
-        // Per-clip audio envelope: ramp the head if this clip is the incoming
-        // side of an overlap with the previous clip; ramp the tail if it is the
-        // outgoing side of an overlap with the next clip.
-        val headSec =
-          if (i > 0) (clipEnd(i - 1) - clip.outputStartSec).coerceAtLeast(0.0) else 0.0
-        val tailSec =
-          if (i < clips.size - 1) (clipEnd(i) - clips[i + 1].outputStartSec).coerceAtLeast(0.0) else 0.0
-        seqBuilders[p].addItem(buildCrossfadeItem(clip, headSec, tailSec))
-        cursor[p] = clip.outputStartSec + clip.effDurSec
+        // VIDEO ping-pong: audio-stripped clip, transparent-padded into place.
+        val vLead = (clip.outputStartSec - vCursor[p]).coerceAtLeast(0.0)
+        if (vLead > 1e-3) videoBuilders[p].addItem(transparentItem(transparent, vLead, padFps))
+        videoBuilders[p].addItem(buildCrossfadeVideoItem(clip))
+        vCursor[p] = clip.outputStartSec + clip.effDurSec
+        // AUDIO ping-pong: video-stripped clip placed after a silent gap, with the
+        // head/tail volume ramp. Head ramps when this clip is the incoming side of
+        // an overlap with the previous clip; tail when it is the outgoing side of
+        // an overlap with the next. A clip with no audio becomes a plain silence
+        // gap so the next clip's audio still lands at its outputStart.
+        if (buildAudio) {
+          val aLead = (clip.outputStartSec - aCursor[p]).coerceAtLeast(0.0)
+          if (aLead > 1e-3) audioBuilders[p].addGap((aLead * 1_000_000.0).roundToLong())
+          if (clipHasAudio[i]) {
+            val headSec =
+              if (i > 0) (clipEnd(i - 1) - clip.outputStartSec).coerceAtLeast(0.0) else 0.0
+            val tailSec =
+              if (i < clips.size - 1) (clipEnd(i) - clips[i + 1].outputStartSec).coerceAtLeast(0.0) else 0.0
+            audioBuilders[p].addItem(buildCrossfadeAudioItem(clip, headSec, tailSec))
+          } else {
+            audioBuilders[p].addGap((clip.effDurSec * 1_000_000.0).roundToLong())
+          }
+          aCursor[p] = clip.outputStartSec + clip.effDurSec
+        }
       }
       for (p in 0..1) {
-        val trail = (totalDurationSec - cursor[p]).coerceAtLeast(0.0)
-        if (trail > 1e-3) seqBuilders[p].addItem(transparentItem(transparent, trail, padFps))
+        val trail = (totalDurationSec - vCursor[p]).coerceAtLeast(0.0)
+        if (trail > 1e-3) videoBuilders[p].addItem(transparentItem(transparent, trail, padFps))
       }
-      val seq0 = seqBuilders[0].build()
-      val seq1 = seqBuilders[1].build()
+      // Video sequences first (sequence 0 = the top compositor layer), then the
+      // audio-only sequences. Audio-only sequences carry no video, so they are
+      // not compositor inputs and do not affect the alpha-ramp mapping.
+      val sequences = mutableListOf(videoBuilders[0].build(), videoBuilders[1].build())
+      if (buildAudio) {
+        sequences.add(audioBuilders[0].build())
+        sequences.add(audioBuilders[1].build())
+      }
 
       val compositor = object : VideoCompositorSettings {
         override fun getOutputSize(inputSizes: MutableList<Size>): Size = Size(canvasW, canvasH)
@@ -490,11 +520,8 @@ internal object TransformerRunner {
         }
       }
 
-      val composition = Composition.Builder(seq0, seq1)
+      val composition = Composition.Builder(sequences)
         .setVideoCompositorSettings(compositor)
-        // A leading/interior gap leaves the audio-bearing sequences silent there;
-        // force a continuous track so passthrough audio survives (as in runMulti).
-        .experimentalSetForceAudioTrack(needGaps && !first.removeAudio)
         .build()
 
       runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
@@ -505,20 +532,26 @@ internal object TransformerRunner {
     }
   }
 
-  /// One crossfade clip's EditedMediaItem: its trim/transform video effects plus,
-  /// for passthrough audio, a [VolumeRampAudioProcessor] applying the head/tail
-  /// envelope over its overlap windows. Mute (`removeAudio`) drops audio and the
-  /// ramp with it.
-  private fun buildCrossfadeItem(clip: CrossfadeClip, headSec: Double, tailSec: Double): EditedMediaItem {
+  /// The video half of a crossfade clip: trim/transform effects, audio stripped
+  /// (the audio rides a separate sequence — see [runCompositeCrossfadeInternal]).
+  private fun buildCrossfadeVideoItem(clip: CrossfadeClip): EditedMediaItem =
+    EditedMediaItem.Builder(buildMediaItem(clip.spec))
+      .setEffects(Effects(emptyList(), buildVideoEffects(clip.spec)))
+      .setRemoveAudio(true)
+      .build()
+
+  /// The audio half of a crossfade clip: video stripped, with the head/tail
+  /// [VolumeRampAudioProcessor] envelope over its overlap windows.
+  private fun buildCrossfadeAudioItem(clip: CrossfadeClip, headSec: Double, tailSec: Double): EditedMediaItem {
     val audioProcessors: List<androidx.media3.common.audio.AudioProcessor> =
-      if (!clip.spec.removeAudio && (headSec > 1e-3 || tailSec > 1e-3)) {
+      if (headSec > 1e-3 || tailSec > 1e-3) {
         listOf(VolumeRampAudioProcessor(clip.effDurSec, headSec, tailSec))
       } else {
         emptyList()
       }
     return EditedMediaItem.Builder(buildMediaItem(clip.spec))
-      .setEffects(Effects(audioProcessors, buildVideoEffects(clip.spec)))
-      .setRemoveAudio(clip.spec.removeAudio)
+      .setRemoveVideo(true)
+      .setEffects(Effects(audioProcessors, emptyList()))
       .build()
   }
 

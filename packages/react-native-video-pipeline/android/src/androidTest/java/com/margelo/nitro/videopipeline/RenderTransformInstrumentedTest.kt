@@ -415,6 +415,42 @@ class RenderTransformInstrumentedTest {
     assertTrue("B/C overlap blends green+blue", green(1.4) > 50 && blue(1.4) > 50)
   }
 
+  // Passthrough audio survives the crossfade and stays on the output timeline.
+  // The ping-pong second sequence leads with a video-only transparent pad before
+  // its audio clip, so the composition forces a continuous audio track; without
+  // that, Media3 drops/mis-times the second clip's audio. Asserts the output
+  // carries an audio track and spans the full (overlap-shortened) duration.
+  @Test
+  fun crossfadeKeepsAlignedPassthroughAudio() {
+    val a = authorAudioVideoFixture("xf-aud-a")
+    val b = authorAudioVideoFixture("xf-aud-b")
+    assertTrue("fixtures carry audio", trackMimes(a).any { it.startsWith("audio/") })
+    val out = File(ctx.cacheDir, "crossfade-audio.mp4").absolutePath
+    File(out).delete()
+
+    val clipDur = frameCount / fps.toDouble()
+    val overlapStart = 0.6
+    val total = overlapStart + clipDur
+    TransformerRunner.runCompositeCrossfade(
+      ctx,
+      listOf(
+        TransformerRunner.CrossfadeClip(
+          spec = spec(a, out, outWidth = width, outHeight = height),
+          outputStartSec = 0.0, effDurSec = clipDur,
+        ),
+        TransformerRunner.CrossfadeClip(
+          spec = spec(b, out, outWidth = width, outHeight = height),
+          outputStartSec = overlapStart, effDurSec = clipDur,
+        ),
+      ),
+      totalDurationSec = total, stopToken = null, progress = null,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("crossfade output keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue("crossfade output keeps an audio track", mimes.any { it.startsWith("audio/") })
+    assertEquals("crossfade spans the overlap-shortened timeline", total, durationSec(out), 0.3)
+  }
+
   // The crossfade audio envelope (VolumeRampAudioProcessor): a 1.0s constant-tone
   // PCM stream with a 0.4s tail ramp should be full-amplitude before the ramp,
   // ~half at the ramp midpoint, and ~silent at the end. Validated directly on the

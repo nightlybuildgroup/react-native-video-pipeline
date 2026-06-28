@@ -255,11 +255,20 @@ not the layer order — is what flips with the clip's parity; this is the one pl
 the Android compositor differs in mechanism from the iOS `setOpacityRamp` (which
 reorders layers per region so the outgoing clip is always in front).
 
-**Audio.** Passthrough audio is volume-ramped per clip by `VolumeRampAudioProcessor`
-(a `BaseAudioProcessor` on PCM 16-bit): the head ramps `0→1` when the clip is the
-incoming side of an overlap and the tail ramps `1→0` when it is the outgoing side,
-so the two overlapping sequences sum to a crossfade rather than a doubled-volume
-bump — the same envelope the iOS `AVMutableAudioMix` applies. `mute` drops audio;
+**Audio.** Passthrough audio rides **two more** ping-pong sequences, separate from
+the video ones. The video sequences are always audio-stripped: a sequence that
+leads with a transparent image pad and then has an audio-bearing clip throws a
+Media3 asset-loader error (it can't reconcile a no-audio first item with a later
+audio one, with or without a forced audio track). The audio sequences instead use
+`addGap` for proper silent positioning — clip `i`'s audio (video stripped) is
+preceded by an `addGap` so it lands at its `outputStart`, and a clip with no audio
+track becomes a plain silence gap so the envelope on the audio-bearing clips stays
+aligned. Each audio clip carries a `VolumeRampAudioProcessor` (a `BaseAudioProcessor`
+on PCM 16-bit) whose head ramps `0→1` when the clip is the incoming side of an
+overlap and whose tail ramps `1→0` when it is the outgoing side, so the two
+overlapping audio sequences sum to a crossfade rather than a doubled-volume bump —
+the same envelope the iOS `AVMutableAudioMix` applies. The audio sequences are only
+built when at least one clip actually has audio. `mute` drops audio entirely;
 `audio.mode = 'replace'` rejects on the crossfade path for now (follow-up).
 
 Only **adjacent-pair** overlaps are supported (a clip overlapping two neighbours
