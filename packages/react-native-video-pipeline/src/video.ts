@@ -424,10 +424,12 @@ async function runCompose(
       },
     };
     drawFrame(ctx);
-    // Return `true` so the Nitro JSIConverter picks SyncJSCallback (sync
-    // dispatch). A `void` return would route through AsyncJSCallback and
-    // the native pump would invalidate the FrameTarget before JS writes
-    // into it — see the Nitro spec comment on renderCompose.drawFrame.
+    // Return `true` to satisfy the spec's `boolean` return. It does NOT change
+    // the dispatch mechanism — `drawFrame` crosses Nitro as an async
+    // `Promise<bool>` callback either way; the native pump blocks on it per
+    // frame (`promise->await().get()`) so the FrameTarget is never invalidated
+    // before JS writes. The value is currently ignored (reserved for a future
+    // "keep-rendering" signal). See the renderCompose.drawFrame spec comment.
     return true;
   };
 
