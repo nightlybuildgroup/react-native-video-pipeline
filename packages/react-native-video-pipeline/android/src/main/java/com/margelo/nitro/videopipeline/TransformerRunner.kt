@@ -379,6 +379,149 @@ internal object TransformerRunner {
     return seqBuilder.build()
   }
 
+  /// One clip on the crossfade timeline (#43). `spec` is its trim/transform
+  /// (presented to the shared canvas); `outputStartSec`/`effDurSec` place it.
+  data class CrossfadeClip(
+    val spec: Spec,
+    val outputStartSec: Double,
+    val effDurSec: Double,
+  )
+
+  /// Timeline-overlap crossfade (#43 — Android parity with iOS #18). Adjacent
+  /// clips whose windows overlap are dissolved over the overlap region. Built on
+  /// two **ping-pong** `EditedMediaItemSequence`s (clip i on sequence `i % 2`),
+  /// so an overlapping pair always lands on distinct sequences and can coexist in
+  /// time; each sequence is padded with transparent images so both span the full
+  /// output duration. Media3 draws sequence 0 on top, so a `VideoCompositorSettings`
+  /// ramps **sequence 0's** alpha across each overlap window — `1→0` when
+  /// sequence 0 holds the outgoing (earlier) clip, `0→1` when it holds the
+  /// incoming clip; either way the visible result dissolves outgoing→incoming.
+  /// Sequence 1 stays opaque. Audio (passthrough) is volume-ramped per clip via
+  /// [VolumeRampAudioProcessor] so the overlap sums to a crossfade, not a bump.
+  fun runCompositeCrossfade(
+    context: Context,
+    clips: List<CrossfadeClip>,
+    totalDurationSec: Double,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    require(clips.size >= 2) { "runCompositeCrossfade requires at least two clips" }
+    try {
+      runCompositeCrossfadeInternal(context, clips, totalDurationSec, stopToken, progress)
+    } finally {
+      clips.flatMap { it.spec.overlays }.toHashSet().forEach { runCatching { it.bitmap.recycle() } }
+    }
+  }
+
+  private class OverlapWindow(val start: Double, val end: Double, val seq0IsOutgoing: Boolean)
+
+  private fun runCompositeCrossfadeInternal(
+    context: Context,
+    clips: List<CrossfadeClip>,
+    totalDurationSec: Double,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    val first = clips.first().spec
+    val canvasW = first.outCanvasW.coerceAtLeast(2)
+    val canvasH = first.outCanvasH.coerceAtLeast(2)
+    File(first.outputPath).apply { if (exists()) delete() }
+
+    fun clipEnd(i: Int) = clips[i].outputStartSec + clips[i].effDurSec
+
+    // Overlap windows between adjacent clips. seq0IsOutgoing is true when the
+    // outgoing (earlier) clip i is on sequence 0 (even index) — then seq0's alpha
+    // ramps 1→0; otherwise seq0 holds the incoming clip and ramps 0→1.
+    val overlaps = ArrayList<OverlapWindow>()
+    var hasInteriorGap = false
+    for (i in 0 until clips.size - 1) {
+      val end = clipEnd(i)
+      val nextStart = clips[i + 1].outputStartSec
+      if (nextStart < end - 1e-3) {
+        overlaps.add(OverlapWindow(nextStart, end, seq0IsOutgoing = i % 2 == 0))
+      } else if (nextStart > end + 1e-3) {
+        hasInteriorGap = true
+      }
+    }
+    val needGaps = clips.first().outputStartSec > 1e-3 || hasInteriorGap
+
+    val transparent = authorTransparentImage(context, canvasW, canvasH)
+    try {
+      val seqBuilders = Array(2) { EditedMediaItemSequence.Builder() }
+      val cursor = doubleArrayOf(0.0, 0.0)
+      val padFps = (first.fps?.roundToInt() ?: 30).coerceAtLeast(1)
+      clips.forEachIndexed { i, clip ->
+        val p = i % 2
+        val lead = (clip.outputStartSec - cursor[p]).coerceAtLeast(0.0)
+        if (lead > 1e-3) seqBuilders[p].addItem(transparentItem(transparent, lead, padFps))
+        // Per-clip audio envelope: ramp the head if this clip is the incoming
+        // side of an overlap with the previous clip; ramp the tail if it is the
+        // outgoing side of an overlap with the next clip.
+        val headSec =
+          if (i > 0) (clipEnd(i - 1) - clip.outputStartSec).coerceAtLeast(0.0) else 0.0
+        val tailSec =
+          if (i < clips.size - 1) (clipEnd(i) - clips[i + 1].outputStartSec).coerceAtLeast(0.0) else 0.0
+        seqBuilders[p].addItem(buildCrossfadeItem(clip, headSec, tailSec))
+        cursor[p] = clip.outputStartSec + clip.effDurSec
+      }
+      for (p in 0..1) {
+        val trail = (totalDurationSec - cursor[p]).coerceAtLeast(0.0)
+        if (trail > 1e-3) seqBuilders[p].addItem(transparentItem(transparent, trail, padFps))
+      }
+      val seq0 = seqBuilders[0].build()
+      val seq1 = seqBuilders[1].build()
+
+      val compositor = object : VideoCompositorSettings {
+        override fun getOutputSize(inputSizes: MutableList<Size>): Size = Size(canvasW, canvasH)
+
+        override fun getOverlaySettings(inputId: Int, presentationTimeUs: Long): OverlaySettings {
+          // Sequence 1 (bottom) is always opaque; only sequence 0 (top) ramps.
+          if (inputId != 0) return OverlaySettings.Builder().build()
+          val tSec = presentationTimeUs / 1_000_000.0
+          for (ov in overlaps) {
+            if (tSec >= ov.start - 1e-3 && tSec <= ov.end + 1e-3) {
+              val span = (ov.end - ov.start).coerceAtLeast(1e-6)
+              val progressFrac = ((tSec - ov.start) / span).coerceIn(0.0, 1.0)
+              val alpha = if (ov.seq0IsOutgoing) 1.0 - progressFrac else progressFrac
+              return OverlaySettings.Builder().setAlphaScale(alpha.toFloat()).build()
+            }
+          }
+          return OverlaySettings.Builder().build()
+        }
+      }
+
+      val composition = Composition.Builder(seq0, seq1)
+        .setVideoCompositorSettings(compositor)
+        // A leading/interior gap leaves the audio-bearing sequences silent there;
+        // force a continuous track so passthrough audio survives (as in runMulti).
+        .experimentalSetForceAudioTrack(needGaps && !first.removeAudio)
+        .build()
+
+      runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
+        transformer.start(composition, first.outputPath)
+      }
+    } finally {
+      transparent.delete()
+    }
+  }
+
+  /// One crossfade clip's EditedMediaItem: its trim/transform video effects plus,
+  /// for passthrough audio, a [VolumeRampAudioProcessor] applying the head/tail
+  /// envelope over its overlap windows. Mute (`removeAudio`) drops audio and the
+  /// ramp with it.
+  private fun buildCrossfadeItem(clip: CrossfadeClip, headSec: Double, tailSec: Double): EditedMediaItem {
+    val audioProcessors: List<androidx.media3.common.audio.AudioProcessor> =
+      if (!clip.spec.removeAudio && (headSec > 1e-3 || tailSec > 1e-3)) {
+        listOf(VolumeRampAudioProcessor(clip.effDurSec, headSec, tailSec))
+      } else {
+        emptyList()
+      }
+    return EditedMediaItem.Builder(buildMediaItem(clip.spec))
+      .setEffects(Effects(audioProcessors, buildVideoEffects(clip.spec)))
+      .setRemoveAudio(clip.spec.removeAudio)
+      .build()
+  }
+
   private fun runMultiInternal(
     context: Context,
     clipSpecs: List<Spec>,
