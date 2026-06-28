@@ -436,8 +436,11 @@ interface RenderOptions {
   signal?: AbortSignal;
   controller?: VideoRenderController;
   onProgress?: (p: Progress) => void;
+  offthread?: boolean; // experimental (#34), compose/synthesize only — see below
 }
 ```
+
+> **`offthread` (experimental, #34).** `compose`/`synthesize` only, off by default. When `true`, the `'worklet'` `drawFrame` runs on a `react-native-worklets-core` context (off the React JS thread) instead of inline: each frame's `FrameTarget`/`FrameSource` are boxed (`NitroModules.box`), carried into the worklet runtime, and `unbox()`ed there. Requires `react-native-worklets-core` (optional peer dep) — otherwise the render rejects with `InvalidSpec`. The off-thread runner is a `'worklet'`, so it only executes once this library is built with the worklets-core Babel plugin; pixel-correctness must be verified on device/simulator. `ctx.finish()` is dispatched to the JS thread, so it may take effect a frame or two later than the inline path. Ignored by `trim`/`flip`/`stamp`.
 
 ### `Progress`
 

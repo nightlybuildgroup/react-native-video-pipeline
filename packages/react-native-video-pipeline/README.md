@@ -13,11 +13,11 @@ Offline video editing for React Native (iOS + Android) built on Nitro Modules. T
 ## Install
 
 ```sh
-yarn add react-native-video-pipeline react-native-nitro-modules react-native-worklets-core
+yarn add react-native-video-pipeline react-native-nitro-modules
 yarn add -D babel-plugin-video-pipeline
 ```
 
-`react-native-nitro-modules` and `react-native-worklets-core` are required peer dependencies. `@shopify/react-native-skia` and `react-native-reanimated` are optional peers — only consumers of the worklet `compose` / `synthesize` path need them.
+`react-native-nitro-modules` is the only required peer dependency. `react-native-worklets-core`, `@shopify/react-native-skia`, and `react-native-reanimated` are **optional** peers — add `react-native-worklets-core` only if you opt into the experimental off-thread compose path (`offthread: true`, #34), and Skia only for the consumer-side `drawWithSkia` helper.
 
 ## Quickstart
 

@@ -4,8 +4,8 @@
  * These exercise the JS orchestration — boxing, context dispatch, unbox, and
  * the reconstructed FrameDrawerContext — with a faithful in-process mock of
  * `react-native-worklets-core`. The actual cross-thread worklet execution
- * (pixel-correctness on the context thread) is a runtime concern verified
- * separately on a simulator/device; it cannot run in Jest (no JSI runtime).
+ * (pixel-correctness on the context thread) is NOT covered here — it cannot run
+ * in Jest (no JSI/worklets runtime) and must be verified on a simulator/device.
  */
 
 // Faithful mock: a context's run-async just invokes the worklet synchronously

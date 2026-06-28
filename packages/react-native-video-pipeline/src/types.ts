@@ -219,9 +219,13 @@ export interface RenderOptions {
    * **Status:** experimental, not on by default. The off-thread runner is a
    * `'worklet'`, so it only executes once this library is built with the
    * `react-native-worklets-core` Babel plugin applied; without it, worklets-core
-   * rejects the runner at runtime. Per-frame pixel-correctness is verified on a
-   * device/simulator (host unit tests have no JSI/worklets runtime). Tracked by
-   * #34.
+   * rejects the runner at runtime. Per-frame pixel-correctness must be verified
+   * on a device/simulator (host unit tests have no JSI/worklets runtime).
+   *
+   * Semantic difference: `ctx.finish()` (graceful end-of-stream for open-ended
+   * renders) is dispatched to the JS thread, so off-thread it may take effect a
+   * frame or two later than the frame-exact inline path — fine for "stop soon",
+   * not for "stop on exactly this frame". Tracked by #34.
    */
   offthread?: boolean;
 }

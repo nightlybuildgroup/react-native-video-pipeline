@@ -60,8 +60,15 @@ function loadWorklets(): WorkletsApiLike | undefined {
     // when it's absent.
     const req = require as (id: string) => { Worklets?: WorkletsApiLike };
     return req('react-native-worklets-core')?.Worklets;
-  } catch {
-    return undefined;
+  } catch (e) {
+    // Only treat a genuinely-missing module as "not installed". Any other error
+    // (e.g. the JS package is present but the native module wasn't linked/built)
+    // is a real misconfiguration — surface it instead of masking it as the
+    // optional-peer-absent case.
+    if ((e as { code?: string } | undefined)?.code === 'MODULE_NOT_FOUND') {
+      return undefined;
+    }
+    throw e;
   }
 }
 
