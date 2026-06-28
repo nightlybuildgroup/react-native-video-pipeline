@@ -356,6 +356,8 @@ type SynthesizeOutputSpec = OutputSpec & {
 
 `Video.synthesize` requires `SynthesizeOutputSpec`; the three required fields are enforced at compile time.
 
+**Frame rate (`output.fps`) on `Video.render`.** Setting `fps` re-times the output. iOS resamples in both directions (PTS becomes `outputIndex / fps`, so it can both drop and duplicate frames). Android runs on Media3, which can only **drop** frames (no interpolation): a target **below** the source rate is applied via `FrameDropEffect`; a target **equal to** the source is a no-op; a target **above** the source rate is **rejected** with `InvalidSpec` rather than silently keeping the source rate. The Android frame-drop strategy approximates the target from the real frame timestamps, so the resulting rate is close to — but not an exact `outputIndex / fps` resampling of — the requested value. (`Video.synthesize` always produces an exact `output.fps` on both platforms, since it authors every frame.)
+
 #### Output file semantics
 
 `path` is the on-disk destination for every operation that writes a file (`trim`, `flip`, `stamp`, `render`, `compose`, `synthesize`, `thumbnail`). The contract:

@@ -582,6 +582,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             cropH = 0.0,
             outWidth = null,
             outHeight = null,
+            fps = null,
             hevc = info.codec == "hevc",
             bitrate = null,
           ),
@@ -841,18 +842,6 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             ?: throw VideoPipelineInvalidSpecException(
               "render: no application context available for the transcoder"
             )
-          val progressSink = onProgress?.let { cb ->
-            TransformerRunner.ProgressSink { pct ->
-              cb(
-                Progress(
-                  framesCompleted = pct.toDouble(),
-                  nbFrames = 100.0,
-                  elapsedMs = 0.0,
-                  estimatedRemainingMs = null,
-                )
-              )
-            }
-          }
           TransformerRunner.run(
             context = ctx,
             spec = TransformerRunner.Spec(
@@ -871,11 +860,12 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
               cropH = t?.crop?.h ?: 0.0,
               outWidth = output.width?.roundToInt(),
               outHeight = output.height?.roundToInt(),
+              fps = resolveMedia3TargetFps(output.fps, info.fps),
               hevc = output.codec == VideoCodec.HEVC,
               bitrate = output.bitrate?.roundToInt(),
             ),
             stopToken = stopToken,
-            progress = progressSink,
+            progress = wrapTransformerProgress(onProgress),
           )
         }
         Unit
@@ -976,6 +966,32 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         )
       )
     }
+  }
+
+  /// Resolves the target frame rate for the Media3 ([TransformerRunner]) path.
+  /// Media3 can only *drop* frames (no interpolation), so:
+  ///   * no fps requested, or ≈ source        → null (keep the source rate)
+  ///   * fps < source                          → that fps (FrameDropEffect)
+  ///   * fps > source                          → reject (can't add frames)
+  /// The iOS transcoder resamples both directions (`outputIndex / fps`); Android
+  /// rejects an up-sample rather than silently keeping the source rate.
+  private fun resolveMedia3TargetFps(requestedFps: Double?, sourceFps: Double): Double? {
+    if (requestedFps == null || requestedFps <= 0.0) return null
+    // Tolerance absorbs NTSC nominal-vs-actual pairs (29.97↔30, 59.94↔60,
+    // 23.976↔24) so e.g. requesting 30 on a 29.97 source is a no-op, not a
+    // reject. The largest such gap is ~0.06fps; 0.2 leaves margin without
+    // masking a genuine up-sample request like 30→60.
+    val tolerance = 0.2
+    if (sourceFps > 0.0 && requestedFps > sourceFps + tolerance) {
+      throw VideoPipelineInvalidSpecException(
+        "render: output.fps ($requestedFps) exceeds the source frame rate " +
+          "($sourceFps). Android (Media3) can only reduce the frame rate — it " +
+          "has no frame interpolation. Request an output.fps ≤ the source rate."
+      )
+    }
+    // ≈ source (within tolerance): no-op, let Media3 keep the source cadence.
+    if (sourceFps > 0.0 && requestedFps >= sourceFps - tolerance) return null
+    return requestedFps
   }
 
   private fun wrapProgressCallback(

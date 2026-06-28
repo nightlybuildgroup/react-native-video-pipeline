@@ -149,7 +149,7 @@ a small red marker at top-left as a visual canary.
 ## Render with transform (Media3 Transformer)
 
 `Video.render` with a single-clip `transform` (rotate / flip / crop), an
-output-side change (size / codec / bitrate), or a trim window runs through
+output-side change (size / fps / codec / bitrate), or a trim window runs through
 **Media3 Transformer** (`TransformerRunner.kt`) — the canonical Jetpack editing
 engine. It owns the decode → effects → encode lifecycle, so there is no
 hand-rolled MediaCodec/EOS plumbing:
@@ -161,6 +161,11 @@ hand-rolled MediaCodec/EOS plumbing:
   contract → negated for Media3; flips are scale ±1).
 - **Explicit output size** → `Presentation`; otherwise Media3 derives it (a 90°
   rotation yields portrait output without the caller pinning dimensions).
+- **Target fps** → `FrameDropEffect` when `output.fps` is **below** the source
+  rate. Media3 has no frame interpolation, so it can only drop frames: a target
+  equal to the source is a no-op, and a target *above* the source rate is
+  rejected (`InvalidSpec`) instead of silently keeping the source cadence. This
+  differs from iOS, which resamples both directions as `outputIndex / fps`.
 - **Audio** → preserved automatically (Transformer copies the audio through).
 - **Transmux fast path** → when the requested edit needs no pixel work, Media3
   copies compressed samples without re-encoding.
