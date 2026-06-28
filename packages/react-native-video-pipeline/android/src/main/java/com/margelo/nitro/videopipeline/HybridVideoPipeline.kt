@@ -8,10 +8,10 @@
 ///     compressed-passthrough concat (T042). Single-clip + any transform /
 ///     overlay / re-encode lands on the transcode path in T044.
 ///   - `trim()` — T042. Compressed passthrough via Remuxer.remuxTrim.
-///   - `flip()` — rejects in v0.1; the true horizontal/vertical flip is a
-///     matrix operation in the MP4 `tkhd` that MediaMuxer's API doesn't
-///     expose (only `setOrientationHint(0|90|180|270)`). T044's transcode
-///     path supplies the real flip.
+///   - `flip()` — horizontal/vertical mirror via Media3 Transformer. MediaMuxer
+///     can't store a mirror (only `setOrientationHint(0|90|180|270)`), so the
+///     flip is a pixel re-encode (audio + source codec preserved), unlike iOS
+///     where it's a passthrough `preferredTransform` remux.
 ///   - `stamp()` — T042 metadata-only branch via Remuxer.remuxStamp.
 ///     Watermark branch rejects until T044 wires the Android transcode +
 ///     BitmapOverlay.
@@ -539,20 +539,64 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     }
   }
 
+  /// Horizontal / vertical mirror. MediaMuxer's container API only exposes an
+  /// orientation hint (0/90/180/270), so a mirror can't be a passthrough remux
+  /// the way it is on iOS (AVFoundation stores a full affine `preferredTransform`
+  /// that can carry a scale of -1). On Android the flip is a pixel operation, so
+  /// it routes through Media3 Transformer ([TransformerRunner]) — `flipH`/`flipV`
+  /// become a `ScaleAndRotateTransformation` scale of -1, audio is preserved, and
+  /// the source codec is kept (H.264 source → H.264 output, HEVC → HEVC). This
+  /// matches the iOS `Video.flip` contract; only the cost differs (re-encode vs
+  /// remux). Equivalent to `Video.render({ clips: [{ uri, transform: { flipH } }] })`.
   override fun flip(
     uri: String,
     outPath: String,
     axis: FlipAxis,
     renderToken: String,
     onProgress: ((p: Progress) -> Unit)?,
-  ): Promise<Unit> = Promise.rejected(
-    VideoPipelineInvalidSpecException(
-      "flip: Android v0.1 does not support rotation-flag flip — MediaMuxer " +
-        "only exposes orientation hint (0/90/180/270), not the matrix " +
-        "operation needed for horizontal/vertical flip. Transcode fallback " +
-        "lands in T044."
-    )
-  )
+  ): Promise<Unit> {
+    val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outPath, keepAlive = true)
+    return Promise.parallel {
+      try {
+        val ctx = NitroModules.applicationContext?.applicationContext
+          ?: throw VideoPipelineInvalidSpecException(
+            "flip: no application context available for the transcoder"
+          )
+        val info = ProbeRunner.info(uri)
+        TransformerRunner.run(
+          context = ctx,
+          spec = TransformerRunner.Spec(
+            sourceUri = uri,
+            outputPath = outPath,
+            sourceWidth = info.codedWidth.roundToInt(),
+            sourceHeight = info.codedHeight.roundToInt(),
+            startSec = 0.0,
+            durationSec = 0.0,
+            rotate = -1,
+            flipH = axis == FlipAxis.HORIZONTAL,
+            flipV = axis == FlipAxis.VERTICAL,
+            cropX = 0.0,
+            cropY = 0.0,
+            cropW = 0.0,
+            cropH = 0.0,
+            outWidth = null,
+            outHeight = null,
+            hevc = info.codec == "hevc",
+            bitrate = null,
+          ),
+          stopToken = stopToken,
+          progress = wrapTransformerProgress(onProgress),
+        )
+        Unit
+      } catch (e: TransformerRunner.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } finally {
+        guard.end()
+        RenderTokenRegistry.unregisterToken(renderToken)
+      }
+    }
+  }
 
   override fun stamp(
     uri: String,
@@ -915,6 +959,24 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
   }
 
   // --- helpers --------------------------------------------------------
+
+  /// Adapts the Nitro progress callback to [TransformerRunner.ProgressSink].
+  /// Media3 reports a 0..100 percentage (no frame counts), so `framesCompleted`
+  /// carries the percentage against a fixed `nbFrames` of 100.
+  private fun wrapTransformerProgress(
+    cb: ((Progress) -> Unit)?,
+  ): TransformerRunner.ProgressSink? = cb?.let { onProgress ->
+    TransformerRunner.ProgressSink { pct ->
+      onProgress(
+        Progress(
+          framesCompleted = pct.toDouble(),
+          nbFrames = 100.0,
+          elapsedMs = 0.0,
+          estimatedRemainingMs = null,
+        )
+      )
+    }
+  }
 
   private fun wrapProgressCallback(
     cb: (Progress) -> Unit,

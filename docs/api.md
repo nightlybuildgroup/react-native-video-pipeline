@@ -451,7 +451,7 @@ interface Progress {
 | Operation                             | Underlying path | Reports progress? |
 | ------------------------------------- | --------------- | ----------------- |
 | `Video.trim`                          | remux           | No                |
-| `Video.flip`                          | remux           | No (iOS); rejected with `InvalidSpec` on Android until the transcode fallback lands |
+| `Video.flip`                          | remux (iOS) / transcode (Android) | No (iOS — passthrough remux); Yes (Android — re-encode via Media3) |
 | `Video.stamp` (metadata only)         | remux           | No                |
 | `Video.stamp` (with image watermark)  | transcode       | Yes               |
 
