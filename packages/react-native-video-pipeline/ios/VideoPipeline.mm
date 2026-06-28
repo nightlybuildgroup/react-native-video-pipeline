@@ -929,6 +929,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                 sourceDuration:clip.sourceDuration
                                    outputStart:clip.outputStart]];
     }
+    const RNVPAudioMode concatAudioMode = resolveAudio(spec).mode;
     const std::string concatTokenCopy = renderToken;
     std::shared_ptr<StopToken> concatStop =
         !renderToken.empty()
@@ -947,11 +948,12 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                         stopToken:concatRunnerToken];
 
     return Promise<void>::async(
-        [sources, outputURLConcat, concatRunnerToken, concatTokenCopy,
-         concatGuard]() {
+        [sources, outputURLConcat, concatAudioMode, concatRunnerToken,
+         concatTokenCopy, concatGuard]() {
       NSError* err = nil;
       const BOOL ok = [RNVPRemuxer remuxConcatSources:sources
                                                 toURL:outputURLConcat
+                                            audioMode:concatAudioMode
                                                  stop:concatRunnerToken
                                                 error:&err];
       RenderTokenRegistry::unregisterToken(concatTokenCopy);

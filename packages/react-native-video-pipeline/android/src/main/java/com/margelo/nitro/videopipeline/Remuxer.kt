@@ -134,13 +134,20 @@ internal object Remuxer {
 
   /// Multi-source concat. All sources share codec / dimensions / orientation
   /// (mismatches reject with InvalidSpec). PTS is rebased onto a cumulative
-  /// output cursor so playback sees a single continuous video. Audio is
-  /// dropped in v0.1 — the concat silent-audio authoring lands on the
-  /// transcode path later, matching iOS T029's scope.
+  /// output cursor so playback sees a single continuous video.
+  ///
+  /// Audio: `AudioMode.PASSTHROUGH` (default) splices each clip's own audio
+  /// onto the joined timeline; a clip without an audio track leaves a silent
+  /// gap (the cursor advances regardless). `AudioMode.MUTE` writes video only.
+  /// The output audio track is created from the first clip that carries audio,
+  /// so passthrough concat assumes a shared audio format (same as the video
+  /// signature requirement). `AudioMode.REPLACE` is not wired on this path yet
+  /// and is rejected upstream.
   fun remuxConcat(
     sources: List<ConcatSource>,
     outputPath: String,
     stopToken: VideoPipelineStopToken?,
+    audioMode: AudioMode = AudioMode.PASSTHROUGH,
   ) {
     if (sources.isEmpty()) {
       throw InvalidSpecException("concat: sources must not be empty")
@@ -170,11 +177,25 @@ internal object Remuxer {
       val sharedFormat = enforceSharedSignature(extractors, videoIndexes, resolvedPaths)
       val rotation = readRotation(resolvedPaths[0])
 
+      // Per-clip audio track index (-1 if the clip has no audio). The output
+      // audio track is created from the first clip that carries one; mute skips
+      // audio entirely.
+      val audioIndexes = extractors.map { selectTracks(it).audioIndex }
+      val firstAudioClip =
+        if (audioMode == AudioMode.MUTE) -1 else audioIndexes.indexOfFirst { it >= 0 }
+
       File(outputPath).apply { if (exists()) delete() }
       val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
       try {
         if (rotation != 0) muxer.setOrientationHint(rotation)
         val videoTrack = muxer.addTrack(sharedFormat)
+        val audioTrack = if (firstAudioClip >= 0) {
+          muxer.addTrack(
+            extractors[firstAudioClip].getTrackFormat(audioIndexes[firstAudioClip])
+          )
+        } else {
+          -1
+        }
         muxer.start()
 
         var outputCursorUs = 0L
@@ -183,22 +204,35 @@ internal object Remuxer {
             throw CancelledException()
           }
           val extractor = extractors[i]
-          extractor.selectTrack(videoIndexes[i])
           val src = sources[i]
           val startUs = (src.sourceStart * 1_000_000.0).roundToLong()
           val endUs = ((src.sourceStart + src.sourceDuration) * 1_000_000.0).roundToLong()
-          val copied = copyVideoOnly(
+          val copied = copyTrackRange(
             extractor = extractor,
-            videoTrackIndex = videoIndexes[i],
+            trackIndex = videoIndexes[i],
             muxer = muxer,
-            outputVideoTrack = videoTrack,
+            outputTrack = videoTrack,
             sourceStartUs = startUs,
             sourceEndUs = endUs,
             outputCursorUs = outputCursorUs,
             stopToken = stopToken,
           )
+          // Splice this clip's audio over the same window. A clip without audio
+          // leaves a silent gap; the cursor still advances by the video span so
+          // later clips stay in sync.
+          if (audioTrack >= 0 && audioIndexes[i] >= 0) {
+            copyTrackRange(
+              extractor = extractor,
+              trackIndex = audioIndexes[i],
+              muxer = muxer,
+              outputTrack = audioTrack,
+              sourceStartUs = startUs,
+              sourceEndUs = endUs,
+              outputCursorUs = outputCursorUs,
+              stopToken = stopToken,
+            )
+          }
           outputCursorUs += copied.durationUs
-          extractor.unselectTrack(videoIndexes[i])
         }
         muxer.stop()
       } catch (t: Throwable) {
@@ -501,55 +535,65 @@ internal object Remuxer {
   /// concat drops audio (iOS T029 parity). Returns the written sample count
   /// and the wall-time span so the caller can advance the cumulative
   /// output cursor onto the next clip.
-  private fun copyVideoOnly(
+  /// Copy one source track's compressed samples in [sourceStartUs, sourceEndUs)
+  /// to `outputTrack`, rebased onto `outputCursorUs`. Selects and unselects the
+  /// track itself so video and audio can be copied in independent passes over
+  /// the same extractor. Used by the concat path for both the video and the
+  /// passthrough audio track.
+  private fun copyTrackRange(
     extractor: MediaExtractor,
-    videoTrackIndex: Int,
+    trackIndex: Int,
     muxer: MediaMuxer,
-    outputVideoTrack: Int,
+    outputTrack: Int,
     sourceStartUs: Long,
     sourceEndUs: Long,
     outputCursorUs: Long,
     stopToken: VideoPipelineStopToken?,
   ): CopiedRange {
-    extractor.seekTo(sourceStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
-    val bufferInfo = MediaCodec.BufferInfo()
-    val buffer = ByteBuffer.allocateDirect(DEFAULT_SAMPLE_BUFFER_BYTES)
-    var sampleCount = 0
-    var maxRelativeUs = 0L
-    while (true) {
-      if (stopToken?.isAbortRequested() == true) {
-        throw CancelledException()
-      }
-      val trackIdx = extractor.sampleTrackIndex
-      if (trackIdx < 0) break
-      if (trackIdx != videoTrackIndex) {
+    extractor.selectTrack(trackIndex)
+    try {
+      extractor.seekTo(sourceStartUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+      val bufferInfo = MediaCodec.BufferInfo()
+      val buffer = ByteBuffer.allocateDirect(DEFAULT_SAMPLE_BUFFER_BYTES)
+      var sampleCount = 0
+      var maxRelativeUs = 0L
+      while (true) {
+        if (stopToken?.isAbortRequested() == true) {
+          throw CancelledException()
+        }
+        val trackIdx = extractor.sampleTrackIndex
+        if (trackIdx < 0) break
+        if (trackIdx != trackIndex) {
+          extractor.advance()
+          continue
+        }
+        val pts = extractor.sampleTime
+        if (pts < 0 || pts >= sourceEndUs) break
+        if (pts < sourceStartUs) {
+          extractor.advance()
+          continue
+        }
+        buffer.clear()
+        val sampleSize = extractor.readSampleData(buffer, 0)
+        if (sampleSize < 0) break
+        bufferInfo.offset = 0
+        bufferInfo.size = sampleSize
+        val relativeUs = max(0L, pts - sourceStartUs)
+        bufferInfo.presentationTimeUs = relativeUs + outputCursorUs
+        bufferInfo.flags = extractorFlagsToBufferFlags(extractor.sampleFlags)
+        muxer.writeSampleData(outputTrack, buffer, bufferInfo)
+        sampleCount++
+        maxRelativeUs = max(maxRelativeUs, relativeUs)
         extractor.advance()
-        continue
       }
-      val pts = extractor.sampleTime
-      if (pts < 0 || pts >= sourceEndUs) break
-      if (pts < sourceStartUs) {
-        extractor.advance()
-        continue
-      }
-      buffer.clear()
-      val sampleSize = extractor.readSampleData(buffer, 0)
-      if (sampleSize < 0) break
-      bufferInfo.offset = 0
-      bufferInfo.size = sampleSize
-      val relativeUs = max(0L, pts - sourceStartUs)
-      bufferInfo.presentationTimeUs = relativeUs + outputCursorUs
-      bufferInfo.flags = extractorFlagsToBufferFlags(extractor.sampleFlags)
-      muxer.writeSampleData(outputVideoTrack, buffer, bufferInfo)
-      sampleCount++
-      maxRelativeUs = max(maxRelativeUs, relativeUs)
-      extractor.advance()
+      // Duration = (requested end) - (requested start). Using the requested
+      // span (not the highest sample PTS) keeps the output cursor aligned with
+      // the caller's timeline even when the last sample lands before endUs.
+      val durationUs = max(0L, sourceEndUs - sourceStartUs)
+      return CopiedRange(sampleCount, durationUs)
+    } finally {
+      extractor.unselectTrack(trackIndex)
     }
-    // Duration = (requested end) - (requested start). Using the requested
-    // span (not the highest sample PTS) keeps the output cursor aligned with
-    // the caller's timeline even when the last sample lands before endUs.
-    val durationUs = max(0L, sourceEndUs - sourceStartUs)
-    return CopiedRange(sampleCount, durationUs)
   }
 
   private fun extractorFlagsToBufferFlags(extractorFlags: Int): Int {

@@ -599,6 +599,18 @@ NSString *fourCCString(FourCharCode code) {
                      toURL:(NSURL *)outputURL
                       stop:(nullable RNVPStopToken *)stopToken
                      error:(NSError *_Nullable __autoreleasing *)error {
+  return [self remuxConcatSources:sources
+                            toURL:outputURL
+                        audioMode:RNVPAudioModePassthrough
+                             stop:stopToken
+                            error:error];
+}
+
++ (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
+                     toURL:(NSURL *)outputURL
+                 audioMode:(RNVPAudioMode)audioMode
+                      stop:(nullable RNVPStopToken *)stopToken
+                     error:(NSError *_Nullable __autoreleasing *)error {
   const std::shared_ptr<margelo::nitro::videopipeline::StopToken> stop =
       stopToken != nil
           ? [stopToken cpp]
@@ -771,6 +783,17 @@ NSString *fourCCString(FourCharCode code) {
   }
   compositionVideoTrack.preferredTransform = signature.preferredTransform;
 
+  // Audio composition track for the passthrough soundtrack. Mute writes video
+  // only; passthrough splices each clip's own audio onto the same timeline. A
+  // clip without an audio track leaves a silent gap (the composition advances
+  // the cursor regardless), so a mixed audio/no-audio concat stays in sync.
+  AVMutableCompositionTrack *compositionAudioTrack =
+      audioMode == RNVPAudioModeMute
+          ? nil
+          : [composition
+                addMutableTrackWithMediaType:AVMediaTypeAudio
+                            preferredTrackID:kCMPersistentTrackID_Invalid];
+
   CMTime cursor = kCMTimeZero;
   for (NSUInteger i = 0; i < sources.count; i++) {
     RNVPRemuxerConcatSource *src = sources[i];
@@ -794,6 +817,19 @@ NSString *fourCCString(FourCharCode code) {
                                                 (unsigned long)i]);
       }
       return NO;
+    }
+    // Splice the clip's audio over the same window. Best-effort: a clip with no
+    // audio (or a failed insert) just leaves silence for its span rather than
+    // failing the whole concat.
+    if (compositionAudioTrack != nil) {
+      AVAssetTrack *clipAudio =
+          [assets[i] tracksWithMediaType:AVMediaTypeAudio].firstObject;
+      if (clipAudio != nil) {
+        [compositionAudioTrack insertTimeRange:range
+                                       ofTrack:clipAudio
+                                        atTime:cursor
+                                         error:nil];
+      }
     }
     cursor = CMTimeAdd(cursor, clipDuration);
   }
