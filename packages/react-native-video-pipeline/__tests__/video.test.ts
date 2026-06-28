@@ -538,6 +538,30 @@ describe('Video.render — validation', () => {
     await promise;
   });
 
+  it('forwards a per-clip transform into the native Clip array on a multi-clip render (#16)', async () => {
+    // Per-clip transforms on a multi-clip spec are a #16 capability: the native
+    // side routes the spec to the transcode-each-then-concat path when any clip
+    // carries a transform. This locks the JS contract that path depends on — the
+    // transform reaches the boundary per clip, untouched, and only on its clip.
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'a.mp4', startSec: 0, durationSec: 3, transform: { rotate: 90, flipH: true } },
+        { uri: 'b.mp4', startSec: 0, durationSec: 4 },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as {
+      clips: Array<{ uri: string; transform?: { rotate?: number; flipH?: boolean } }>;
+    };
+    expect(passed.clips[0]?.transform).toEqual({ rotate: 90, flipH: true });
+    // A clip with no transform stays untransformed — the field is omitted, not
+    // defaulted, so the native router can keep that clip on the passthrough path.
+    expect(passed.clips[1]).not.toHaveProperty('transform');
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
   it('probes missing durationSec via Video.info and uses the remaining source duration', async () => {
     const promise = Video.render({
       output: { path: '/tmp/out.mp4' },
