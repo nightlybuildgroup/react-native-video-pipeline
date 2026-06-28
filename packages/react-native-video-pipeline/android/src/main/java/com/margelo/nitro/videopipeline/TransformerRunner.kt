@@ -242,10 +242,12 @@ internal object TransformerRunner {
           .build()
         Composition.Builder(videoSeq, EditedMediaItemSequence.Builder(audioItem).build()).build()
       } else {
-        // The black image items carry no audio; force a continuous audio track
-        // so passthrough audio survives across the gaps as silence.
+        // The black image items carry no audio; for PASSTHROUGH gaps force a
+        // continuous audio track so the source audio survives across the gaps as
+        // silence. Never force it for mute (removeAudio) — that must stay
+        // video-only.
         Composition.Builder(videoSeq)
-          .experimentalSetForceAudioTrack(needGaps)
+          .experimentalSetForceAudioTrack(needGaps && !first.removeAudio)
           .build()
       }
 
