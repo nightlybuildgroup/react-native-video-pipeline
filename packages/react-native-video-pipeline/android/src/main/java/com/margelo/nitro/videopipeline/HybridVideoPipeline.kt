@@ -99,21 +99,19 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
     val clips = spec.clips
-    // Multi-track / PiP overlay tracks (#17) composite on iOS only for now —
-    // the Android Media3 spatial compositor is a follow-up. Reject explicitly.
+    // Multi-track / PiP overlay tracks (#45 — Android parity with iOS #17). An
+    // overlay clip (track > 0) is scaled into its normalized `frame` rect and
+    // composited on top of the base timeline via a multi-sequence Media3
+    // Composition (renderCompositePip). The base track (0) clips render exactly
+    // as a single-track timeline would.
     if (clips != null && clips.any { (it.track ?: 0.0) > 0.5 }) {
-      return Promise.rejected(
-        VideoPipelineInvalidSpecException(
-          "overlay tracks (clip.track > 0) are not supported on Android yet — " +
-            "they composite as PiP on iOS; use a single track on Android"
-        )
-      )
+      return renderCompositePip(spec, clips.toList(), renderToken, onProgress)
     }
     // Timeline overlaps (a clip starting before the previous one ends) are
     // crossfade-composited on iOS (#18). The Android Media3 crossfade — a
     // multi-sequence Composition with a time-ramped alpha — is not implemented
     // yet, so reject explicitly here rather than mis-render the overlap as a
-    // gapless concat. Tracked as Android follow-up to #18.
+    // gapless concat. Tracked as Android follow-up #43.
     if (clips != null && hasOverlap(clips.toList())) {
       return Promise.rejected(
         VideoPipelineInvalidSpecException(
@@ -974,6 +972,200 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         // it in a second compressed-passthrough pass (audio + video copied,
         // location via MediaMuxer.setLocation, the rest via Mp4MetadataInjector).
         // Mirrors the full MetadataSpec the metadata-only stamp path persists.
+        spec.metadata?.let { applyRenderMetadata(outputPath, it) }
+        Unit
+      } catch (e: TransformerRunner.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.InvalidSpecException) {
+        throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
+      } finally {
+        guard.end()
+        RenderTokenRegistry.unregisterToken(renderToken)
+      }
+    }
+  }
+
+  /// Multi-track / PiP compositing (#45 — Android parity with iOS #17). The
+  /// track-0 clips form the base timeline (rendered exactly as a single-track
+  /// multi-clip render would); each track-`>0` clip is scaled into its
+  /// normalized `frame` rect and composited on top, in ascending z-order, over
+  /// its `[outputStart, +effDur]` window. Runs as one Media3 multi-sequence
+  /// [Composition] via [TransformerRunner.runCompositePip].
+  ///
+  /// v1 limits (documented in docs/rendering-android.md): overlay audio is
+  /// dropped; the base audio honours passthrough/mute (audio.mode = 'replace'
+  /// with overlay tracks rejects); spec-level overlays (watermarks) combined
+  /// with overlay tracks reject — the z-order against PiP boxes is ambiguous.
+  private fun renderCompositePip(
+    spec: VideoSpec,
+    clips: List<Clip>,
+    renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
+  ): Promise<Unit> {
+    val outputPath = spec.output.path
+    val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
+    return Promise.parallel {
+      try {
+        val output = spec.output
+        if (spec.duration != null) {
+          throw VideoPipelineInvalidSpecException("duration is only valid when clips is empty")
+        }
+        val baseClips = clips.filter { (it.track ?: 0.0) <= 0.5 }
+        val overlayClips = clips.filter { (it.track ?: 0.0) > 0.5 }
+        if (baseClips.isEmpty()) {
+          throw VideoPipelineInvalidSpecException(
+            "overlay tracks (track > 0) require at least one base-track (track 0) clip"
+          )
+        }
+        // The base track is a normal timeline; overlaps among base clips are
+        // crossfade-only (not yet on Android — #43). Gaps are allowed.
+        var basePrevEnd = 0.0
+        baseClips.forEach { c ->
+          if (c.outputStart < basePrevEnd - 1e-3) {
+            throw VideoPipelineInvalidSpecException(
+              "base-track overlaps are not supported on Android yet (#43); " +
+                "overlay (PiP) tracks compose on top of a non-overlapping base"
+            )
+          }
+          basePrevEnd = c.outputStart + c.sourceDuration
+        }
+        // Spec-level overlays (watermarks) + overlay tracks have an ambiguous
+        // z-order against the PiP boxes; reject the combo for now (follow-up).
+        if (spec.overlays?.isNotEmpty() == true) {
+          throw VideoPipelineInvalidSpecException(
+            "static overlays combined with overlay/PiP tracks are not supported " +
+              "yet — render the watermark in a separate pass"
+          )
+        }
+        // Overlay audio is dropped in v1; audio.mode = 'replace' on the base is a
+        // follow-up (the replacement soundtrack would need a parallel sequence
+        // alongside the compositor).
+        if (spec.audio?.mode == AudioMode.REPLACE) {
+          throw VideoPipelineInvalidSpecException(
+            "audio.mode = 'replace' with overlay/PiP tracks is not supported yet"
+          )
+        }
+        val ctx = NitroModules.applicationContext?.applicationContext
+          ?: throw VideoPipelineInvalidSpecException(
+            "render: no application context available for the transcoder"
+          )
+
+        val baseInfos = baseClips.map { ProbeRunner.info(it.uri) }
+        val overlayInfos = overlayClips.map { ProbeRunner.info(it.uri) }
+
+        // Shared output canvas, derived from base clip 0 (post its own rotation)
+        // unless the output pins dimensions — same rule as renderTranscodeMulti.
+        val t0 = baseClips[0].transform
+        val rot0 = t0?.rotate?.roundToInt() ?: -1
+        val swap0 = rot0 == 90 || rot0 == 270
+        val content0W = t0?.crop?.w ?: baseInfos[0].width
+        val content0H = t0?.crop?.h ?: baseInfos[0].height
+        val canvasW = (output.width ?: if (swap0) content0H else content0W).roundToInt()
+        val canvasH = (output.height ?: if (swap0) content0W else content0H).roundToInt()
+
+        // Effective rendered durations (a trim is clamped to source EOF).
+        fun effDur(clip: Clip, info: VideoInfo): Double {
+          val isRealTrim = clip.sourceStart > 1e-3 || clip.sourceDuration < info.durationSec - 0.05
+          return if (isRealTrim) {
+            minOf(clip.sourceDuration, info.durationSec - clip.sourceStart).coerceAtLeast(0.0)
+          } else {
+            info.durationSec
+          }
+        }
+        val baseEff = baseClips.indices.map { effDur(baseClips[it], baseInfos[it]) }
+        val totalDurationSec = baseClips.last().outputStart + baseEff.last()
+
+        fun buildSpec(
+          clip: Clip,
+          info: VideoInfo,
+          leadingGap: Double,
+          removeAudio: Boolean,
+        ): TransformerRunner.Spec {
+          val t = clip.transform
+          val rotateDeg = t?.rotate?.roundToInt() ?: -1
+          val isRealTrim = clip.sourceStart > 1e-3 || clip.sourceDuration < info.durationSec - 0.05
+          return TransformerRunner.Spec(
+            sourceUri = clip.uri,
+            outputPath = outputPath,
+            sourceWidth = info.codedWidth.roundToInt(),
+            sourceHeight = info.codedHeight.roundToInt(),
+            startSec = if (isRealTrim) clip.sourceStart else 0.0,
+            durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
+            rotate = rotateDeg,
+            flipH = t?.flipH ?: false,
+            flipV = t?.flipV ?: false,
+            cropX = t?.crop?.x ?: 0.0,
+            cropY = t?.crop?.y ?: 0.0,
+            cropW = t?.crop?.w ?: 0.0,
+            cropH = t?.crop?.h ?: 0.0,
+            // Pin every layer to the shared canvas so overlay setScale fractions
+            // map to output pixels and base clips align.
+            outWidth = canvasW,
+            outHeight = canvasH,
+            fps = resolveMedia3TargetFps(output.fps, info.fps),
+            hevc = output.codec == VideoCodec.HEVC,
+            bitrate = output.bitrate?.roundToInt(),
+            outCanvasW = canvasW,
+            outCanvasH = canvasH,
+            removeAudio = removeAudio,
+            outputDurationSec = totalDurationSec,
+            leadingGapSec = leadingGap,
+          )
+        }
+
+        val muteBase = spec.audio?.mode == AudioMode.MUTE
+        val baseSpecs = baseClips.indices.map { i ->
+          val leadingGap = if (i == 0) {
+            baseClips[i].outputStart
+          } else {
+            baseClips[i].outputStart - (baseClips[i - 1].outputStart + baseEff[i - 1])
+          }.coerceAtLeast(0.0)
+          buildSpec(baseClips[i], baseInfos[i], leadingGap, removeAudio = muteBase)
+        }
+
+        val overlayLayers = overlayClips.indices.map { i ->
+          val clip = overlayClips[i]
+          val info = overlayInfos[i]
+          val f = clip.frame
+          // Validate placement (JS already enforces; re-check a direct caller).
+          if (f != null) {
+            val inBounds = f.x in -1e-6..1.0 && f.y in -1e-6..1.0 &&
+              f.w in 1e-6..1.0 + 1e-6 && f.h in 1e-6..1.0 + 1e-6 &&
+              f.x + f.w <= 1.0 + 1e-3 && f.y + f.h <= 1.0 + 1e-3
+            if (!inBounds) {
+              throw VideoPipelineInvalidSpecException(
+                "overlay frame must be within the unit square (0..1, x+w<=1, " +
+                  "y+h<=1); got {x=${f.x}, y=${f.y}, w=${f.w}, h=${f.h}}"
+              )
+            }
+          }
+          val eff = effDur(clip, info)
+          if (clip.outputStart + eff > totalDurationSec + 1e-3) {
+            throw VideoPipelineInvalidSpecException(
+              "overlay track window [${clip.outputStart}, ${clip.outputStart + eff}] " +
+                "extends past the base timeline ($totalDurationSec s)"
+            )
+          }
+          TransformerRunner.OverlayLayer(
+            spec = buildSpec(clip, info, leadingGap = 0.0, removeAudio = true),
+            // Omitted frame = fill the whole output (matches iOS/api.md).
+            frameX = f?.x ?: 0.0,
+            frameY = f?.y ?: 0.0,
+            frameW = f?.w ?: 1.0,
+            frameH = f?.h ?: 1.0,
+            outputStartSec = clip.outputStart,
+            effDurSec = eff,
+          )
+        }
+
+        TransformerRunner.runCompositePip(
+          ctx, baseSpecs, overlayLayers, totalDurationSec, stopToken,
+          wrapTransformerProgress(onProgress),
+        )
+
         spec.metadata?.let { applyRenderMetadata(outputPath, it) }
         Unit
       } catch (e: TransformerRunner.CancelledException) {
