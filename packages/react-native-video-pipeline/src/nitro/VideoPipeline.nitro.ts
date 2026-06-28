@@ -336,6 +336,12 @@ export interface AudioSpec {
   replaceUri?: string;
 }
 
+/**
+ * `passthrough` (default) keeps the source audio. `mute` (drop the track) and
+ * `replace` (swap in `replaceUri`) are **not implemented yet** — the JS layer
+ * rejects them with `InvalidSpecError` rather than silently producing output
+ * with unchanged audio. Native support is tracked in #29.
+ */
 export type AudioMode = 'passthrough' | 'mute' | 'replace';
 
 export interface MetadataSpec {
