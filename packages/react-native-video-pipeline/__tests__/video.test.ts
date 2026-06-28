@@ -556,7 +556,9 @@ describe('Video.render — validation', () => {
     };
     expect(passed.clips[0]?.transform).toEqual({ rotate: 90, flipH: true });
     // A clip with no transform stays untransformed — the field is omitted, not
-    // defaulted, so the native router can keep that clip on the passthrough path.
+    // defaulted. Once any clip carries a transform the whole multi-clip job
+    // re-encodes, but each clip's pixel work is still read per clip, so an
+    // omitted transform must mean "identity for this clip", never a zeroed one.
     expect(passed.clips[1]).not.toHaveProperty('transform');
     fake.renderCalls[0]?.resolve();
     await promise;
