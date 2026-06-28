@@ -104,8 +104,13 @@ internal object ProbeRunner {
       // (no dedicated field) — also matching iOS. A stamped creationDate wins
       // over the container's mux-time default (METADATA_KEY_DATE).
       val injectedDescription = custom.remove(Mp4MetadataInjector.KEY_DESCRIPTION)
-      val injectedCreationDate = custom.remove(Mp4MetadataInjector.KEY_CREATION_DATE)
+      // Only consume `creationDate` from the custom bag when it actually parses
+      // as an instant. A caller who authored a literal `custom["creationDate"]`
+      // with a non-date value keeps it in `custom` (caller owns their keys)
+      // rather than having it silently dropped.
+      val injectedCreationDate = custom[Mp4MetadataInjector.KEY_CREATION_DATE]
         ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+      if (injectedCreationDate != null) custom.remove(Mp4MetadataInjector.KEY_CREATION_DATE)
 
       val fileSizeBytes = try {
         java.io.File(path).length().toDouble()

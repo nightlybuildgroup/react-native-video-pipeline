@@ -151,6 +151,22 @@ class Mp4MetadataInjectorInstrumentedTest {
     assertEquals("v", items["com.acme.k"])
   }
 
+  /// A caller-authored custom key that collides with the canonical
+  /// `creationDate` key but isn't a parseable date must survive the probe
+  /// round-trip in `custom` (caller owns their keys), not be silently consumed
+  /// by the dedicated-field mapping.
+  @Test
+  fun unparseableCreationDateCustomKeyStaysInCustom() {
+    val path = synthFixture("bad-date")
+    Mp4MetadataInjector.inject(path, mapOf(Mp4MetadataInjector.KEY_CREATION_DATE to "not-a-date"))
+    val info = ProbeRunner.info(path)
+    assertEquals(
+      "non-date custom value preserved in custom",
+      "not-a-date",
+      (info.custom ?: emptyMap())[Mp4MetadataInjector.KEY_CREATION_DATE],
+    )
+  }
+
   /// A tiny shrink (1..7 bytes) can't be expressed as a standalone free box, so
   /// padMoovToNoShrink overshoots by a few bytes and the standard grow path
   /// runs. Exercise a value one character shorter to land in that window.

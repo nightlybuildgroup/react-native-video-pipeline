@@ -678,6 +678,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           progress = progressSink,
         )
         if (result.aborted) throw VideoPipelineCancelledException()
+        // Transcoder writes `location` via setLocation; persist the rest of the
+        // MetadataSpec (software/creationDate/description/custom) as mdta items,
+        // same as the metadata-only stamp and render paths.
+        metadata?.let { Mp4MetadataInjector.injectSpec(outPath, it) }
         Unit
       } catch (e: Transcoder.CancelledException) {
         throw VideoPipelineCancelledException()
@@ -742,6 +746,10 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           )
           if (result.aborted) throw VideoPipelineCancelledException()
         }
+        // Persist container metadata (software/creationDate/description/custom)
+        // as mdta items, same as the compose-synthesize path. `location` isn't
+        // written here yet (no setLocation on the synthesize muxer) — pre-existing.
+        spec.metadata?.let { Mp4MetadataInjector.injectSpec(outputPath, it) }
         Unit
       } finally {
         guard.end()
@@ -779,6 +787,11 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           outputPath = outputPath,
           stopToken = stopToken,
         )
+        // Author container metadata in a second compressed-passthrough pass
+        // (location via setLocation, the rest via Mp4MetadataInjector), same as
+        // the transcode render path. Covers both plain single-clip trim and
+        // multi-clip concat (both route here).
+        spec.metadata?.let { applyRenderMetadata(outputPath, it) }
         Unit
       } catch (e: Remuxer.CancelledException) {
         throw VideoPipelineCancelledException()
