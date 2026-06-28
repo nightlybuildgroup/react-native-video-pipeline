@@ -146,6 +146,73 @@ internal object TransformerRunner {
     }
   }
 
+  /// Multi-clip transcode (#14): each clip becomes an [EditedMediaItem] carrying
+  /// its own crop/rotate/flip/trim plus the shared output presentation / fps /
+  /// overlays, joined into one [EditedMediaItemSequence] that Media3 concatenates
+  /// and re-encodes to the shared output. Audio: passthrough lets Media3
+  /// concatenate each clip's audio; mute drops it per item; replace muxes a
+  /// parallel audio sequence from `audioReplacementUri` (capped to the total
+  /// duration). Every entry in `clipSpecs` shares the same output fields
+  /// (hevc / bitrate / overlays / audio); the first is read for the
+  /// composition-level settings.
+  fun runMulti(
+    context: Context,
+    clipSpecs: List<Spec>,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    require(clipSpecs.isNotEmpty()) { "runMulti requires at least one clip" }
+    try {
+      runMultiInternal(context, clipSpecs, stopToken, progress)
+    } finally {
+      // Overlays are the shared spec-level set (the same references appear on
+      // every clip spec); recycle each distinct bitmap once.
+      clipSpecs.flatMap { it.overlays }.toHashSet().forEach { runCatching { it.bitmap.recycle() } }
+    }
+  }
+
+  private fun runMultiInternal(
+    context: Context,
+    clipSpecs: List<Spec>,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+  ) {
+    val first = clipSpecs.first()
+    File(first.outputPath).apply { if (exists()) delete() }
+
+    val items = clipSpecs.map { clip ->
+      EditedMediaItem.Builder(buildMediaItem(clip))
+        .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
+        // Passthrough keeps each clip's audio (Media3 concatenates the sequence);
+        // mute / replace drop it per item.
+        .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
+        .build()
+    }
+    val videoSeq = EditedMediaItemSequence.Builder(items).build()
+
+    val replaceUri = first.audioReplacementUri
+    val composition = if (replaceUri != null) {
+      val mediaItemBuilder = MediaItem.Builder().setUri(replaceUri)
+      first.outputDurationSec?.let { durSec ->
+        mediaItemBuilder.setClippingConfiguration(
+          MediaItem.ClippingConfiguration.Builder()
+            .setEndPositionMs((durSec * 1000.0).roundToLong())
+            .build()
+        )
+      }
+      val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
+        .setRemoveVideo(true)
+        .build()
+      Composition.Builder(videoSeq, EditedMediaItemSequence.Builder(audioItem).build()).build()
+    } else {
+      Composition.Builder(videoSeq).build()
+    }
+
+    runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
+      transformer.start(composition, first.outputPath)
+    }
+  }
+
   private fun runInternal(
     context: Context,
     spec: Spec,
@@ -179,11 +246,33 @@ internal object TransformerRunner {
         .setRemoveVideo(true)
         .build()
       Composition.Builder(
-        EditedMediaItemSequence(editedItem),
-        EditedMediaItemSequence(audioItem),
+        EditedMediaItemSequence.Builder(editedItem).build(),
+        EditedMediaItemSequence.Builder(audioItem).build(),
       ).build()
     }
 
+    runTransformer(context, spec.outputPath, spec.hevc, spec.bitrate, stopToken, progress) { transformer ->
+      if (composition != null) {
+        transformer.start(composition, spec.outputPath)
+      } else {
+        transformer.start(editedItem, spec.outputPath)
+      }
+    }
+  }
+
+  /// Shared Transformer lifecycle: builds a Transformer (HEVC / bitrate honoured),
+  /// launches the export via [start] on the main Looper, polls cancellation +
+  /// progress, and blocks until completion. Throws [CancelledException] on abort
+  /// and [TransformerException] on export failure (deleting the partial output).
+  private fun runTransformer(
+    context: Context,
+    outputPath: String,
+    hevc: Boolean,
+    bitrate: Int?,
+    stopToken: VideoPipelineStopToken?,
+    progress: ProgressSink?,
+    start: (Transformer) -> Unit,
+  ) {
     val mainHandler = Handler(Looper.getMainLooper())
     val latch = CountDownLatch(1)
     val exportError = AtomicReference<ExportException?>(null)
@@ -192,12 +281,12 @@ internal object TransformerRunner {
 
     mainHandler.post {
       val builder = Transformer.Builder(context)
-      if (spec.hevc) builder.setVideoMimeType(MimeTypes.VIDEO_H265)
-      if (spec.bitrate != null && spec.bitrate > 0) {
+      if (hevc) builder.setVideoMimeType(MimeTypes.VIDEO_H265)
+      if (bitrate != null && bitrate > 0) {
         builder.setEncoderFactory(
           DefaultEncoderFactory.Builder(context)
             .setRequestedVideoEncoderSettings(
-              VideoEncoderSettings.Builder().setBitrate(spec.bitrate).build()
+              VideoEncoderSettings.Builder().setBitrate(bitrate).build()
             )
             .build()
         )
@@ -219,11 +308,7 @@ internal object TransformerRunner {
         })
         .build()
       transformerRef.set(transformer)
-      if (composition != null) {
-        transformer.start(composition, spec.outputPath)
-      } else {
-        transformer.start(editedItem, spec.outputPath)
-      }
+      start(transformer)
     }
 
     // Cancellation + progress are polled on the main Looper (the only thread
@@ -255,12 +340,12 @@ internal object TransformerRunner {
     mainHandler.removeCallbacks(poll)
 
     if (cancelled.get()) {
-      File(spec.outputPath).delete()
+      File(outputPath).delete()
       throw CancelledException()
     }
     val err = exportError.get()
     if (err != null) {
-      File(spec.outputPath).delete()
+      File(outputPath).delete()
       throw TransformerException(
         err.message ?: "Media3 export failed (errorCode=${err.errorCode})"
       )
