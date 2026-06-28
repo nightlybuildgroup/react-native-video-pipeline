@@ -22,6 +22,9 @@
 ///   - Replaces any pre-existing `udta/meta/keys+ilst` tree wholesale.
 ///     Other `udta` children (e.g. `setLocation`'s `loci` box) are
 ///     preserved.
+///   - A rewrite that *shrinks* the moov (re-stamping with a smaller
+///     payload) is padded back up with a `free` box rather than moving
+///     `mdat` — see `padMoovToNoShrink`.
 ///   - 4-byte (32-bit) box sizes only. 64-bit `largesize` is detected
 ///     on read but rewritten as 32-bit — fine for files under 4 GiB.
 ///
@@ -72,7 +75,13 @@ internal object Mp4MetadataInjector {
       raf.seek(moov.headerStart)
       val moovBytes = ByteArray(moov.totalSize.toInt())
       raf.readFully(moovBytes)
-      val patchedMoov = patchMoov(moovBytes, custom)
+      // A rewritten moov can be *smaller* than the original (e.g. re-stamping
+      // with shorter/fewer metadata values). Shrinking the container would mean
+      // pulling mdat backwards; instead pad the moov back up with a `free` box
+      // so it never shrinks below its original size. After this `delta >= 0`
+      // always, and the grow branches below (extend-eof / free-shrink /
+      // offset-fixup) cover every remaining case.
+      val patchedMoov = padMoovToNoShrink(patchMoov(moovBytes, custom), moov.totalSize.toInt())
       val delta = patchedMoov.size - moov.totalSize.toInt()
 
       android.util.Log.d(
@@ -92,12 +101,12 @@ internal object Mp4MetadataInjector {
       val moovIsLast = moovIdx == topLevel.size - 1
 
       when {
-        // Shrinking the moov is safe — we'd need to grow the following box
-        // (free / mdat / etc) to keep offsets stable, but that's not a case
-        // we expect from a freshly-muxed file; throw rather than guess.
+        // Unreachable: padMoovToNoShrink guarantees delta >= 0. Kept as a
+        // defensive guard so a future regression fails loudly instead of
+        // corrupting chunk offsets.
         delta < 0 -> error(
-          "Mp4MetadataInjector: patched moov is smaller than original; " +
-            "shrinking is not implemented (delta=$delta).",
+          "Mp4MetadataInjector: patched moov still smaller than original after " +
+            "padding (delta=$delta) — internal invariant violated.",
         )
 
         // moov is the last box: extending the file is fine, no shift.
@@ -387,6 +396,10 @@ internal object Mp4MetadataInjector {
       when (childType) {
         "udta" -> existingUdta = moovChildren.copyOfRange(i, childEnd)
         "meta" -> { /* drop — our udta.meta is canonical */ }
+        // Drop moov-level padding. `padMoovToNoShrink` re-adds exactly the
+        // slack a given rewrite needs; carrying old free boxes through would
+        // let them accumulate across repeated re-stamps.
+        "free", "skip" -> { /* drop — regenerated as slack when needed */ }
         else -> out.write(moovChildren, i, childSize)
       }
       i = childEnd
@@ -400,6 +413,28 @@ internal object Mp4MetadataInjector {
     return wrapBox("moov", payload)
     // Suppress unused-variable warning in some lint configs.
     @Suppress("UNUSED_EXPRESSION") newChildren
+  }
+
+  /// Ensure a freshly-patched moov is never smaller than the original by
+  /// appending a `free` child box to absorb the shortfall. This keeps the
+  /// container from having to shrink (which would require moving `mdat` and
+  /// rewriting chunk offsets) and turns every rewrite into a no-shrink case the
+  /// grow branches in [inject] already handle.
+  ///
+  /// The minimum box is 8 bytes (header only). When the shortfall is >= 8 the
+  /// padded moov lands at exactly the original size (delta 0, in-place rewrite);
+  /// a 1..7-byte shortfall can't be expressed as a free box that small, so we
+  /// add the minimum 8-byte free box and overshoot by a few bytes (delta 1..7),
+  /// which the standard grow path absorbs. No-op when the moov already grew.
+  private fun padMoovToNoShrink(patchedMoov: ByteArray, originalSize: Int): ByteArray {
+    val shortfall = originalSize - patchedMoov.size
+    if (shortfall <= 0) return patchedMoov
+    val freeBody = ByteArray((shortfall - 8).coerceAtLeast(0))
+    val freeBox = wrapBox("free", freeBody) // size = max(8, shortfall)
+    val out = java.io.ByteArrayOutputStream()
+    out.write(patchedMoov, 8, patchedMoov.size - 8) // moov children
+    out.write(freeBox)
+    return wrapBox("moov", out.toByteArray())
   }
 
   /// Build a complete `udta` box with our custom items. If
