@@ -229,10 +229,10 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
   // wedged on real-device slo-mo HEVC (1080p @ 240fps @ ~50Mbps); see commit
   // cb7c972 for the same wedge / same fix on the stamp path.
   //
-  // TODO: remuxFlip below and the concat path further down still use the
-  // manual pump; they should adopt RNVPExportRequest too, but each needs
-  // its own focused testing (flip needs AVMutableComposition transform
-  // override; concat needs multi-source request shape).
+  // remuxFlip, the transform-remux, and concat now also run through this
+  // driver (via initWithComposedAsset:). The metadata-only stamp
+  // (remuxStampFromURL) is the last remaining manual-pump user — left as-is
+  // for now since it carries its own merged-metadata writer.
   RNVPExportRequest *request =
       [[RNVPExportRequest alloc] initWithSource:sourceURL
                                          output:outputURL
@@ -292,167 +292,59 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
     return NO;
   }
 
-  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-
-  NSError *writerError = nil;
-  AVAssetWriter *writer =
-      [[AVAssetWriter alloc] initWithURL:outputURL
-                                fileType:outputType
-                                   error:&writerError];
-  if (writer == nil) {
+  // Build a single-clip composition with the flipped preferredTransform and run
+  // a passthrough export through the unified driver. A composition + the
+  // Passthrough preset copies compressed samples verbatim and writes the
+  // overridden transform — the same lossless result the retired manual
+  // AVAssetReader -> AVAssetWriter pump produced, without the wedge class of
+  // bug it hit on real-device slo-mo HEVC (mirrors the trim/transform paths).
+  AVMutableComposition *composition = [AVMutableComposition composition];
+  AVMutableCompositionTrack *videoCompTrack = [composition
+      addMutableTrackWithMediaType:AVMediaTypeVideo
+                  preferredTrackID:kCMPersistentTrackID_Invalid];
+  const CMTimeRange sourceRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+  NSError *insertError = nil;
+  if (videoCompTrack == nil ||
+      ![videoCompTrack insertTimeRange:sourceRange
+                               ofTrack:videoTrack
+                                atTime:kCMTimeZero
+                                 error:&insertError]) {
     if (error) {
-      *error = writerError
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter init failed.");
-    }
-    return NO;
-  }
-
-  // Forward container-level metadata verbatim — same contract as trim.
-  writer.metadata = asset.metadata;
-
-  NSError *readerError = nil;
-  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset
-                                                         error:&readerError];
-  if (reader == nil) {
-    if (error) {
-      *error = readerError
+      *error = insertError
                    ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                @"AVAssetReader init failed.");
+                                @"flip: could not splice source video into the "
+                                @"composition.");
     }
     return NO;
   }
-
-  // --- Video: reader output + writer input (compressed passthrough) --------
-  AVAssetReaderTrackOutput *videoOutput =
-      [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack
-                                       outputSettings:nil];
-  if (![reader canAddOutput:videoOutput]) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                         @"AVAssetReader refused passthrough video output.");
-    }
-    return NO;
-  }
-  [reader addOutput:videoOutput];
-
-  CMFormatDescriptionRef videoFormat = NULL;
-  if (videoTrack.formatDescriptions.count > 0) {
-    videoFormat = (__bridge CMFormatDescriptionRef)
-        videoTrack.formatDescriptions.firstObject;
-  }
-  AVAssetWriterInput *videoInput =
-      [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo
-                                         outputSettings:nil
-                                       sourceFormatHint:videoFormat];
-  videoInput.expectsMediaDataInRealTime = NO;
-  videoInput.transform = flipTransformForAxis(
+  videoCompTrack.preferredTransform = flipTransformForAxis(
       axis, videoTrack.preferredTransform, videoTrack.naturalSize);
-  if (![writer canAddInput:videoInput]) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter refused passthrough video input.");
-    }
-    return NO;
-  }
-  [writer addInput:videoInput];
 
-  // --- Optional audio (compressed passthrough) -----------------------------
-  AVAssetReaderTrackOutput *audioOutput = nil;
-  AVAssetWriterInput *audioInput = nil;
-  NSArray<AVAssetTrack *> *audioTracks =
-      [asset tracksWithMediaType:AVMediaTypeAudio];
-  if (audioTracks.count > 0) {
-    AVAssetTrack *audioTrack = audioTracks.firstObject;
-    AVAssetReaderTrackOutput *candidateOutput =
-        [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack
-                                         outputSettings:nil];
-    if ([reader canAddOutput:candidateOutput]) {
-      [reader addOutput:candidateOutput];
-      CMFormatDescriptionRef audioFormat = NULL;
-      if (audioTrack.formatDescriptions.count > 0) {
-        audioFormat = (__bridge CMFormatDescriptionRef)
-            audioTrack.formatDescriptions.firstObject;
-      }
-      AVAssetWriterInput *candidateInput =
-          [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
-                                             outputSettings:nil
-                                           sourceFormatHint:audioFormat];
-      candidateInput.expectsMediaDataInRealTime = NO;
-      if ([writer canAddInput:candidateInput]) {
-        [writer addInput:candidateInput];
-        audioOutput = candidateOutput;
-        audioInput = candidateInput;
-      }
-    }
+  AVAssetTrack *audioTrack =
+      [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+  if (audioTrack != nil) {
+    AVMutableCompositionTrack *audioCompTrack = [composition
+        addMutableTrackWithMediaType:AVMediaTypeAudio
+                    preferredTrackID:kCMPersistentTrackID_Invalid];
+    [audioCompTrack insertTimeRange:sourceRange
+                            ofTrack:audioTrack
+                             atTime:kCMTimeZero
+                              error:nil];
   }
 
-  if (![writer startWriting]) {
+  RNVPExportRequest *request =
+      [[RNVPExportRequest alloc] initWithComposedAsset:composition
+                                                output:outputURL
+                                              metadata:asset.metadata
+                                                  stop:nil
+                                              progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
     if (error) {
-      *error = writer.error
+      *error = exportError
                    ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter startWriting failed.");
+                                @"flip: passthrough export failed.");
     }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  [writer startSessionAtSourceTime:kCMTimeZero];
-
-  if (![reader startReading]) {
-    if (error) {
-      *error = reader.error
-                   ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                @"AVAssetReader startReading failed.");
-    }
-    [writer cancelWriting];
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-
-  NSError *pumpError = nil;
-  BOOL videoOK = pumpPassthroughSamples(videoOutput, videoInput, reader,
-                                        writer, &pumpError);
-  BOOL audioOK = YES;
-  if (videoOK && audioInput != nil) {
-    audioOK = pumpPassthroughSamples(audioOutput, audioInput, reader, writer,
-                                     &pumpError);
-  }
-
-  [videoInput markAsFinished];
-  if (audioInput != nil) [audioInput markAsFinished];
-
-  if (!videoOK || !audioOK) {
-    [writer cancelWriting];
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    if (error) *error = pumpError;
-    return NO;
-  }
-
-  [writer endSessionAtSourceTime:asset.duration];
-
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  [writer finishWritingWithCompletionHandler:^{
-    dispatch_semaphore_signal(done);
-  }];
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30.0 * NSEC_PER_SEC)));
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter.finishWriting did not complete "
-                         @"within 30s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  if (writer.status != AVAssetWriterStatusCompleted) {
-    if (error) {
-      *error = writer.error
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter did not reach the Completed "
-                                @"status.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
     return NO;
   }
   return YES;
@@ -564,49 +456,22 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
                               error:nil];
   }
 
-  // Passthrough export — copies compressed samples, writes the overridden
-  // transform. The composition timeline already starts at 0, so no explicit
-  // session timeRange is needed.
-  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-  AVAssetExportSession *session = [[AVAssetExportSession alloc]
-      initWithAsset:composition
-         presetName:AVAssetExportPresetPassthrough];
-  if (session == nil) {
+  // Passthrough export through the unified driver — copies compressed samples,
+  // writes the overridden transform. The composition timeline already starts at
+  // 0 and bakes the trim window, so no explicit session timeRange is needed.
+  RNVPExportRequest *request =
+      [[RNVPExportRequest alloc] initWithComposedAsset:composition
+                                                output:outputURL
+                                              metadata:asset.metadata
+                                                  stop:nil
+                                              progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
     if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetExportSession refused the passthrough "
-                         @"preset for the transform remux.");
-    }
-    return NO;
-  }
-  session.outputURL = outputURL;
-  session.outputFileType = outputType;
-  session.shouldOptimizeForNetworkUse = NO;
-  session.metadata = asset.metadata;
-
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  [session exportAsynchronouslyWithCompletionHandler:^{
-    dispatch_semaphore_signal(done);
-  }];
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)));
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"Transform remux export did not complete within "
-                         @"60s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  if (session.status != AVAssetExportSessionStatusCompleted) {
-    if (error) {
-      *error = session.error
+      *error = exportError
                    ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"Transform remux export did not reach "
-                                @"Completed.");
+                                @"transform-remux: passthrough export failed.");
     }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
     return NO;
   }
   return YES;
@@ -645,15 +510,6 @@ NSString *fourCCString(FourCharCode code) {
       '\0',
   };
   return [NSString stringWithUTF8String:bytes] ?: @"";
-}
-
-NSString *exportPresetForContainer(AVFileType fileType) {
-  // AVAssetExportPresetPassthrough re-muxes without re-encoding when the
-  // session's outputFileType + the composition's track formats are both
-  // supported as-is by the writer. For identical H.264/HEVC sources this
-  // is true for both MP4 and MOV.
-  (void)fileType;
-  return AVAssetExportPresetPassthrough;
 }
 
 } // namespace
@@ -863,81 +719,32 @@ NSString *exportPresetForContainer(AVFileType fileType) {
     cursor = CMTimeAdd(cursor, clipDuration);
   }
 
-  // --- Drive the passthrough export ---------------------------------------
-  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-
-  AVFileType outputType = fileTypeForOutputURL(outputURL);
-  AVAssetExportSession *session = [[AVAssetExportSession alloc]
-      initWithAsset:composition
-         presetName:exportPresetForContainer(outputType)];
-  if (session == nil) {
+  // --- Drive the passthrough export through the unified driver --------------
+  // The composition encodes the full concatenated timeline; the driver runs the
+  // Passthrough preset, forwards the first source's container metadata, polls
+  // the stop token (~50ms), enforces the completion deadline, and deletes any
+  // partial output on failure. Same driver the trim / flip / transform remuxes
+  // use — replaces the hand-rolled AVAssetExportSession block + stop watcher.
+  // Later clips' metadata is dropped; a future merge policy can be defined when
+  // stamp() learns about multi-clip inputs.
+  RNVPExportRequest *request = [[RNVPExportRequest alloc]
+      initWithComposedAsset:composition
+                     output:outputURL
+                   metadata:assets.firstObject.metadata
+                       stop:stopToken
+                   progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
     if (error) {
-      *error = makeError(
-          RNVPRemuxerErrorCodeWriterFailed,
-          @"AVAssetExportSession refused the passthrough preset.");
+      if ([exportError.domain isEqualToString:RNVPExportSessionErrorDomain] &&
+          exportError.code == RNVPExportSessionErrorCodeCancelled) {
+        *error = makeError(RNVPRemuxerErrorCodeCancelled, @"Concat aborted.");
+      } else {
+        *error = exportError
+                     ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
+                                  @"concat: passthrough export failed.");
+      }
     }
-    return NO;
-  }
-  session.outputURL = outputURL;
-  session.outputFileType = outputType;
-  session.shouldOptimizeForNetworkUse = NO;
-  // Forward container-level metadata from the first source — matches the
-  // trim/flip contract ("metadata round-trips"). Later clips' metadata is
-  // dropped; a future merge policy can be defined when stamp() learns about
-  // multi-clip inputs.
-  session.metadata = assets.firstObject.metadata;
-
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  // Watcher: if the caller flips the stop token while the export is in
-  // flight, invoke cancelExport. Invalidates itself once the main thread
-  // signals `done`, so no additional cleanup is needed after the wait.
-  // Poll cadence (50ms) keeps the abort-to-cancelExport latency well under
-  // the 500ms budget US7 allows.
-  __block BOOL watcherDone = NO;
-  if (stop) {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT,
-                                             0),
-                   ^{
-                     while (!watcherDone) {
-                       if (stop->abortRequested()) {
-                         [session cancelExport];
-                         return;
-                       }
-                       [NSThread sleepForTimeInterval:0.05];
-                     }
-                   });
-  }
-  [session exportAsynchronouslyWithCompletionHandler:^{
-    dispatch_semaphore_signal(done);
-  }];
-  const long timedOut = dispatch_semaphore_wait(
-      done, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60.0 * NSEC_PER_SEC)));
-  watcherDone = YES;
-  if (timedOut != 0) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetExportSession did not complete within 60s.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  if (session.status == AVAssetExportSessionStatusCancelled ||
-      (stop && stop->abortRequested())) {
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeCancelled,
-                         @"Concat aborted.");
-    }
-    return NO;
-  }
-  if (session.status != AVAssetExportSessionStatusCompleted) {
-    if (error) {
-      *error = session.error
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetExportSession did not reach "
-                                @"Completed.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
     return NO;
   }
 

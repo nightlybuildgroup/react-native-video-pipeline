@@ -27,7 +27,15 @@
 ///     Follow-up work could give that driver the same request-style API.
 ///   - @c Video.synthesize and null-input @c Video.compose — no source asset
 ///     for AVAssetExportSession to consume; uses @c RNVPAVMuxer directly.
-///   - Multi-clip concat — see @c RNVPRemuxer.
+///
+/// Composition passthrough (@c initWithComposedAsset:): a third shape that
+/// hands a pre-built @c AVAsset (typically an @c AVMutableComposition that
+/// already bakes the video track's @c preferredTransform, the trim window,
+/// and the clip ordering) straight to the passthrough preset — no @c composer,
+/// no re-encode. @c Video.flip, the transform-remux, and multi-clip concat all
+/// use this, so they share one driver instead of three hand-rolled
+/// @c AVAssetExportSession blocks (and, for flip, the retired manual
+/// @c AVAssetReader→AVAssetWriter pump that wedged on real-device slo-mo HEVC).
 ///
 
 #pragma once
@@ -88,7 +96,11 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
 /// responsible for clamping to the source's actual duration when in doubt).
 @interface RNVPExportRequest : NSObject
 
-@property(nonatomic, readonly) NSURL *source;
+/// Exactly one of @c source / @c composedAsset is non-nil. @c source drives the
+/// URL-asset path (trim, watermark, compose); @c composedAsset drives the
+/// composition-passthrough path (flip, transform-remux, concat).
+@property(nonatomic, readonly, nullable) NSURL *source;
+@property(nonatomic, readonly, nullable) AVAsset *composedAsset;
 @property(nonatomic, readonly) NSURL *output;
 @property(nonatomic, readonly) CMTimeRange timeRange;
 @property(nonatomic, readonly, nullable)
@@ -105,6 +117,16 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
                           stop:(nullable RNVPStopToken *)stop
                       progress:(nullable RNVPExportSessionProgress)progress
     NS_DESIGNATED_INITIALIZER;
+
+/// Composition-passthrough request. The composition is expected to already
+/// encode the full edit (windowing, ordering, overridden @c preferredTransform),
+/// so there is no @c timeRange or @c composer — the export copies compressed
+/// samples verbatim and writes the composition track's transform.
+- (instancetype)initWithComposedAsset:(AVAsset *)composedAsset
+                               output:(NSURL *)output
+                             metadata:(nullable NSArray<AVMetadataItem *> *)metadata
+                                 stop:(nullable RNVPStopToken *)stop
+                             progress:(nullable RNVPExportSessionProgress)progress;
 
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;

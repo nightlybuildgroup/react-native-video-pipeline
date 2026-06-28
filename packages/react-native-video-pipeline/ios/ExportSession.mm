@@ -85,6 +85,25 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
   return self;
 }
 
+- (instancetype)initWithComposedAsset:(AVAsset *)composedAsset
+                               output:(NSURL *)output
+                             metadata:(NSArray<AVMetadataItem *> *)metadata
+                                 stop:(RNVPStopToken *)stop
+                             progress:(RNVPExportSessionProgress)progress {
+  if ((self = [super init])) {
+    _composedAsset = composedAsset;
+    _output = output;
+    // The composition already bakes the window; let the driver default the
+    // export session range to the full composition duration.
+    _timeRange = kCMTimeRangeInvalid;
+    _metadata = metadata;
+    _composer = nil; // passthrough — no per-frame re-encode
+    _stop = stop;
+    _progress = progress;
+  }
+  return self;
+}
+
 @end
 
 @implementation RNVPExportSession
@@ -97,10 +116,10 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
                          @"request is nil");
     return NO;
   }
-  if (request.source == nil) {
+  if (request.source == nil && request.composedAsset == nil) {
     if (error)
       *error = makeError(RNVPExportSessionErrorCodeInvalidSpec,
-                         @"source is nil");
+                         @"neither source nor composedAsset provided");
     return NO;
   }
   if (request.output == nil) {
@@ -111,7 +130,10 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
   }
 
   // Source asset + video track probe -----------------------------------------
-  AVURLAsset *asset = [AVURLAsset assetWithURL:request.source];
+  // A composed asset (AVMutableComposition from flip/transform/concat) is used
+  // verbatim; otherwise build a URL asset from the source.
+  AVAsset *asset = request.composedAsset
+                       ?: [AVURLAsset assetWithURL:request.source];
   NSArray<AVAssetTrack *> *videoTracks =
       [asset tracksWithMediaType:AVMediaTypeVideo];
   if (videoTracks.count == 0) {
