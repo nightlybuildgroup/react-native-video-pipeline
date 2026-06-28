@@ -124,6 +124,9 @@ internal object TransformerRunner {
     /// soundtrack (Media3 sequence ordering does not bound the export, so a
     /// longer replacement would otherwise extend it with an audio-only tail).
     val outputDurationSec: Double? = null,
+    /// Black + silent gap (seconds) inserted BEFORE this clip's item on the
+    /// multi-clip sequence (#18). 0 = no gap (contiguous).
+    val leadingGapSec: Double = 0.0,
   )
 
   fun interface ProgressSink {
@@ -180,15 +183,23 @@ internal object TransformerRunner {
     val first = clipSpecs.first()
     File(first.outputPath).apply { if (exists()) delete() }
 
-    val items = clipSpecs.map { clip ->
-      EditedMediaItem.Builder(buildMediaItem(clip))
-        .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
-        // Passthrough keeps each clip's audio (Media3 concatenates the sequence);
-        // mute / replace drop it per item.
-        .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
-        .build()
+    // Build the sequence, inserting a black + silent gap (#18) before any clip
+    // whose leadingGapSec > 0 via Media3's addGap.
+    val seqBuilder = EditedMediaItemSequence.Builder()
+    clipSpecs.forEach { clip ->
+      if (clip.leadingGapSec > 1e-3) {
+        seqBuilder.addGap((clip.leadingGapSec * 1_000_000.0).roundToLong())
+      }
+      seqBuilder.addItem(
+        EditedMediaItem.Builder(buildMediaItem(clip))
+          .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
+          // Passthrough keeps each clip's audio (Media3 concatenates the
+          // sequence); mute / replace drop it per item.
+          .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
+          .build()
+      )
     }
-    val videoSeq = EditedMediaItemSequence.Builder(items).build()
+    val videoSeq = seqBuilder.build()
 
     val replaceUri = first.audioReplacementUri
     val composition = if (replaceUri != null) {

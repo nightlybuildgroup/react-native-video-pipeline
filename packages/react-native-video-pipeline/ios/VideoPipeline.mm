@@ -427,6 +427,67 @@ RNVPTranscodeTarget* buildTranscodeTargetForClip(const Clip& clip,
                                      sourceDuration:clip.sourceDuration];
 }
 
+// Author a black, silent clip of @p seconds at the given output dimensions /
+// fps — used to fill timeline gaps (#18) before concatenation. Video-only (the
+// concat leaves a silent span for it). Returns NO on failure / cancellation,
+// deleting any partial file.
+bool authorBlackClip(NSString* path, NSInteger width, NSInteger height,
+                     double fps, double seconds, RNVPStopToken* stop,
+                     NSError* __autoreleasing* error) {
+  [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+  const NSInteger ifps = static_cast<NSInteger>(std::llround(fps > 0.0 ? fps : 30.0));
+  RNVPAVMuxer* muxer = [[RNVPAVMuxer alloc] init];
+  if (![muxer openVideoOnlyAtPath:path width:width height:height fps:ifps error:error]) {
+    return false;
+  }
+  CVPixelBufferRef pb = NULL;
+  NSDictionary* pbAttrs = @{(NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{}};
+  if (CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                          kCVPixelFormatType_32BGRA,
+                          (__bridge CFDictionaryRef)pbAttrs, &pb) != kCVReturnSuccess) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNVPVideoPipeline"
+                                   code:1
+                               userInfo:@{
+                                 NSLocalizedDescriptionKey :
+                                     @"could not allocate a black gap frame"
+                               }];
+    }
+    return false;
+  }
+  CVPixelBufferLockBaseAddress(pb, 0);
+  std::memset(CVPixelBufferGetBaseAddress(pb), 0,
+              CVPixelBufferGetBytesPerRow(pb) * static_cast<size_t>(height));
+  CVPixelBufferUnlockBaseAddress(pb, 0);
+  const NSInteger frames = std::max<NSInteger>(
+      1, static_cast<NSInteger>(std::llround(seconds * static_cast<double>(ifps))));
+  bool ok = true;
+  for (NSInteger i = 0; i < frames; i++) {
+    if (stop != nil && stop.abortRequested) { ok = false; break; }
+    while (!muxer.videoInputIsReady && !muxer.videoInputFailed) {
+      if (stop != nil && stop.abortRequested) break;
+      [NSThread sleepForTimeInterval:0.001];
+    }
+    if (muxer.videoInputFailed || (stop != nil && stop.abortRequested)) {
+      ok = false;
+      break;
+    }
+    if (![muxer appendPixelBuffer:pb
+                 presentationTime:CMTimeMake(i, static_cast<int32_t>(ifps))
+                            error:error]) {
+      ok = false;
+      break;
+    }
+  }
+  CVPixelBufferRelease(pb);
+  if (!ok) {
+    [muxer closeWithError:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    return false;
+  }
+  return [muxer closeWithError:error];
+}
+
 RNVPTranscodeTarget* buildTranscodeTarget(const VideoSpec& spec,
                                           NSInteger sourceW,
                                           NSInteger sourceH,
@@ -794,12 +855,28 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     const bool single = spec.clips->size() == 1;
     const bool hasOverlays =
         spec.overlays.has_value() && !spec.overlays->empty();
+    // A timeline gap (a clip whose outputStart is past the previous clip's end)
+    // is filled with black + silence, which forces a re-encode through the
+    // multi-clip transcode path (you can't passthrough-concat black).
+    bool hasGap = false;
+    {
+      double prevEnd = 0.0;
+      for (const auto& c : *spec.clips) {
+        if (c.outputStart > prevEnd + 1e-3) {
+          hasGap = true;
+          break;
+        }
+        prevEnd = c.outputStart + c.sourceDuration;
+      }
+    }
     // Crop, an output-side re-encode (width/height/fps/codec/bitrate), or any
     // overlay forces the transcode path. Rotation/flip alone do NOT — they take
     // the fast remux-transform path below, which also carries any trim window.
+    // A gap always re-encodes, so it never takes the single fast paths.
     const bool needsTranscode =
-        single && (clipHasCrop((*spec.clips)[0]) ||
-                   outputAsksForReencode(spec.output) || hasOverlays);
+        single && !hasGap &&
+        (clipHasCrop((*spec.clips)[0]) || outputAsksForReencode(spec.output) ||
+         hasOverlays);
     if (needsTranscode) {
       // Probe the source so the transcode-branch validator can enforce the
       // "full-source-only" window and so the target inherits unspecified
@@ -895,11 +972,10 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     }
 
     // Multi-clip render that needs a re-encode (#14): a per-clip transform, an
-    // overlay, or an output-side change. Transcode each clip to a temp at the
-    // shared output spec (reusing the single-clip transcoder, which bakes the
-    // per-clip transform/crop/overlay), then losslessly concat the matching
-    // temps. Reuses the whole single-clip transcoder + concat machinery; the JS
-    // layer already enforces a contiguous timeline (gaps/overlaps reject, #18).
+    // overlay, an output-side change, or a timeline gap (#18). Transcode each
+    // clip to a temp at the shared output spec (reusing the single-clip
+    // transcoder, which bakes the per-clip transform/crop/overlay), insert a
+    // black+silent temp for each gap, then losslessly concat the matching temps.
     bool anyClipTransform = false;
     for (const auto& c : *spec.clips) {
       if (clipHasRotateOrFlip(c) || clipHasCrop(c)) {
@@ -907,9 +983,11 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
         break;
       }
     }
+    // A gap routes here even on a single clip (a leading-gap render is
+    // [black, clip]); otherwise multi-clip + any re-encode trigger.
     const bool multiNeedsTranscode =
-        !single && (anyClipTransform || outputAsksForReencode(spec.output) ||
-                    hasOverlays);
+        hasGap || (!single && (anyClipTransform ||
+                               outputAsksForReencode(spec.output) || hasOverlays));
     if (multiNeedsTranscode) {
       if (spec.duration.has_value()) {
         return Promise<void>::rejected(std::make_exception_ptr(
@@ -929,20 +1007,28 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           }
         }
       }
-      // Contiguous timeline only (the transcode-each-then-concat path joins
-      // clips back-to-back). The JS layer already enforces this; re-check here
-      // so a direct native caller can't slip a gap/overlap past it.
+      // No overlaps (clip.outputStart before the previous clip's end). Gaps are
+      // allowed and filled with black below. The JS layer already enforces this;
+      // re-check so a direct native caller can't slip an overlap past it.
       {
-        double cumulative = 0.0;
+        double prevEnd = 0.0;
         for (const auto& c : *spec.clips) {
-          if (std::fabs(c.outputStart - cumulative) > 1e-3) {
+          if (c.outputStart < prevEnd - 1e-3) {
             return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
-                "multi-clip transcode requires a contiguous timeline — "
-                "clip.outputStart does not match the cumulative position; gaps "
-                "and overlaps are not supported yet")));
+                "multi-clip transcode: clip.outputStart is before the previous "
+                "clip's end — overlaps are not supported")));
           }
-          cumulative += c.sourceDuration;
+          prevEnd = c.outputStart + c.sourceDuration;
         }
+      }
+      // The black gap fill is authored as H.264 (RNVPAVMuxer), so it can't join
+      // an HEVC concat. Reject gaps with an HEVC output until the fill respects
+      // the output codec.
+      if (hasGap &&
+          spec.output.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC) {
+        return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+            "timeline gaps with an HEVC output are not supported yet — the black "
+            "gap fill is authored as H.264; use the default H.264 output")));
       }
       NSMutableArray* nativeOverlays = nil;
       if (spec.overlays.has_value() && !spec.overlays->empty()) {
@@ -1055,6 +1141,37 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           if (runnerToken.abortRequested) {
             teardown();
             throw makeCancelled();
+          }
+          // Fill a leading gap before this clip with a black + silent segment
+          // (#18). The concat leaves silence for a video-only span, so the gap
+          // is black + silent. fps is cosmetic for a static fill.
+          const double gapSec = clipsCopy[i].outputStart - cursor;
+          if (gapSec > 1e-3) {
+            NSString* gapPath = [NSTemporaryDirectory()
+                stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"rnvp-mc-gap-%@-%zu.mp4",
+                                               [[NSUUID UUID] UUIDString], i]];
+            [temps addObject:gapPath];
+            NSError* gErr = nil;
+            if (!authorBlackClip(gapPath, outW, outH, fps, gapSec, runnerToken,
+                                 &gErr)) {
+              teardown();
+              if (runnerToken.abortRequested) throw makeCancelled();
+              const char* desc = gErr.localizedDescription.UTF8String ?: "(nil)";
+              throw std::runtime_error(
+                  std::string(
+                      "VideoPipeline.render multi-transcode gap fill failed: ") +
+                  desc);
+            }
+            AVURLAsset* gapAsset =
+                [AVURLAsset assetWithURL:[NSURL fileURLWithPath:gapPath]];
+            const double gapDur = CMTimeGetSeconds(gapAsset.duration);
+            [sources addObject:[[RNVPRemuxerConcatSource alloc]
+                                   initWithSourceURL:[NSURL fileURLWithPath:gapPath]
+                                         sourceStart:0.0
+                                      sourceDuration:gapDur
+                                         outputStart:cursor]];
+            cursor += gapDur;
           }
           NSURL* clipURL = urlFromUri(clipsCopy[i].uri);
           // Per-clip target fps: an explicit output.fps resamples every clip to

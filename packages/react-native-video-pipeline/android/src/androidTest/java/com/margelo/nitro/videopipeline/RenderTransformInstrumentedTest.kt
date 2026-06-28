@@ -161,6 +161,7 @@ class RenderTransformInstrumentedTest {
     fps: Double? = null,
     removeAudio: Boolean = false,
     audioReplacementUri: String? = null,
+    leadingGapSec: Double = 0.0,
   ): TransformerRunner.Spec {
     // Resolve the output canvas exactly as the render router does
     // (HybridVideoPipeline.renderTranscodeSingle): pinned dims win, otherwise
@@ -194,6 +195,7 @@ class RenderTransformInstrumentedTest {
       outCanvasH = canvasH,
       removeAudio = removeAudio,
       audioReplacementUri = audioReplacementUri,
+      leadingGapSec = leadingGapSec,
     )
   }
 
@@ -336,6 +338,29 @@ class RenderTransformInstrumentedTest {
     assertEquals(80, h)
     val perClip = frameCount / fps.toDouble()
     assertEquals(2 * perClip, durationSec(out), 0.25)
+  }
+
+  // Timeline gap (#18): a 1s black gap between two re-encoded clips via
+  // EditedMediaItemSequence.addGap. The joined timeline is ~3s. Mirrors the
+  // iOS testMultiClipGapFilledWithBlack.
+  @Test
+  fun multiClipGapFilledWithBlack() {
+    val a = synthFixture("gap-a")
+    val b = synthFixture("gap-b")
+    val out = File(ctx.cacheDir, "multi-gap.mp4").absolutePath
+    File(out).delete()
+    val perClip = frameCount / fps.toDouble()
+    val specs = listOf(
+      spec(a, out, outWidth = 80, outHeight = 80),
+      // 1s black gap before the second clip.
+      spec(b, out, outWidth = 80, outHeight = 80, leadingGapSec = 1.0),
+    )
+    TransformerRunner.runMulti(ctx, specs, stopToken = null, progress = null)
+    assertTrue("gapped multi-clip output exists", File(out).exists())
+    val (w, h) = dimensions(out)
+    assertEquals(80, w)
+    assertEquals(80, h)
+    assertEquals(2 * perClip + 1.0, durationSec(out), 0.3)
   }
 
   // audio.mode = 'replace' drops the source audio and muxes a separate

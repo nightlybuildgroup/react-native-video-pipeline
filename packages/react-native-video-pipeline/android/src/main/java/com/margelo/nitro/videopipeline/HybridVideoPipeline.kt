@@ -102,18 +102,15 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     return when {
       clips == null || clips.isEmpty() ->
         renderSynthesize(spec, renderToken, onProgress)
-      // A spec needing a re-encode (a per-clip transform, an overlay, or an
-      // output-side change) goes through the transcoder — single clip or
-      // multi-clip. The transcoder also honors each clip's trim window.
-      // Everything else (plain trims, multi-clip passthrough concat) stays on
-      // the lossless remux path.
-      needsReencode(spec, clips.toList()) ->
-        if (clips.size == 1) {
-          renderTranscodeSingle(spec, clips.first(), renderToken, onProgress)
-        } else {
-          renderTranscodeMulti(spec, clips.toList(), renderToken, onProgress)
-        }
-      else -> renderClips(spec, clips.toList(), renderToken)
+      // A plain multi-clip passthrough (no re-encode, no gap) stays on the
+      // lossless remux concat.
+      !needsReencode(spec, clips.toList()) && !hasGap(clips.toList()) ->
+        renderClips(spec, clips.toList(), renderToken)
+      // A single clip with no gap takes the single transcode path; everything
+      // else (multi-clip re-encode, or any timeline gap — #18) goes multi.
+      clips.size == 1 && !hasGap(clips.toList()) ->
+        renderTranscodeSingle(spec, clips.first(), renderToken, onProgress)
+      else -> renderTranscodeMulti(spec, clips.toList(), renderToken, onProgress)
     }
   }
 
@@ -127,6 +124,17 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     val outputReencode = o.width != null || o.height != null || o.fps != null ||
       o.codec != null || o.bitrate != null
     return hasTransform || hasOverlays || outputReencode
+  }
+
+  /// True when the timeline has a gap — a clip whose outputStart is past the
+  /// previous clip's end (filled with black + silence, forcing a re-encode).
+  private fun hasGap(clips: List<Clip>): Boolean {
+    var prevEnd = 0.0
+    for (c in clips) {
+      if (c.outputStart > prevEnd + 1e-3) return true
+      prevEnd = c.outputStart + c.sourceDuration
+    }
+    return false
   }
 
   override fun cancelRender(renderToken: String) {
@@ -968,19 +976,26 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             "duration is only valid when clips is empty"
           )
         }
-        // Contiguous timeline only (the sequence joins clips back-to-back). The
-        // JS layer already enforces this; re-check so a direct caller can't slip
-        // a gap/overlap past it.
-        var cumulative = 0.0
+        // No overlaps (a clip starting before the previous clip's end). Gaps are
+        // allowed and filled with black via addGap below. The JS layer already
+        // enforces this; re-check so a direct caller can't slip an overlap past.
+        var prevEnd = 0.0
         clips.forEach { c ->
-          if (kotlin.math.abs(c.outputStart - cumulative) > 1e-3) {
+          if (c.outputStart < prevEnd - 1e-3) {
             throw VideoPipelineInvalidSpecException(
-              "multi-clip transcode requires a contiguous timeline — " +
-                "clip.outputStart does not match the cumulative position; gaps " +
-                "and overlaps are not supported yet"
+              "multi-clip transcode: clip.outputStart is before the previous " +
+                "clip's end — overlaps are not supported"
             )
           }
-          cumulative += c.sourceDuration
+          prevEnd = c.outputStart + c.sourceDuration
+        }
+        // Keep gap behaviour identical across platforms: iOS authors the black
+        // gap fill as H.264, so a gap + HEVC output rejects there. Match it here.
+        if (hasGap(clips) && output.codec == VideoCodec.HEVC) {
+          throw VideoPipelineInvalidSpecException(
+            "timeline gaps with an HEVC output are not supported yet — use the " +
+              "default H.264 output"
+          )
         }
         val ctx = NitroModules.applicationContext?.applicationContext
           ?: throw VideoPipelineInvalidSpecException(
@@ -1043,17 +1058,17 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         val canvasW = (output.width ?: if (swap0) content0H else content0W).roundToInt()
         val canvasH = (output.height ?: if (swap0) content0W else content0H).roundToInt()
 
-        // Total timeline duration (sum of each clip's effective trim), for the
-        // replacement-audio cap.
-        val totalDurationSec = clips.indices.sumOf { i ->
-          val clip = clips[i]
-          val isRealTrim = clip.sourceStart > 1e-3 ||
-            clip.sourceDuration < infos[i].durationSec - 0.05
-          if (isRealTrim) {
-            minOf(clip.sourceDuration, infos[i].durationSec - clip.sourceStart).coerceAtLeast(0.0)
+        // Full timeline duration (last clip's output end, including any gaps),
+        // for the replacement-audio cap.
+        val totalDurationSec = clips.last().let { last ->
+          val isRealTrim = last.sourceStart > 1e-3 ||
+            last.sourceDuration < infos.last().durationSec - 0.05
+          val lastDur = if (isRealTrim) {
+            minOf(last.sourceDuration, infos.last().durationSec - last.sourceStart).coerceAtLeast(0.0)
           } else {
-            infos[i].durationSec
+            infos.last().durationSec
           }
+          last.outputStart + lastDur
         }
 
         val clipSpecs = clips.indices.map { i ->
@@ -1063,6 +1078,13 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           val rotateDeg = t?.rotate?.roundToInt() ?: -1
           val isRealTrim = clip.sourceStart > 1e-3 ||
             clip.sourceDuration < info.durationSec - 0.05
+          // Black gap before this clip = its outputStart minus the previous
+          // clip's output end (0 when contiguous). Filled via addGap in runMulti.
+          val leadingGap = if (i == 0) {
+            clip.outputStart
+          } else {
+            clip.outputStart - (clips[i - 1].outputStart + clips[i - 1].sourceDuration)
+          }.coerceAtLeast(0.0)
           TransformerRunner.Spec(
             sourceUri = clip.uri,
             outputPath = outputPath,
@@ -1091,6 +1113,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             removeAudio = spec.audio?.mode == AudioMode.MUTE,
             audioReplacementUri = replaceUri,
             outputDurationSec = totalDurationSec,
+            leadingGapSec = leadingGap,
           )
         }
 

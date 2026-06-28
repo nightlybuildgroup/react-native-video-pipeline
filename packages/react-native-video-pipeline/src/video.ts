@@ -191,26 +191,28 @@ function finalizeClips(
     validateFileUri('clip.uri', input.uri);
     requireNonNeg('clip.startSec', sourceStart);
     requirePositive('clip.durationSec', sourceDuration);
-    // v0.1 is concat-only: an explicit outputStartSec must land on the
-    // computed cumulative position. A larger value is a gap, a smaller one
-    // an overlap — both rejected until the pump can fill / blend them.
-    if (
-      input.outputStartSec !== undefined &&
-      Math.abs(input.outputStartSec - outputStart) > OUTPUT_START_TOLERANCE_SEC
-    ) {
-      fail(
-        `clip.outputStartSec ${input.outputStartSec}s does not match the concat position ${outputStart}s — gaps and overlaps are not supported yet`,
-        { outputStartSec: input.outputStartSec, expected: outputStart },
-      );
+    // An explicit outputStartSec at or after the running position opens a GAP
+    // before the clip (filled with black + silence by the render engine, which
+    // forces a re-encode). A value before it is an OVERLAP — blending two clips
+    // at once is still unsupported and rejects. Omit it for contiguous concat.
+    let clipOutputStart = outputStart;
+    if (input.outputStartSec !== undefined) {
+      if (input.outputStartSec < outputStart - OUTPUT_START_TOLERANCE_SEC) {
+        fail(
+          `clip.outputStartSec ${input.outputStartSec}s is before the previous clip's end (${outputStart}s) — overlaps are not supported`,
+          { outputStartSec: input.outputStartSec, position: outputStart },
+        );
+      }
+      clipOutputStart = input.outputStartSec;
     }
     out.push({
       uri: input.uri,
       sourceStart,
       sourceDuration,
-      outputStart,
+      outputStart: clipOutputStart,
       ...(input.transform !== undefined ? { transform: input.transform } : {}),
     });
-    outputStart += sourceDuration;
+    outputStart = clipOutputStart + sourceDuration;
   }
   // `inputs` came in as `NonEmptyArray<ClipInput>`, so `out` has length >= 1.
   return out as NonEmptyArray<Clip>;
