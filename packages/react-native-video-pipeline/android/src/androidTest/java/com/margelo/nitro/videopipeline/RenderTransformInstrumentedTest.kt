@@ -24,6 +24,7 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -313,6 +314,28 @@ class RenderTransformInstrumentedTest {
     val muteMimes = trackMimes(mute)
     assertTrue("concat keeps a video track", muteMimes.any { it.startsWith("video/") })
     assertTrue("mute concat has no audio track", muteMimes.none { it.startsWith("audio/") })
+  }
+
+  // Multi-clip transcode (#14): two clips re-encoded to a shared 80x80 output,
+  // joined into one EditedMediaItemSequence. The output is the concatenation,
+  // re-encoded to the target dimensions.
+  @Test
+  fun multiClipTranscodeConcatenatesAndReencodes() {
+    val a = synthFixture("multi-a")
+    val b = synthFixture("multi-b")
+    val out = File(ctx.cacheDir, "multi-transcode.mp4").absolutePath
+    File(out).delete()
+    val specs = listOf(
+      spec(a, out, outWidth = 80, outHeight = 80),
+      spec(b, out, outWidth = 80, outHeight = 80),
+    )
+    TransformerRunner.runMulti(ctx, specs, stopToken = null, progress = null)
+    assertTrue("multi-clip output exists", File(out).exists())
+    val (w, h) = dimensions(out)
+    assertEquals(80, w)
+    assertEquals(80, h)
+    val perClip = frameCount / fps.toDouble()
+    assertEquals(2 * perClip, durationSec(out), 0.25)
   }
 
   // audio.mode = 'replace' drops the source audio and muxes a separate

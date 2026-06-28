@@ -39,7 +39,7 @@ Start here. The decision tree is shallow:
   - Single-clip horizontal/vertical flip → `Video.flip`.
   - Cut **and** transform (rotate/flip/crop) in one pass → `Video.render`.
   - Add a watermark image/text and/or write metadata onto one clip → `Video.stamp`.
-  - **A single clip with several of these at once** — trim + transform + overlays + a custom output codec/bitrate/dimensions, in one re-encode pass — → `Video.render` with a full `RenderSpec`. (Multi-clip concat is passthrough-only — see [`Video.render`](#videorender) scope.)
+  - **A single clip with several of these at once** — trim + transform + overlays + a custom output codec/bitrate/dimensions, in one re-encode pass — → `Video.render` with a full `RenderSpec`. (Multi-clip specs support both passthrough concat and re-encode — see [`Video.render`](#videorender) scope.)
 - **Yes**, I want a worklet drawing on every frame:
   - Drawing *on top of* one or more source clips → `Video.compose`.
   - Generating frames from scratch with no source → `Video.synthesize`.
@@ -73,7 +73,7 @@ await Video.render({
 });
 ```
 
-> **Multi-clip note.** Per-clip transforms, overlays, and output-side changes apply to a **single-clip** render today. Multi-clip specs are passthrough-concat only — see [`Video.render`](#videorender) scope. To concat *and* transform, render each clip, then concat the results.
+> **Multi-clip note.** Per-clip transforms, overlays, and output-side changes work on both single-clip **and** multi-clip renders: a multi-clip spec that needs a re-encode transcodes each clip to the shared output and concatenates them in one pass. A multi-clip spec with no re-encode stays on the lossless passthrough concat. The timeline is still contiguous (gaps/overlaps reject — see [`Clip`](#clip)).
 
 Chaining `trim` → `stamp` → `render` through temp files would re-encode at every step (slow + lossy). One `Video.render` call decodes and encodes exactly once.
 
@@ -168,7 +168,7 @@ The full-spec native editing entry point. The native side picks the cheapest pat
   - crop, a native overlay, or an output-side change (`width`/`height`/`fps`/`codec`/`bitrate`) → **transcode** (re-encode), on both platforms.
   - A trim window (`startSec`/`durationSec` on the clip) composes with any of the above — render trims **and** transforms in one pass. Source audio is preserved through the transcode path on both platforms.
 
-**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on a **single-clip** spec. A **multi-clip** spec is passthrough-concat only — combining concat with a transform, an overlay, or an output-side change rejects with `InvalidSpecError` (multi-clip transcode is not wired yet; split into single-clip renders, or concat the transformed outputs). Audio handling (`audio.mode`) — `passthrough` (default), `mute` (drop the track), and `replace` (swap in `replaceUri`) — is wired on every audio-carrying render path on both platforms; see [`AudioSpec`](#audiospec).
+**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on both single-clip and **multi-clip** specs. A multi-clip spec that needs a re-encode (any per-clip transform, an overlay, or an output-side change) transcodes each clip to the shared output and concatenates them; a multi-clip spec with no re-encode stays on the lossless passthrough concat. The timeline is still **contiguous** — gaps and overlaps (`clip.outputStartSec`) reject. When the output size is unpinned, multi-clip re-encode derives it from the first clip. Audio handling (`audio.mode`) — `passthrough` (default), `mute` (drop the track), and `replace` (swap in `replaceUri`) — is wired on every audio-carrying render path on both platforms; see [`AudioSpec`](#audiospec).
 
 `RenderSpec` requires a non-empty `clips` array at compile time — synthesized renders go through [`Video.synthesize`](#videosynthesize) instead.
 
@@ -592,7 +592,7 @@ Each top-level operation maps to one of three internal execution paths. The deci
 | **transcode** | Native overlays (`image`, `text`), `crop`, an output-side change (size/fps/codec/bitrate), or any rotation/flip on Android — re-encodes; preserves source audio and honors a trim window | Medium  |
 | **compose** | Worklet overlay or `drawFrame` callback present, OR no source clips (synthesize)    | Slowest |
 
-Per-clip transforms / overlays / output-side changes apply to **single-clip** renders; a multi-clip spec is passthrough-concat only (combining concat with a re-encode rejects until multi-clip transcode lands).
+Per-clip transforms / overlays / output-side changes apply to both single-clip and multi-clip renders; a multi-clip spec needing a re-encode transcodes each clip to the shared output and concatenates them, while a no-re-encode multi-clip spec stays on the lossless passthrough concat.
 
 The `Video.trim` / `Video.flip` / `Video.stamp` convenience wrappers exist so the routing decision lives in C++, not split across JS and native. `Video.render` is the explicit form.
 

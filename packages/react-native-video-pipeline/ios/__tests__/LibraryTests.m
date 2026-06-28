@@ -7202,4 +7202,87 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
+// Multi-clip transcode (#14): mirrors HybridVideoPipeline::render's
+// transcode-each-then-concat path — each clip is re-encoded to a shared output
+// size, then the matching temps are losslessly concatenated into one timeline.
+- (void)testMultiClipTranscodeEachThenConcat {
+  const NSInteger kFps = 30;
+  const NSInteger kFrames = 30;  // 1.0s per clip
+  NSError *error = nil;
+  NSString *clipA = authorMotionFixture(160, 120, kFps, kFrames, @"mc-a", &error);
+  NSString *clipB = authorMotionFixture(160, 120, kFps, kFrames, @"mc-b", &error);
+  XCTAssertNotNil(clipA, @"clipA author failed: %@", error);
+  XCTAssertNotNil(clipB, @"clipB author failed: %@", error);
+
+  NSMutableArray<RNVPRemuxerConcatSource *> *sources = [NSMutableArray array];
+  NSMutableArray<NSString *> *temps = [NSMutableArray array];
+  double cursor = 0.0;
+  for (NSString *clip in @[ clipA, clipB ]) {
+    // Resize to 80x80 forces a re-encode (the shared output every clip lands on).
+    RNVPTranscodeTarget *target =
+        [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                            height:80
+                                               fps:(double)kFps
+                                             codec:RNVPTranscodeCodecH264
+                                           bitrate:0
+                                            rotate:-1
+                                             flipH:NO
+                                             flipV:NO
+                                             cropX:0
+                                             cropY:0
+                                         cropWidth:0
+                                        cropHeight:0
+                                       sourceStart:0.0
+                                    sourceDuration:0.0];
+    NSString *temp = [NSTemporaryDirectory()
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"mc-tmp-%@.mp4", NSUUID.UUID.UUIDString]];
+    [temps addObject:temp];
+    XCTAssertTrue([RNVPTranscoder transcodeFromURL:[NSURL fileURLWithPath:clip]
+                                             toURL:[NSURL fileURLWithPath:temp]
+                                            target:target
+                                          overlays:nil
+                                          metadata:nil
+                                              stop:nil
+                                          progress:nil
+                                             error:&error],
+                  @"clip transcode failed: %@", error);
+    AVURLAsset *a = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:temp]];
+    const double dur = CMTimeGetSeconds(a.duration);
+    [sources addObject:[[RNVPRemuxerConcatSource alloc]
+                           initWithSourceURL:[NSURL fileURLWithPath:temp]
+                                 sourceStart:0.0
+                              sourceDuration:dur
+                                 outputStart:cursor]];
+    cursor += dur;
+  }
+
+  NSString *out = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"mc-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxConcatSources:sources
+                                          toURL:[NSURL fileURLWithPath:out]
+                                           stop:nil
+                                          error:&error],
+                @"multi-clip concat failed: %@", error);
+
+  // The joined output is re-encoded to 80x80 and spans both clips (~2.0s).
+  RNVPAVDemuxer *demuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([demuxer openAtURL:[NSURL fileURLWithPath:out] error:&error],
+                @"open output failed: %@", error);
+  XCTAssertEqual(demuxer.width, 80);
+  XCTAssertEqual(demuxer.height, 80);
+  XCTAssertEqualWithAccuracy(demuxer.durationSec, 2.0, 0.2,
+                             @"joined duration %f should be ~2.0s",
+                             demuxer.durationSec);
+  [demuxer closeWithError:NULL];
+
+  [[NSFileManager defaultManager] removeItemAtPath:clipA error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:clipB error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
+  for (NSString *t in temps) {
+    [[NSFileManager defaultManager] removeItemAtPath:t error:nil];
+  }
+}
+
 @end

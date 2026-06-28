@@ -102,24 +102,26 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     return when {
       clips == null || clips.isEmpty() ->
         renderSynthesize(spec, renderToken, onProgress)
-      // Single clip needing a re-encode (a transform, an overlay, or an
-      // output-side change) goes through the transcoder — which also honors the
-      // clip's trim window. Everything else (plain trims, multi-clip concat)
-      // stays on the passthrough remux path.
-      isSingleClipTranscode(spec, clips.toList()) ->
-        renderTranscodeSingle(spec, clips.first(), renderToken, onProgress)
+      // A spec needing a re-encode (a per-clip transform, an overlay, or an
+      // output-side change) goes through the transcoder — single clip or
+      // multi-clip. The transcoder also honors each clip's trim window.
+      // Everything else (plain trims, multi-clip passthrough concat) stays on
+      // the lossless remux path.
+      needsReencode(spec, clips.toList()) ->
+        if (clips.size == 1) {
+          renderTranscodeSingle(spec, clips.first(), renderToken, onProgress)
+        } else {
+          renderTranscodeMulti(spec, clips.toList(), renderToken, onProgress)
+        }
       else -> renderClips(spec, clips.toList(), renderToken)
     }
   }
 
-  /// True when a single-clip spec needs the re-encode path: a non-empty
-  /// transform (rotate/flip/crop), any overlay, or an output-side change
-  /// (width/height/fps/codec/bitrate). Multi-clip specs never match — their
-  /// transcode path is not wired (they stay on concat / get rejected).
-  private fun isSingleClipTranscode(spec: VideoSpec, clips: List<Clip>): Boolean {
-    if (clips.size != 1) return false
-    val t = clips[0].transform
-    val hasTransform = t != null && clipTransformIsNonEmpty(t)
+  /// True when a spec needs the re-encode path: any clip carries a non-empty
+  /// transform (rotate/flip/crop), the spec has an overlay, or there's an
+  /// output-side change (width/height/fps/codec/bitrate).
+  private fun needsReencode(spec: VideoSpec, clips: List<Clip>): Boolean {
+    val hasTransform = clips.any { it.transform?.let { t -> clipTransformIsNonEmpty(t) } == true }
     val hasOverlays = spec.overlays?.isNotEmpty() == true
     val o = spec.output
     val outputReencode = o.width != null || o.height != null || o.fps != null ||
@@ -928,6 +930,172 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         // it in a second compressed-passthrough pass (audio + video copied,
         // location via MediaMuxer.setLocation, the rest via Mp4MetadataInjector).
         // Mirrors the full MetadataSpec the metadata-only stamp path persists.
+        spec.metadata?.let { applyRenderMetadata(outputPath, it) }
+        Unit
+      } catch (e: TransformerRunner.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.CancelledException) {
+        throw VideoPipelineCancelledException()
+      } catch (e: Transcoder.InvalidSpecException) {
+        throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
+      } finally {
+        guard.end()
+        RenderTokenRegistry.unregisterToken(renderToken)
+      }
+    }
+  }
+
+  /// Multi-clip render that needs a re-encode (#14): a per-clip transform, an
+  /// overlay, or an output-side change on a multi-clip spec. Each clip becomes
+  /// an [EditedMediaItem] in one Media3 [EditedMediaItemSequence] (its own
+  /// crop/rotate/flip/trim + the shared output presentation/fps/overlays); the
+  /// sequence is concatenated and re-encoded to the shared output. The JS layer
+  /// already enforces a contiguous timeline (gaps/overlaps reject — #18).
+  private fun renderTranscodeMulti(
+    spec: VideoSpec,
+    clips: List<Clip>,
+    renderToken: String,
+    onProgress: ((p: Progress) -> Unit)?,
+  ): Promise<Unit> {
+    val outputPath = spec.output.path
+    val stopToken = RenderTokenRegistry.registerToken(renderToken)
+    val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
+    return Promise.parallel {
+      try {
+        val output = spec.output
+        if (spec.duration != null) {
+          throw VideoPipelineInvalidSpecException(
+            "duration is only valid when clips is empty"
+          )
+        }
+        // Contiguous timeline only (the sequence joins clips back-to-back). The
+        // JS layer already enforces this; re-check so a direct caller can't slip
+        // a gap/overlap past it.
+        var cumulative = 0.0
+        clips.forEach { c ->
+          if (kotlin.math.abs(c.outputStart - cumulative) > 1e-3) {
+            throw VideoPipelineInvalidSpecException(
+              "multi-clip transcode requires a contiguous timeline — " +
+                "clip.outputStart does not match the cumulative position; gaps " +
+                "and overlaps are not supported yet"
+            )
+          }
+          cumulative += c.sourceDuration
+        }
+        val ctx = NitroModules.applicationContext?.applicationContext
+          ?: throw VideoPipelineInvalidSpecException(
+            "render: no application context available for the transcoder"
+          )
+        val replaceUri = spec.audio?.takeIf { it.mode == AudioMode.REPLACE }?.replaceUri
+        if (replaceUri != null && !Remuxer.hasAudioTrack(replaceUri)) {
+          throw VideoPipelineInvalidSpecException(
+            "audio replace — the replacement file has no audio track"
+          )
+        }
+        // Multi-clip re-encode applies overlays per-clip, so a time-ranged
+        // overlay would land relative to each clip's own timeline, not the
+        // joined output. Reject it until the timeline-aware path lands; static
+        // overlays (a watermark across the whole output) are fine.
+        val hasTimeRangedOverlay = spec.overlays?.any { ov ->
+          when (ov) {
+            is Overlay.First -> ov.value.timeRange != null
+            is Overlay.Second -> ov.value.timeRange != null
+          }
+        } ?: false
+        if (hasTimeRangedOverlay) {
+          throw VideoPipelineInvalidSpecException(
+            "time-ranged overlays on a multi-clip re-encode are not supported " +
+              "yet — the overlay would be applied per-clip, not over the joined " +
+              "timeline; use a static overlay or render per clip"
+          )
+        }
+
+        // Probe every clip; build per-clip trim + transform state.
+        val infos = clips.map { ProbeRunner.info(it.uri) }
+
+        // Resolve the spec-level overlays once; the same bitmaps are shared by
+        // every clip (a watermark spans the whole output). runMulti recycles the
+        // distinct set once.
+        val resolvedOverlays = ArrayList<Transcoder.ResolvedOverlay>()
+        try {
+          spec.overlays?.forEach { ov ->
+            resolvedOverlays.add(
+              when (ov) {
+                is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
+                is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
+              }
+            )
+          }
+        } catch (t: Throwable) {
+          resolvedOverlays.forEach { runCatching { it.bitmap.recycle() } }
+          throw t
+        }
+
+        // One shared output canvas for every clip so they align after Presentation
+        // SCALE_TO_FIT. Pinned output dims win; otherwise derive from the first
+        // clip (post its own rotation), the multi-clip analogue of the single-clip
+        // fallback.
+        val t0 = clips[0].transform
+        val rot0 = t0?.rotate?.roundToInt() ?: -1
+        val swap0 = rot0 == 90 || rot0 == 270
+        val content0W = t0?.crop?.w ?: infos[0].width
+        val content0H = t0?.crop?.h ?: infos[0].height
+        val canvasW = (output.width ?: if (swap0) content0H else content0W).roundToInt()
+        val canvasH = (output.height ?: if (swap0) content0W else content0H).roundToInt()
+
+        // Total timeline duration (sum of each clip's effective trim), for the
+        // replacement-audio cap.
+        val totalDurationSec = clips.indices.sumOf { i ->
+          val clip = clips[i]
+          val isRealTrim = clip.sourceStart > 1e-3 ||
+            clip.sourceDuration < infos[i].durationSec - 0.05
+          if (isRealTrim) {
+            minOf(clip.sourceDuration, infos[i].durationSec - clip.sourceStart).coerceAtLeast(0.0)
+          } else {
+            infos[i].durationSec
+          }
+        }
+
+        val clipSpecs = clips.indices.map { i ->
+          val clip = clips[i]
+          val info = infos[i]
+          val t = clip.transform
+          val rotateDeg = t?.rotate?.roundToInt() ?: -1
+          val isRealTrim = clip.sourceStart > 1e-3 ||
+            clip.sourceDuration < info.durationSec - 0.05
+          TransformerRunner.Spec(
+            sourceUri = clip.uri,
+            outputPath = outputPath,
+            sourceWidth = info.codedWidth.roundToInt(),
+            sourceHeight = info.codedHeight.roundToInt(),
+            startSec = if (isRealTrim) clip.sourceStart else 0.0,
+            durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
+            rotate = rotateDeg,
+            flipH = t?.flipH ?: false,
+            flipV = t?.flipV ?: false,
+            cropX = t?.crop?.x ?: 0.0,
+            cropY = t?.crop?.y ?: 0.0,
+            cropW = t?.crop?.w ?: 0.0,
+            cropH = t?.crop?.h ?: 0.0,
+            // Pin every clip to the SHARED canvas (not just when the user pinned
+            // dims): a multi-clip sequence needs one consistent output size, so
+            // clips of differing sizes all scale to it.
+            outWidth = canvasW,
+            outHeight = canvasH,
+            fps = resolveMedia3TargetFps(output.fps, info.fps),
+            hevc = output.codec == VideoCodec.HEVC,
+            bitrate = output.bitrate?.roundToInt(),
+            overlays = resolvedOverlays,
+            outCanvasW = canvasW,
+            outCanvasH = canvasH,
+            removeAudio = spec.audio?.mode == AudioMode.MUTE,
+            audioReplacementUri = replaceUri,
+            outputDurationSec = totalDurationSec,
+          )
+        }
+
+        TransformerRunner.runMulti(ctx, clipSpecs, stopToken, wrapTransformerProgress(onProgress))
+
         spec.metadata?.let { applyRenderMetadata(outputPath, it) }
         Unit
       } catch (e: TransformerRunner.CancelledException) {

@@ -384,6 +384,49 @@ std::optional<std::string> describeTranscodeBranchRejection(
   return std::nullopt;
 }
 
+// Build a transcode target for one clip on a multi-clip timeline: the clip's
+// own transform (rotate / flip / crop) and trim window, but explicit *shared*
+// output dimensions / fps / codec / bitrate so every clip re-encodes to an
+// identical output that the lossless concat can then join. Used by the
+// multi-clip transcode-each-then-concat path (#14).
+RNVPTranscodeTarget* buildTranscodeTargetForClip(const Clip& clip,
+                                                 NSInteger outW, NSInteger outH,
+                                                 double fps,
+                                                 RNVPTranscodeCodec codec,
+                                                 NSInteger bitrate) {
+  NSInteger rotate = -1;
+  BOOL flipH = NO;
+  BOOL flipV = NO;
+  double cropX = 0.0, cropY = 0.0, cropWidth = 0.0, cropHeight = 0.0;
+  if (clip.transform.has_value()) {
+    const auto& t = *clip.transform;
+    if (t.rotate.has_value()) rotate = static_cast<NSInteger>(std::lround(*t.rotate));
+    flipH = t.flipH.value_or(false) ? YES : NO;
+    flipV = t.flipV.value_or(false) ? YES : NO;
+    if (t.crop.has_value()) {
+      const auto& c = *t.crop;
+      cropX = c.x;
+      cropY = c.y;
+      cropWidth = c.w;
+      cropHeight = c.h;
+    }
+  }
+  return [[RNVPTranscodeTarget alloc] initWithWidth:outW
+                                             height:outH
+                                                fps:fps
+                                              codec:codec
+                                            bitrate:bitrate
+                                             rotate:rotate
+                                              flipH:flipH
+                                              flipV:flipV
+                                              cropX:cropX
+                                              cropY:cropY
+                                          cropWidth:cropWidth
+                                         cropHeight:cropHeight
+                                        sourceStart:clip.sourceStart
+                                     sourceDuration:clip.sourceDuration];
+}
+
 RNVPTranscodeTarget* buildTranscodeTarget(const VideoSpec& spec,
                                           NSInteger sourceW,
                                           NSInteger sourceH,
@@ -566,6 +609,16 @@ void appendNativeOverlay(
                                           hasTimeRange:hasTimeRange
                                               startSec:startSec
                                                 endSec:endSec]];
+}
+
+// Whether an overlay is time-ranged (visible only for part of the timeline).
+// Multi-clip re-encode applies overlays per-clip, so a time-ranged overlay
+// would be mis-timed against the joined output — the caller rejects that case.
+bool overlayHasTimeRange(const std::variant<ImageOverlay, TextOverlay>& o) {
+  if (std::holds_alternative<ImageOverlay>(o)) {
+    return std::get<ImageOverlay>(o).timeRange.has_value();
+  }
+  return std::get<TextOverlay>(o).timeRange.has_value();
 }
 
 // Translate an optional @c MetadataSpec (nitro) into an Obj-C
@@ -837,6 +890,247 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           throw std::runtime_error(std::string("VideoPipeline.render "
                                                 "transcode failed: ") +
                                    desc);
+        }
+      });
+    }
+
+    // Multi-clip render that needs a re-encode (#14): a per-clip transform, an
+    // overlay, or an output-side change. Transcode each clip to a temp at the
+    // shared output spec (reusing the single-clip transcoder, which bakes the
+    // per-clip transform/crop/overlay), then losslessly concat the matching
+    // temps. Reuses the whole single-clip transcoder + concat machinery; the JS
+    // layer already enforces a contiguous timeline (gaps/overlaps reject, #18).
+    bool anyClipTransform = false;
+    for (const auto& c : *spec.clips) {
+      if (clipHasRotateOrFlip(c) || clipHasCrop(c)) {
+        anyClipTransform = true;
+        break;
+      }
+    }
+    const bool multiNeedsTranscode =
+        !single && (anyClipTransform || outputAsksForReencode(spec.output) ||
+                    hasOverlays);
+    if (multiNeedsTranscode) {
+      if (spec.duration.has_value()) {
+        return Promise<void>::rejected(std::make_exception_ptr(
+            makeInvalidSpec("duration is only valid when clips is empty")));
+      }
+      // Multi-clip re-encode applies overlays per-clip, so a time-ranged overlay
+      // would land relative to each clip's own timeline, not the joined output.
+      // Reject it until the timeline-aware multi-clip overlay path lands; static
+      // overlays (a watermark across the whole output) are fine.
+      if (spec.overlays.has_value()) {
+        for (const auto& o : *spec.overlays) {
+          if (overlayHasTimeRange(o)) {
+            return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+                "time-ranged overlays on a multi-clip re-encode are not "
+                "supported yet — the overlay would be applied per-clip, not over "
+                "the joined timeline; use a static overlay or render per clip")));
+          }
+        }
+      }
+      // Contiguous timeline only (the transcode-each-then-concat path joins
+      // clips back-to-back). The JS layer already enforces this; re-check here
+      // so a direct native caller can't slip a gap/overlap past it.
+      {
+        double cumulative = 0.0;
+        for (const auto& c : *spec.clips) {
+          if (std::fabs(c.outputStart - cumulative) > 1e-3) {
+            return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+                "multi-clip transcode requires a contiguous timeline — "
+                "clip.outputStart does not match the cumulative position; gaps "
+                "and overlaps are not supported yet")));
+          }
+          cumulative += c.sourceDuration;
+        }
+      }
+      NSMutableArray* nativeOverlays = nil;
+      if (spec.overlays.has_value() && !spec.overlays->empty()) {
+        nativeOverlays =
+            [NSMutableArray arrayWithCapacity:spec.overlays->size()];
+        for (const auto& overlay : *spec.overlays) {
+          appendNativeOverlay(nativeOverlays, overlay);
+        }
+      }
+      const std::vector<Clip> clipsCopy = *spec.clips;
+      const OutputSpec outputCopy = spec.output;
+      const ResolvedAudio audio = resolveAudio(spec);
+      // Each clip transcodes muted unless the whole render is passthrough; the
+      // soundtrack is then authored once by the concat (passthrough joins each
+      // clip's audio, replace inserts the replacement over the full timeline).
+      const RNVPAudioMode perClipAudio = audio.mode == RNVPAudioModePassthrough
+                                             ? RNVPAudioModePassthrough
+                                             : RNVPAudioModeMute;
+      const RNVPAudioMode concatAudio = audio.mode;
+      NSURL* concatReplacementURL = audio.replacementURL;
+      NSURL* outputURL = urlFromUri(spec.output.path);
+
+      const std::string tokenCopy = renderToken;
+      std::shared_ptr<StopToken> stop =
+          !renderToken.empty()
+              ? RenderTokenRegistry::registerToken(renderToken)
+              : std::make_shared<StopToken>();
+      RNVPStopToken* runnerToken = [RNVPStopToken tokenFromSharedPtr:stop];
+      NSString* journalToken =
+          !renderToken.empty()
+              ? [NSString stringWithUTF8String:renderToken.c_str()]
+              : internalJournalToken("render-multi-transcode");
+      NSString* outputPathForJournal =
+          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      RNVPBackgroundTaskGuard* guard =
+          [RNVPBackgroundTaskGuard beginWithTokenId:journalToken
+                                         outputPath:outputPathForJournal
+                                          stopToken:runnerToken];
+
+      return Promise<void>::async([clipsCopy, outputCopy, nativeOverlays,
+                                   perClipAudio, concatAudio,
+                                   concatReplacementURL, outputURL, runnerToken,
+                                   tokenCopy, guard]() {
+        NSMutableArray<NSString*>* temps = [NSMutableArray array];
+        void (^teardown)(void) = ^{
+          RenderTokenRegistry::unregisterToken(tokenCopy);
+          [guard end];
+          for (NSString* p in temps) {
+            [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
+          }
+        };
+
+        // Shared output dimensions: pinned values win, else derive from clip[0]
+        // (post its own rotation) — the multi-clip analogue of the single-clip
+        // fallback. Every clip re-encodes to these dims so the concat can join.
+        NSError* probeErr = nil;
+        NSURL* clip0URL = urlFromUri(clipsCopy[0].uri);
+        RNVPAVDemuxer* d0 = [[RNVPAVDemuxer alloc] init];
+        if (![d0 openAtURL:clip0URL error:&probeErr]) {
+          teardown();
+          const char* desc = probeErr.localizedDescription.UTF8String ?: "(nil)";
+          throw std::runtime_error(
+              std::string("VideoPipeline.render multi-transcode probe failed: ") +
+              desc);
+        }
+        const NSInteger src0W = d0.width;
+        const NSInteger src0H = d0.height;
+        const double src0Fps = d0.fps > 0.0 ? d0.fps : 30.0;
+        [d0 closeWithError:nullptr];
+
+        NSInteger rot0 = -1;
+        double crop0W = 0.0, crop0H = 0.0;
+        if (clipsCopy[0].transform.has_value()) {
+          const auto& t = *clipsCopy[0].transform;
+          if (t.rotate.has_value()) rot0 = static_cast<NSInteger>(std::lround(*t.rotate));
+          if (t.crop.has_value()) {
+            crop0W = t.crop->w;
+            crop0H = t.crop->h;
+          }
+        }
+        const NSInteger content0W =
+            crop0W > 0.0 ? static_cast<NSInteger>(std::lround(crop0W)) : src0W;
+        const NSInteger content0H =
+            crop0H > 0.0 ? static_cast<NSInteger>(std::lround(crop0H)) : src0H;
+        const BOOL swap0 = (rot0 == 90 || rot0 == 270);
+        const NSInteger outW =
+            outputCopy.width.has_value()
+                ? static_cast<NSInteger>(std::lround(*outputCopy.width))
+                : (swap0 ? content0H : content0W);
+        const NSInteger outH =
+            outputCopy.height.has_value()
+                ? static_cast<NSInteger>(std::lround(*outputCopy.height))
+                : (swap0 ? content0W : content0H);
+        const double fps =
+            outputCopy.fps.has_value() ? *outputCopy.fps : src0Fps;
+        const RNVPTranscodeCodec codec =
+            outputCopy.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC
+                ? RNVPTranscodeCodecHEVC
+                : RNVPTranscodeCodecH264;
+        const NSInteger bitrate =
+            outputCopy.bitrate.has_value()
+                ? static_cast<NSInteger>(std::lround(*outputCopy.bitrate))
+                : 0;
+
+        // Transcode each clip to a temp, collecting concat sources.
+        NSMutableArray<RNVPRemuxerConcatSource*>* sources =
+            [NSMutableArray array];
+        double cursor = 0.0;
+        for (size_t i = 0; i < clipsCopy.size(); i++) {
+          if (runnerToken.abortRequested) {
+            teardown();
+            throw makeCancelled();
+          }
+          NSURL* clipURL = urlFromUri(clipsCopy[i].uri);
+          // Per-clip target fps: an explicit output.fps resamples every clip to
+          // it; otherwise each clip keeps its OWN source cadence. Using clip[0]'s
+          // fps for a clip recorded at a different rate would retime it (the
+          // transcoder emits one output frame per decoded sample at
+          // outputIndex/fps), changing its duration.
+          double clipTargetFps = fps;
+          if (!outputCopy.fps.has_value()) {
+            RNVPAVDemuxer* di = [[RNVPAVDemuxer alloc] init];
+            if ([di openAtURL:clipURL error:nil]) {
+              if (di.fps > 0.0) clipTargetFps = di.fps;
+              [di closeWithError:nullptr];
+            }
+          }
+          NSString* tempPath = [NSTemporaryDirectory()
+              stringByAppendingPathComponent:
+                  [NSString stringWithFormat:@"rnvp-mc-%@-%zu.mp4",
+                                             [[NSUUID UUID] UUIDString], i]];
+          [temps addObject:tempPath];
+          NSURL* tempURL = [NSURL fileURLWithPath:tempPath];
+          RNVPTranscodeTarget* target = buildTranscodeTargetForClip(
+              clipsCopy[i], outW, outH, clipTargetFps, codec, bitrate);
+          NSError* tErr = nil;
+          const BOOL ok = [RNVPTranscoder transcodeFromURL:clipURL
+                                                     toURL:tempURL
+                                                    target:target
+                                                  overlays:nativeOverlays
+                                                  metadata:nil
+                                                 audioMode:perClipAudio
+                                       audioReplacementURL:nil
+                                                      stop:runnerToken
+                                                  progress:nil
+                                                     error:&tErr];
+          if (!ok) {
+            teardown();
+            if (tErr != nil &&
+                [tErr.domain isEqualToString:RNVPTranscoderErrorDomain] &&
+                tErr.code == RNVPTranscoderErrorCodeCancelled) {
+              throw makeCancelled();
+            }
+            const char* desc = tErr.localizedDescription.UTF8String ?: "(nil)";
+            throw std::runtime_error(
+                std::string("VideoPipeline.render multi-transcode clip[") +
+                std::to_string(i) + "] failed: " + desc);
+          }
+          AVURLAsset* tempAsset = [AVURLAsset assetWithURL:tempURL];
+          const double dur = CMTimeGetSeconds(tempAsset.duration);
+          [sources addObject:[[RNVPRemuxerConcatSource alloc]
+                                 initWithSourceURL:tempURL
+                                       sourceStart:0.0
+                                    sourceDuration:dur
+                                       outputStart:cursor]];
+          cursor += dur;
+        }
+
+        // Losslessly concat the transcoded temps into the final output.
+        NSError* cErr = nil;
+        const BOOL cok = [RNVPRemuxer remuxConcatSources:sources
+                                                   toURL:outputURL
+                                               audioMode:concatAudio
+                                     audioReplacementURL:concatReplacementURL
+                                                    stop:runnerToken
+                                                   error:&cErr];
+        teardown();
+        if (!cok) {
+          if (cErr != nil &&
+              [cErr.domain isEqualToString:RNVPRemuxerErrorDomain] &&
+              cErr.code == RNVPRemuxerErrorCodeCancelled) {
+            throw makeCancelled();
+          }
+          const char* desc = cErr.localizedDescription.UTF8String ?: "(nil)";
+          throw std::runtime_error(
+              std::string(
+                  "VideoPipeline.render multi-transcode concat failed: ") +
+              desc);
         }
       });
     }
