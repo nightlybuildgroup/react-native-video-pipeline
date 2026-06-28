@@ -615,12 +615,15 @@ export interface VideoPipeline extends HybridObject<{ ios: 'c++'; android: 'kotl
   //     with watermark today). Pure remux paths (trim, flip, metadata-only
   //     stamp) complete fast enough that per-frame progress is not
   //     meaningful and the callback is not invoked. -----------------------
+  // `trim` is the lossless-cut primitive: passthrough remux only, no
+  // transform argument. Trimming *and* transforming in one pass goes through
+  // `render`, whose native router picks remux (rotation-only) vs transcode
+  // (flip/crop) uniformly across platforms. See `docs/api.md` — Routing rules.
   trim(
     uri: string,
     outPath: string,
     startSec: number,
     durationSec: number,
-    transform: ClipTransform | undefined,
     renderToken: string,
     onProgress?: (p: Progress) => void,
   ): Promise<void>;

@@ -107,6 +107,34 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
                     axis:(RNVPFlipAxis)axis
                    error:(NSError *_Nullable __autoreleasing *)error;
 
+/// Trim + rotate/flip in one lossless remux pass. Copies the compressed
+/// sample stream for the half-open window [startSec, startSec+durationSec)
+/// (a @p durationSec <= 0 means "to the end of the source") into @p outputURL
+/// and writes a @c preferredTransform composed from the source's own transform
+/// plus the requested rotation (degrees, one of {0,90,180,270}; pass a
+/// negative value for "no rotation") and horizontal/vertical flips. No pixels
+/// are re-encoded — this is the fast path the render router picks for any
+/// rotation/flip-only single-clip spec (with or without a trim window). Crop,
+/// resolution/codec/bitrate changes, and overlays are NOT expressible here and
+/// route to @c RNVPTranscoder instead.
+///
+/// The transform is composed in the source's natural-pixel frame as
+/// `preferred → rotate → flip` (matching the transcode pipeline's visual
+/// order) and re-normalized so the output's displayed frame sits at a
+/// non-negative origin. Audio, codec, bit rate, resolution, HDR flag, and
+/// container metadata are all preserved (passthrough).
+///
+/// Returns @c YES on success; on failure populates @p error and deletes any
+/// partial output file.
++ (BOOL)remuxTransformFromURL:(NSURL *)sourceURL
+                        toURL:(NSURL *)outputURL
+                     startSec:(double)startSec
+                  durationSec:(double)durationSec
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                        error:(NSError *_Nullable __autoreleasing *)error;
+
 @end
 
 /// One clip on a multi-clip concat timeline. Mirrors the numeric fields of

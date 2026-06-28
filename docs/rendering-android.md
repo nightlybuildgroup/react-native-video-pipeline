@@ -146,6 +146,39 @@ a small red marker at top-left as a visual canary.
 
 ---
 
+## Render with transform (Media3 Transformer)
+
+`Video.render` with a single-clip `transform` (rotate / flip / crop), an
+output-side change (size / codec / bitrate), or a trim window runs through
+**Media3 Transformer** (`TransformerRunner.kt`) — the canonical Jetpack editing
+engine. It owns the decode → effects → encode lifecycle, so there is no
+hand-rolled MediaCodec/EOS plumbing:
+
+- **Trim** → `MediaItem.ClippingConfiguration` (start/end ms). Only a real trim
+  sets a clip range, so a rotation-only edit can still transmux.
+- **Crop / rotate / flip** → `Effects`: `Crop` (source-pixel rect mapped to
+  NDC), `ScaleAndRotateTransformation` (rotation is clockwise per the public
+  contract → negated for Media3; flips are scale ±1).
+- **Explicit output size** → `Presentation`; otherwise Media3 derives it (a 90°
+  rotation yields portrait output without the caller pinning dimensions).
+- **Audio** → preserved automatically (Transformer copies the audio through).
+- **Transmux fast path** → when the requested edit needs no pixel work, Media3
+  copies compressed samples without re-encoding.
+
+Transformer must be constructed, started, cancelled, and progress-polled on a
+thread with a `Looper`. The render worker (`Promise.parallel`) has none, so the
+session is driven on the main `Looper` and the worker blocks on a latch.
+
+**Why Media3 and not a DIY pump.** An earlier hand-rolled MediaCodec
+decode→GL→encode pump (still used by the watermark-stamp path) deadlocked on
+back-to-back renders in one process — the second export hung in the decode loop.
+Media3's managed lifecycle eliminates that class of bug; the instrumented
+`backToBackTranscodesBothComplete` test guards it.
+
+**Overlays on render** still use the hand-rolled `Transcoder` (full-source
+only); overlay + trim in one pass is rejected for now. Migrating overlays to a
+Media3 `OverlayEffect` is follow-up work.
+
 ## Potential improvements
 
 The remaining four per-frame copies all live on the encoder/output side:
