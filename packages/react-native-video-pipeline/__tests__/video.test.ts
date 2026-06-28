@@ -492,13 +492,33 @@ describe('Video.render — validation', () => {
     return promise;
   });
 
-  it('rejects an outputStartSec overlap (before the concat position)', () => {
+  it('accepts an outputStartSec overlap into the previous clip and forwards it (#18)', () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'a.mp4', startSec: 0, durationSec: 3 },
+        { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 2 },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as { clips: Array<{ outputStart: number }> };
+    // Clip B starts at 2 — a 1s overlap with clip A (which ends at 3). The
+    // engine crossfades the overlap; the boundary just forwards the position.
+    expect(passed.clips.map((c) => c.outputStart)).toEqual([0, 2]);
+    fake.renderCalls[0]?.resolve();
+    return promise;
+  });
+
+  it('rejects an overlap that spans more than the immediately preceding clip (#18)', () => {
+    // Clip C at 2 starts before clip B (which starts at 3) — it would overlap
+    // both A and B at once, which the crossfade compositor can't express.
     expect(() =>
       Video.render({
         output: { path: '/tmp/out.mp4' },
         clips: [
           { uri: 'a.mp4', startSec: 0, durationSec: 3 },
-          { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 1 },
+          { uri: 'b.mp4', startSec: 0, durationSec: 3 },
+          { uri: 'c.mp4', startSec: 0, durationSec: 3, outputStartSec: 2 },
         ],
       }),
     ).toThrow(InvalidSpecError);

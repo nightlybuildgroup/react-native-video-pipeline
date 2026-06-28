@@ -168,7 +168,7 @@ The full-spec native editing entry point. The native side picks the cheapest pat
   - crop, a native overlay, or an output-side change (`width`/`height`/`fps`/`codec`/`bitrate`) → **transcode** (re-encode), on both platforms.
   - A trim window (`startSec`/`durationSec` on the clip) composes with any of the above — render trims **and** transforms in one pass. Source audio is preserved through the transcode path on both platforms.
 
-**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on both single-clip and **multi-clip** specs. A multi-clip spec that needs a re-encode (any per-clip transform, an overlay, or an output-side change) transcodes each clip to the shared output and concatenates them; a multi-clip spec with no re-encode stays on the lossless passthrough concat. A **gap** (`clip.outputStartSec` past the previous clip's end) is filled with black + silence (this forces a re-encode); **overlaps** (a clip starting before the previous one ends) still reject. Gaps with an HEVC output reject for now (the black fill is authored as H.264). When the output size is unpinned, multi-clip re-encode derives it from the first clip. Audio handling (`audio.mode`) — `passthrough` (default), `mute` (drop the track), and `replace` (swap in `replaceUri`) — is wired on every audio-carrying render path on both platforms; see [`AudioSpec`](#audiospec).
+**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on both single-clip and **multi-clip** specs. A multi-clip spec that needs a re-encode (any per-clip transform, an overlay, or an output-side change) transcodes each clip to the shared output and concatenates them; a multi-clip spec with no re-encode stays on the lossless passthrough concat. A **gap** (`clip.outputStartSec` past the previous clip's end) is filled with black + silence (this forces a re-encode). An **overlap** (a clip starting before the previous one ends) is crossfade-dissolved over the overlap window on **iOS** (an opacity ramp on the outgoing clip plus a matching audio volume ramp); only adjacent-pair overlaps are supported (a clip overlapping two neighbours at once, or fully containing another, rejects). **Android** rejects overlaps for now (the Media3 crossfade is a follow-up). Gaps, and overlaps on iOS, with an HEVC output reject for now (the black fill and the crossfade re-encode are authored as H.264). When the output size is unpinned, multi-clip re-encode derives it from the first clip. Audio handling (`audio.mode`) — `passthrough` (default), `mute` (drop the track), and `replace` (swap in `replaceUri`) — is wired on every audio-carrying render path on both platforms; see [`AudioSpec`](#audiospec).
 
 `RenderSpec` requires a non-empty `clips` array at compile time — synthesized renders go through [`Video.synthesize`](#videosynthesize) instead.
 
@@ -382,7 +382,7 @@ interface ClipInput {
 
   // Forward-compatibility timeline hooks — see "Reserved timeline fields".
   id?: string;             // stable clip id; surfaced as FrameDrawerContext.clipId
-  outputStartSec?: number; // explicit output position; a value past the previous clip opens a black gap, overlaps reject
+  outputStartSec?: number; // explicit output position; past the previous clip opens a black gap, before it crossfades (iOS; Android rejects)
   track?: number;          // multi-track index; v0.1 accepts only undefined or 0
 }
 
@@ -394,14 +394,14 @@ interface ClipTransform {
 }
 ```
 
-The timeline model stitches clips in array order. By default each clip picks up where the previous ended (`outputStartSec` omitted). An explicit `outputStartSec` past the previous clip's end opens a **gap**, filled with black + silence. **Overlaps** (a clip starting before the previous one ends) are not supported (they would need blending) and reject.
+The timeline model stitches clips in array order. By default each clip picks up where the previous ended (`outputStartSec` omitted). An explicit `outputStartSec` past the previous clip's end opens a **gap**, filled with black + silence. A value before it is an **overlap**: on **iOS** the two clips are crossfade-dissolved over the overlap window (opacity ramp + audio volume ramp), limited to adjacent-pair overlaps; on **Android** overlaps reject for now.
 
 #### Reserved timeline fields
 
 `id` and `track` reserve public field names for a future richer timeline (multi-track, transitions, clip-targeted overlays). `outputStartSec` is live — it positions a clip (opening a black gap when past the previous clip's end). Rejected cases still surface as `InvalidSpecError`:
 
 - **`id`** — optional stable identifier, surfaced as `FrameDrawerContext.clipId` on the compose path. Must be unique within a single spec.
-- **`outputStartSec`** — when provided, a value at/after the previous clip's end opens a **gap** (filled with black + silence; forces a re-encode). A smaller value (**overlap**) rejects. Omit it for the contiguous position.
+- **`outputStartSec`** — when provided, a value at/after the previous clip's end opens a **gap** (filled with black + silence; forces a re-encode). A smaller value is an **overlap**: crossfade-dissolved on iOS (adjacent-pair only — an overlap spanning two clips rejects), rejected on Android. Omit it for the contiguous position.
 - **`track`** — must be `undefined` or `0` (the single main track). Any other value is rejected.
 
 Code written against these fields today keeps working as the timeline model grows; the validation rules will loosen, not the field shapes.

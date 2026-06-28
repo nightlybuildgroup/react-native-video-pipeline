@@ -99,6 +99,20 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
     val clips = spec.clips
+    // Timeline overlaps (a clip starting before the previous one ends) are
+    // crossfade-composited on iOS (#18). The Android Media3 crossfade — a
+    // multi-sequence Composition with a time-ramped alpha — is not implemented
+    // yet, so reject explicitly here rather than mis-render the overlap as a
+    // gapless concat. Tracked as Android follow-up to #18.
+    if (clips != null && hasOverlap(clips.toList())) {
+      return Promise.rejected(
+        VideoPipelineInvalidSpecException(
+          "timeline overlaps (clip.outputStartSec before the previous clip's " +
+            "end) are not supported on Android yet — they crossfade on iOS; " +
+            "use a contiguous timeline or a gap on Android"
+        )
+      )
+    }
     return when {
       clips == null || clips.isEmpty() ->
         renderSynthesize(spec, renderToken, onProgress)
@@ -132,6 +146,18 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     var prevEnd = 0.0
     for (c in clips) {
       if (c.outputStart > prevEnd + 1e-3) return true
+      prevEnd = c.outputStart + c.sourceDuration
+    }
+    return false
+  }
+
+  /// True when the timeline has an overlap — a clip whose outputStart is before
+  /// the previous clip's end. iOS crossfades these (#18); Android rejects them
+  /// for now (see render()).
+  private fun hasOverlap(clips: List<Clip>): Boolean {
+    var prevEnd = 0.0
+    for (c in clips) {
+      if (c.outputStart < prevEnd - 1e-3) return true
       prevEnd = c.outputStart + c.sourceDuration
     }
     return false

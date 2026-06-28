@@ -863,12 +863,17 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // is filled with black + silence, which forces a re-encode through the
     // multi-clip transcode path (you can't passthrough-concat black).
     bool hasGap = false;
+    // A timeline overlap (a clip whose outputStart is before the previous
+    // clip's end) is crossfade-composited (#18 overlaps), which also forces a
+    // re-encode (a blended frame can't be passthrough-concatenated).
+    bool hasOverlap = false;
     {
       double prevEnd = 0.0;
       for (const auto& c : *spec.clips) {
         if (c.outputStart > prevEnd + 1e-3) {
           hasGap = true;
-          break;
+        } else if (c.outputStart < prevEnd - 1e-3) {
+          hasOverlap = true;
         }
         prevEnd = c.outputStart + c.sourceDuration;
       }
@@ -990,8 +995,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
     // A gap routes here even on a single clip (a leading-gap render is
     // [black, clip]); otherwise multi-clip + any re-encode trigger.
     const bool multiNeedsTranscode =
-        hasGap || (!single && (anyClipTransform ||
-                               outputAsksForReencode(spec.output) || hasOverlays));
+        hasGap || hasOverlap ||
+        (!single && (anyClipTransform ||
+                     outputAsksForReencode(spec.output) || hasOverlays));
     if (multiNeedsTranscode) {
       if (spec.duration.has_value()) {
         return Promise<void>::rejected(std::make_exception_ptr(
@@ -1011,28 +1017,21 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           }
         }
       }
-      // No overlaps (clip.outputStart before the previous clip's end). Gaps are
-      // allowed and filled with black below. The JS layer already enforces this;
-      // re-check so a direct native caller can't slip an overlap past it.
-      {
-        double prevEnd = 0.0;
-        for (const auto& c : *spec.clips) {
-          if (c.outputStart < prevEnd - 1e-3) {
-            return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
-                "multi-clip transcode: clip.outputStart is before the previous "
-                "clip's end — overlaps are not supported")));
-          }
-          prevEnd = c.outputStart + c.sourceDuration;
-        }
-      }
-      // The black gap fill is authored as H.264 (RNVPAVMuxer), so it can't join
-      // an HEVC concat. Reject gaps with an HEVC output until the fill respects
-      // the output codec.
-      if (hasGap &&
+      // Overlaps (clip.outputStart before the previous clip's end) are
+      // crossfade-composited below; gaps are filled with black. Only
+      // adjacent-pair overlaps are supported — the crossfade composer rejects a
+      // clip overlapping two neighbours at once / full containment.
+      //
+      // The black gap fill is authored as H.264 (RNVPAVMuxer) and the crossfade
+      // re-encode runs through AVAssetExportPresetHighestQuality (H.264), so
+      // neither can target an HEVC output yet. Reject gaps/overlaps + HEVC until
+      // the fill / crossfade encode respects the output codec.
+      if ((hasGap || hasOverlap) &&
           spec.output.codec.value_or(VideoCodec::H264) == VideoCodec::HEVC) {
         return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
-            "timeline gaps with an HEVC output are not supported yet — the black "
-            "gap fill is authored as H.264; use the default H.264 output")));
+            "timeline gaps/overlaps with an HEVC output are not supported yet — "
+            "the black gap fill and crossfade re-encode are authored as H.264; "
+            "use the default H.264 output")));
       }
       NSMutableArray* nativeOverlays = nil;
       if (spec.overlays.has_value() && !spec.overlays->empty()) {
@@ -1075,7 +1074,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       return Promise<void>::async([clipsCopy, outputCopy, nativeOverlays,
                                    perClipAudio, concatAudio,
                                    concatReplacementURL, outputURL, runnerToken,
-                                   tokenCopy, guard]() {
+                                   tokenCopy, guard, hasOverlap]() {
         NSMutableArray<NSString*>* temps = [NSMutableArray array];
         void (^teardown)(void) = ^{
           RenderTokenRegistry::unregisterToken(tokenCopy);
@@ -1148,8 +1147,12 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           }
           // Fill a leading gap before this clip with a black + silent segment
           // (#18). The concat leaves silence for a video-only span, so the gap
-          // is black + silent. fps is cosmetic for a static fill.
-          const double gapSec = clipsCopy[i].outputStart - cursor;
+          // is black + silent. fps is cosmetic for a static fill. On the overlap
+          // path the crossfade composer renders black for empty timeline regions
+          // itself, so no black temp is authored — each clip is positioned at its
+          // true outputStart instead of the running concat cursor.
+          const double gapSec =
+              hasOverlap ? 0.0 : (clipsCopy[i].outputStart - cursor);
           if (gapSec > 1e-3) {
             NSString* gapPath = [NSTemporaryDirectory()
                 stringByAppendingPathComponent:
@@ -1224,22 +1227,46 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           }
           AVURLAsset* tempAsset = [AVURLAsset assetWithURL:tempURL];
           const double dur = CMTimeGetSeconds(tempAsset.duration);
+          // Concat positions each clip at the running cursor; the crossfade
+          // composer positions it at its true outputStart so overlaps land where
+          // the timeline asks.
+          const double clipOutputStart =
+              hasOverlap ? clipsCopy[i].outputStart : cursor;
           [sources addObject:[[RNVPRemuxerConcatSource alloc]
                                  initWithSourceURL:tempURL
                                        sourceStart:0.0
                                     sourceDuration:dur
-                                       outputStart:cursor]];
+                                       outputStart:clipOutputStart]];
           cursor += dur;
         }
 
-        // Losslessly concat the transcoded temps into the final output.
+        // Join the transcoded temps into the final output — a lossless concat
+        // for a contiguous/gapped timeline, a crossfade re-encode for overlaps.
         NSError* cErr = nil;
-        const BOOL cok = [RNVPRemuxer remuxConcatSources:sources
-                                                   toURL:outputURL
-                                               audioMode:concatAudio
-                                     audioReplacementURL:concatReplacementURL
-                                                    stop:runnerToken
-                                                   error:&cErr];
+        BOOL cok;
+        if (hasOverlap) {
+          // Overlapping clips can't be losslessly concatenated — crossfade-
+          // composite the transcoded temps (opacity + volume ramps over each
+          // overlap window) and re-encode.
+          const CMTime frameDuration =
+              CMTimeMake(1, static_cast<int32_t>(std::lround(fps)));
+          cok = [RNVPRemuxer composeCrossfadeSources:sources
+                                          renderSize:CGSizeMake(outW, outH)
+                                       frameDuration:frameDuration
+                                           audioMode:concatAudio
+                                 audioReplacementURL:concatReplacementURL
+                                               toURL:outputURL
+                                                stop:runnerToken
+                                               error:&cErr];
+        } else {
+          // Losslessly concat the transcoded temps into the final output.
+          cok = [RNVPRemuxer remuxConcatSources:sources
+                                          toURL:outputURL
+                                      audioMode:concatAudio
+                            audioReplacementURL:concatReplacementURL
+                                           stop:runnerToken
+                                          error:&cErr];
+        }
         teardown();
         if (!cok) {
           if (cErr != nil &&
@@ -1250,7 +1277,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           const char* desc = cErr.localizedDescription.UTF8String ?: "(nil)";
           throw std::runtime_error(
               std::string(
-                  "VideoPipeline.render multi-transcode concat failed: ") +
+                  "VideoPipeline.render multi-transcode join failed: ") +
               desc);
         }
       });

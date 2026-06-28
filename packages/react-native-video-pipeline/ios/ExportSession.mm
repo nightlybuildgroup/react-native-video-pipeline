@@ -150,6 +150,31 @@ BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
   return self;
 }
 
+- (instancetype)initWithComposedAsset:(AVAsset *)composedAsset
+                     videoComposition:(AVVideoComposition *)videoComposition
+                             audioMix:(AVAudioMix *)audioMix
+                               output:(NSURL *)output
+                             metadata:(NSArray<AVMetadataItem *> *)metadata
+                                 stop:(RNVPStopToken *)stop
+                             progress:(RNVPExportSessionProgress)progress {
+  if ((self = [super init])) {
+    _composedAsset = composedAsset;
+    _videoComposition = videoComposition;
+    _audioMix = audioMix;
+    _output = output;
+    _timeRange = kCMTimeRangeInvalid;
+    _metadata = metadata;
+    _composer = nil;
+    // The composition already carries the audio tracks; the audioMix (if any)
+    // only ramps their volumes — no mute/replace logic on this path.
+    _audioMode = RNVPAudioModePassthrough;
+    _audioReplacementURL = nil;
+    _stop = stop;
+    _progress = progress;
+  }
+  return self;
+}
+
 @end
 
 @implementation RNVPExportSession
@@ -204,7 +229,16 @@ BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
   // whole composition (not re-window it).
   BOOL audioWindowBakedIntoComposition = NO;
 
-  if (request.composer != nil) {
+  if (request.composedAsset != nil && request.videoComposition != nil) {
+    // Composition re-encode (#18 crossfade overlaps). The caller built the
+    // composition tracks and the layer-instruction opacity ramps; AVFoundation
+    // re-encodes the blended frames through the HighestQuality preset. The
+    // optional audioMix (volume ramps) is applied below alongside the video
+    // composition.
+    exportInput = asset;
+    videoComposition = (AVMutableVideoComposition *)request.videoComposition;
+    presetName = AVAssetExportPresetHighestQuality;
+  } else if (request.composer != nil) {
     const CGSize canvas = displayedSize(sourceVideoTrack);
     if (canvas.width <= 0.0 || canvas.height <= 0.0) {
       if (error)
@@ -397,6 +431,9 @@ BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
   exportSession.shouldOptimizeForNetworkUse = NO;
   if (videoComposition != nil) {
     exportSession.videoComposition = videoComposition;
+  }
+  if (request.audioMix != nil) {
+    exportSession.audioMix = request.audioMix;
   }
   // Bound the timeline. Caller-supplied timeRange wins; otherwise default to
   // the asset's reported duration. Without an explicit timeRange,

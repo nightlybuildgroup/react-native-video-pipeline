@@ -186,22 +186,30 @@ function finalizeClips(
 ): NonEmptyArray<Clip> {
   const out: Clip[] = [];
   let outputStart = 0;
+  // The previous clip's own output position — an overlap may reach back into it
+  // but no further (adjacent-pair overlaps only).
+  let prevClipStart = 0;
   for (const { input, sourceDuration } of resolved) {
     const sourceStart = input.startSec ?? 0;
     validateFileUri('clip.uri', input.uri);
     requireNonNeg('clip.startSec', sourceStart);
     requirePositive('clip.durationSec', sourceDuration);
     // An explicit outputStartSec at or after the running position opens a GAP
-    // before the clip (filled with black + silence by the render engine, which
-    // forces a re-encode). A value before it is an OVERLAP — blending two clips
-    // at once is still unsupported and rejects. Omit it for contiguous concat.
+    // before the clip (filled with black + silence). A value before it is an
+    // OVERLAP — the render engine crossfades the two clips over the overlap
+    // window (#18). Both force a re-encode. Omit it for contiguous concat.
+    //
+    // Only adjacent-pair overlaps are supported: an overlap that reaches back
+    // before the *previous* clip's own start would have a clip overlapping two
+    // neighbours at once (or fully contain one), which the crossfade compositor
+    // can't express — reject it here with the cumulative position for context.
     let clipOutputStart = outputStart;
     if (input.outputStartSec !== undefined) {
       requireNonNeg('clip.outputStartSec', input.outputStartSec);
-      if (input.outputStartSec < outputStart - OUTPUT_START_TOLERANCE_SEC) {
+      if (input.outputStartSec < prevClipStart - OUTPUT_START_TOLERANCE_SEC) {
         fail(
-          `clip.outputStartSec ${input.outputStartSec}s is before the previous clip's end (${outputStart}s) — overlaps are not supported`,
-          { outputStartSec: input.outputStartSec, position: outputStart },
+          `clip.outputStartSec ${input.outputStartSec}s starts before the previous clip (${prevClipStart}s) — an overlap may only reach back into the immediately preceding clip, not span two`,
+          { outputStartSec: input.outputStartSec, previousClipStart: prevClipStart },
         );
       }
       clipOutputStart = input.outputStartSec;
@@ -213,6 +221,7 @@ function finalizeClips(
       outputStart: clipOutputStart,
       ...(input.transform !== undefined ? { transform: input.transform } : {}),
     });
+    prevClipStart = clipOutputStart;
     outputStart = clipOutputStart + sourceDuration;
   }
   // `inputs` came in as `NonEmptyArray<ClipInput>`, so `out` has length >= 1.
