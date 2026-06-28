@@ -46,18 +46,19 @@ AVFileType fileTypeForOutputURL(NSURL *url) {
 // Insert the soundtrack dictated by `mode` into the composition-passthrough
 // `composition` over `videoRange`. Passthrough copies `sourceAsset`'s own
 // audio; Replace pulls the first audio track from `replacementURL`, capped to
-// the video duration; Mute inserts nothing. Best-effort: a missing or
-// decode-failing audio track yields a silent (video-only) result rather than
-// failing the whole remux, matching the trim/flip passthrough leniency.
-void insertAudioIntoComposition(AVMutableComposition *composition,
+// the video duration; Mute inserts nothing. Returns NO only when Replace was
+// requested but the replacement is missing / has no audio track — the caller
+// fails the remux rather than silently emitting video-only. Passthrough/mute
+// always return YES (a source clip with no audio is intentionally silent).
+BOOL insertAudioIntoComposition(AVMutableComposition *composition,
                                 AVAsset *sourceAsset, CMTimeRange videoRange,
                                 RNVPAudioMode mode, NSURL *replacementURL) {
-  if (mode == RNVPAudioModeMute) return;
+  if (mode == RNVPAudioModeMute) return YES;
 
   AVAsset *audioAsset = sourceAsset;
   CMTime usable = videoRange.duration;
   if (mode == RNVPAudioModeReplace) {
-    if (replacementURL == nil) return;
+    if (replacementURL == nil) return NO;
     audioAsset = [AVURLAsset assetWithURL:replacementURL];
     const CMTime replacementDuration = audioAsset.duration;
     if (CMTimeCompare(replacementDuration, usable) < 0) usable = replacementDuration;
@@ -65,7 +66,7 @@ void insertAudioIntoComposition(AVMutableComposition *composition,
 
   AVAssetTrack *audioTrack =
       [audioAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-  if (audioTrack == nil) return;
+  if (audioTrack == nil) return mode != RNVPAudioModeReplace;
 
   AVMutableCompositionTrack *audioComp = [composition
       addMutableTrackWithMediaType:AVMediaTypeAudio
@@ -78,6 +79,7 @@ void insertAudioIntoComposition(AVMutableComposition *composition,
                      ofTrack:audioTrack
                       atTime:kCMTimeZero
                        error:nil];
+  return YES;
 }
 
 // Pump every remaining sample from `output` into `input`. Samples are written
@@ -395,8 +397,15 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
   videoCompTrack.preferredTransform = flipTransformForAxis(
       axis, videoTrack.preferredTransform, videoTrack.naturalSize);
 
-  insertAudioIntoComposition(composition, asset, sourceRange, audioMode,
-                             audioReplacementURL);
+  if (!insertAudioIntoComposition(composition, asset, sourceRange, audioMode,
+                                  audioReplacementURL)) {
+    if (error) {
+      *error = makeError(
+          RNVPRemuxerErrorCodeSourceCorrupted,
+          @"audio replace: the replacement is missing or has no audio track");
+    }
+    return NO;
+  }
 
   RNVPExportRequest *request =
       [[RNVPExportRequest alloc] initWithComposedAsset:composition
@@ -532,8 +541,15 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
       videoTrack.preferredTransform, videoTrack.naturalSize, rotate, flipH,
       flipV);
 
-  insertAudioIntoComposition(composition, asset, window, audioMode,
-                             audioReplacementURL);
+  if (!insertAudioIntoComposition(composition, asset, window, audioMode,
+                                  audioReplacementURL)) {
+    if (error) {
+      *error = makeError(
+          RNVPRemuxerErrorCodeSourceCorrupted,
+          @"audio replace: the replacement is missing or has no audio track");
+    }
+    return NO;
+  }
 
   // Passthrough export through the unified driver — copies compressed samples,
   // writes the overridden transform. The composition timeline already starts at
@@ -602,6 +618,7 @@ NSString *fourCCString(FourCharCode code) {
   return [self remuxConcatSources:sources
                             toURL:outputURL
                         audioMode:RNVPAudioModePassthrough
+              audioReplacementURL:nil
                              stop:stopToken
                             error:error];
 }
@@ -609,6 +626,7 @@ NSString *fourCCString(FourCharCode code) {
 + (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
                      toURL:(NSURL *)outputURL
                  audioMode:(RNVPAudioMode)audioMode
+       audioReplacementURL:(NSURL *)audioReplacementURL
                       stop:(nullable RNVPStopToken *)stopToken
                      error:(NSError *_Nullable __autoreleasing *)error {
   const std::shared_ptr<margelo::nitro::videopipeline::StopToken> stop =
@@ -788,8 +806,10 @@ NSString *fourCCString(FourCharCode code) {
   // clip without an audio track leaves a silent gap (the composition advances
   // the cursor regardless), so a mixed audio/no-audio concat stays in sync.
   // Created lazily on the first real audio segment so an all-video-only concat
-  // emits zero audio tracks.
-  const BOOL wantAudio = audioMode != RNVPAudioModeMute;
+  // emits zero audio tracks. Per-clip splicing applies to passthrough; replace
+  // swaps one soundtrack over the whole timeline after the loop; mute writes
+  // none.
+  const BOOL splicePerClipAudio = audioMode == RNVPAudioModePassthrough;
   AVMutableCompositionTrack *compositionAudioTrack = nil;
 
   CMTime cursor = kCMTimeZero;
@@ -821,7 +841,7 @@ NSString *fourCCString(FourCharCode code) {
     // few ms before/after the video, and an over-long insertTimeRange would
     // fail (silently dropping the clip's audio). Best-effort: a clip with no
     // audio just leaves silence for its span, keeping later clips in sync.
-    if (wantAudio) {
+    if (splicePerClipAudio) {
       AVAssetTrack *clipAudio =
           [assets[i] tracksWithMediaType:AVMediaTypeAudio].firstObject;
       if (clipAudio != nil) {
@@ -852,6 +872,30 @@ NSString *fourCCString(FourCharCode code) {
       }
     }
     cursor = CMTimeAdd(cursor, clipDuration);
+  }
+
+  // Replace: swap the whole soundtrack for the replacement asset, capped to the
+  // joined timeline's duration (`cursor` is now the total). Fail loudly rather
+  // than silently emit video-only if the replacement is missing or has no audio.
+  if (audioMode == RNVPAudioModeReplace) {
+    AVAsset *replAsset = audioReplacementURL != nil
+                             ? [AVURLAsset assetWithURL:audioReplacementURL]
+                             : nil;
+    if ([replAsset tracksWithMediaType:AVMediaTypeAudio].firstObject == nil) {
+      if (error) {
+        *error = makeError(
+            RNVPRemuxerErrorCodeSourceCorrupted,
+            audioReplacementURL == nil
+                ? @"concat audio replace requires a replacement URL"
+                : [NSString stringWithFormat:
+                                @"concat audio replace: no audio track in %@",
+                                audioReplacementURL.lastPathComponent]);
+      }
+      return NO;
+    }
+    insertAudioIntoComposition(composition, /*sourceAsset=*/nil,
+                               CMTimeRangeMake(kCMTimeZero, cursor),
+                               RNVPAudioModeReplace, audioReplacementURL);
   }
 
   // --- Drive the passthrough export through the unified driver --------------

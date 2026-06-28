@@ -280,6 +280,7 @@ typedef NS_ENUM(NSInteger, RNVPAudioMode) {
 + (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
                      toURL:(NSURL *)outputURL
                  audioMode:(RNVPAudioMode)audioMode
+       audioReplacementURL:(nullable NSURL *)audioReplacementURL
                       stop:(nullable RNVPStopToken *)stop
                      error:(NSError *_Nullable __autoreleasing *)error;
 + (BOOL)remuxStampFromURL:(NSURL *)sourceURL
@@ -6972,12 +6973,14 @@ static NSUInteger audioTrackCount(NSString *path) {
   XCTAssertTrue([RNVPRemuxer remuxConcatSources:clips
                                           toURL:[NSURL fileURLWithPath:keepPath]
                                       audioMode:RNVPAudioModePassthrough
+                            audioReplacementURL:nil
                                            stop:nil
                                           error:&error],
                 @"passthrough concat failed: %@", error);
   XCTAssertTrue([RNVPRemuxer remuxConcatSources:clips
                                           toURL:[NSURL fileURLWithPath:mutePath]
                                       audioMode:RNVPAudioModeMute
+                            audioReplacementURL:nil
                                            stop:nil
                                           error:&error],
                 @"mute concat failed: %@", error);
@@ -7003,6 +7006,200 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:clipB error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:keepPath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
+}
+
+// Replace on the transcode (re-encode) pump reads the soundtrack from a second
+// file, capped to the output video duration. Source is silent in [0,0.5),
+// tone in [0.5,1.0); the replacement is the source's all-tone back half, so a
+// correct replace makes the output's *front* window a tone.
+- (void)testTranscodeReplaceSwapsSoundtrack {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, kFps, 30,
+                                                   @"repl-tx", &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+
+  NSString *replPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-tx-src-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
+                                        toURL:[NSURL fileURLWithPath:replPath]
+                                     startSec:0.5
+                                  durationSec:0.5
+                                        error:&error],
+                @"replacement-trim failed: %@", error);
+
+  // Crop forces the transcode path.
+  RNVPTranscodeTarget *target =
+      [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                          height:80
+                                             fps:(double)kFps
+                                           codec:RNVPTranscodeCodecH264
+                                         bitrate:0
+                                          rotate:-1
+                                           flipH:NO
+                                           flipV:NO
+                                           cropX:0
+                                           cropY:0
+                                       cropWidth:80
+                                      cropHeight:80
+                                     sourceStart:0.0
+                                  sourceDuration:0.0];
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-tx-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:[NSURL fileURLWithPath:outPath]
+                                          target:target
+                                        overlays:nil
+                                        metadata:nil
+                                       audioMode:RNVPAudioModeReplace
+                             audioReplacementURL:[NSURL fileURLWithPath:replPath]
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"replace transcode failed: %@", error);
+
+  XCTAssertGreaterThanOrEqual(audioTrackCount(outPath), 1u,
+                              @"replace transcode must carry a swapped audio "
+                              @"track");
+  const double frontRMS = decodeAudioRMSWindow(outPath, 0.05, 0.35);
+  XCTAssertGreaterThan(frontRMS, 0.15,
+                       @"replaced soundtrack should make the front window a "
+                       @"tone (got %.4f)",
+                       frontRMS);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:replPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+// Replace on concat swaps the whole joined soundtrack for the replacement,
+// capped to the timeline duration.
+- (void)testRemuxConcatReplaceSwapsSoundtrack {
+  NSError *error = nil;
+  NSString *clipA = authorSteppedAudioFixture(160, 120, 30, 30, @"crepl-a",
+                                              &error);
+  NSString *clipB = authorSteppedAudioFixture(160, 120, 30, 30, @"crepl-b",
+                                              &error);
+  XCTAssertNotNil(clipA, @"clipA author failed: %@", error);
+  XCTAssertNotNil(clipB, @"clipB author failed: %@", error);
+  // All-tone replacement: trim clip A's back half.
+  NSString *replPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"crepl-src-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:[NSURL fileURLWithPath:clipA]
+                                        toURL:[NSURL fileURLWithPath:replPath]
+                                     startSec:0.5
+                                  durationSec:0.5
+                                        error:&error],
+                @"replacement-trim failed: %@", error);
+
+  NSArray<RNVPRemuxerConcatSource *> *clips = @[
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:clipA]
+                                           sourceStart:0.0
+                                        sourceDuration:1.0
+                                           outputStart:0.0],
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:clipB]
+                                           sourceStart:0.0
+                                        sourceDuration:1.0
+                                           outputStart:1.0],
+  ];
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"crepl-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxConcatSources:clips
+                                          toURL:[NSURL fileURLWithPath:outPath]
+                                      audioMode:RNVPAudioModeReplace
+                            audioReplacementURL:[NSURL fileURLWithPath:replPath]
+                                           stop:nil
+                                          error:&error],
+                @"replace concat failed: %@", error);
+  XCTAssertGreaterThanOrEqual(audioTrackCount(outPath), 1u,
+                              @"replace concat must carry a swapped audio track");
+  const double frontRMS = decodeAudioRMSWindow(outPath, 0.05, 0.35);
+  XCTAssertGreaterThan(frontRMS, 0.15,
+                       @"replaced soundtrack should make the front window a "
+                       @"tone (got %.4f)",
+                       frontRMS);
+
+  [[NSFileManager defaultManager] removeItemAtPath:clipA error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:clipB error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:replPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+// A replace render must fail loudly when the replacement file is missing / has
+// no audio track, rather than silently producing video-only output.
+- (void)testReplaceFailsWhenReplacementHasNoAudio {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, kFps, 30,
+                                                   @"repl-noaud-src", &error);
+  XCTAssertNotNil(sourcePath, @"source author failed: %@", error);
+  // A non-existent replacement: the asset resolves to zero audio tracks.
+  NSString *videoOnly = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-missing-%@.m4a",
+                                     NSUUID.UUID.UUIDString]];
+
+  RNVPTranscodeTarget *target =
+      [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                          height:80
+                                             fps:(double)kFps
+                                           codec:RNVPTranscodeCodecH264
+                                         bitrate:0
+                                          rotate:-1
+                                           flipH:NO
+                                           flipV:NO
+                                           cropX:0
+                                           cropY:0
+                                       cropWidth:80
+                                      cropHeight:80
+                                     sourceStart:0.0
+                                  sourceDuration:0.0];
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-noaud-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  NSError *err = nil;
+  XCTAssertFalse([RNVPTranscoder transcodeFromURL:[NSURL fileURLWithPath:sourcePath]
+                                            toURL:[NSURL fileURLWithPath:outPath]
+                                           target:target
+                                         overlays:nil
+                                         metadata:nil
+                                        audioMode:RNVPAudioModeReplace
+                              audioReplacementURL:[NSURL fileURLWithPath:videoOnly]
+                                             stop:nil
+                                         progress:nil
+                                            error:&err],
+                 @"replace with a no-audio replacement must fail");
+  XCTAssertNotNil(err, @"a failed replace must report an error");
+
+  // The composition-path transform-remux must fail the same way (not silently
+  // emit video-only).
+  NSError *xfErr = nil;
+  XCTAssertFalse([RNVPRemuxer remuxTransformFromURL:[NSURL fileURLWithPath:sourcePath]
+                                              toURL:[NSURL fileURLWithPath:outPath]
+                                           startSec:0.0
+                                        durationSec:0.0
+                                             rotate:90
+                                              flipH:NO
+                                              flipV:NO
+                                          audioMode:RNVPAudioModeReplace
+                                audioReplacementURL:[NSURL fileURLWithPath:videoOnly]
+                                              error:&xfErr],
+                 @"transform replace with a no-audio replacement must fail");
+  XCTAssertNotNil(xfErr, @"a failed transform replace must report an error");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:videoOnly error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
 @end

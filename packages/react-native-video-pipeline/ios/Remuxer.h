@@ -221,11 +221,12 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
 /// As @c remuxConcatSources:toURL:stop:error: but honouring an
 /// @c RNVPAudioMode. @c Passthrough splices each clip's own audio onto the
 /// concatenated timeline (a clip with no audio leaves a silent gap);
-/// @c Mute writes video only. (@c Replace is not wired on the concat path yet
-/// and is rejected upstream.)
+/// @c Mute writes video only; @c Replace swaps the whole soundtrack for
+/// @p audioReplacementURL (capped to the joined timeline's duration).
 + (BOOL)remuxConcatSources:(NSArray<RNVPRemuxerConcatSource *> *)sources
                      toURL:(NSURL *)outputURL
                  audioMode:(RNVPAudioMode)audioMode
+       audioReplacementURL:(nullable NSURL *)audioReplacementURL
                       stop:(nullable RNVPStopToken *)stop
                      error:(NSError *_Nullable __autoreleasing *)error;
 

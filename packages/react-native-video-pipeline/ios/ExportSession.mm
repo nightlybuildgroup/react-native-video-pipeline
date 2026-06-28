@@ -65,18 +65,19 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
 // Insert the soundtrack dictated by @p mode into @p composition over the video
 // timeline @p videoRange. @c Passthrough copies @p sourceAsset's own audio;
 // @c Replace pulls the first audio track from @p replacementURL, capped to the
-// video duration; @c Mute inserts nothing. Best-effort: a missing or
-// decode-failing audio track yields a silent (video-only) result rather than
-// failing the whole export, matching AVFoundation's lenient passthrough.
-void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
+// video duration; @c Mute inserts nothing. Returns NO only when @c Replace was
+// requested but the replacement is missing / has no audio track — the caller
+// fails the export rather than silently emitting video-only. Passthrough and
+// mute always return YES (a source clip with no audio is intentionally silent).
+BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
                         CMTimeRange videoRange, RNVPAudioMode mode,
                         NSURL *replacementURL) {
-  if (mode == RNVPAudioModeMute) return;
+  if (mode == RNVPAudioModeMute) return YES;
 
   AVAsset *audioAsset = sourceAsset;
   CMTime usable = videoRange.duration;
   if (mode == RNVPAudioModeReplace) {
-    if (replacementURL == nil) return;
+    if (replacementURL == nil) return NO;
     audioAsset = [AVURLAsset assetWithURL:replacementURL];
     // Cap the replacement to the video duration: a shorter track leaves the
     // tail silent, a longer one is truncated to the picture.
@@ -86,7 +87,7 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
 
   AVAssetTrack *audioTrack =
       [audioAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-  if (audioTrack == nil) return;
+  if (audioTrack == nil) return mode != RNVPAudioModeReplace;
 
   AVMutableCompositionTrack *audioComp = [composition
       addMutableTrackWithMediaType:AVMediaTypeAudio
@@ -95,6 +96,7 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
                      ofTrack:audioTrack
                       atTime:kCMTimeZero
                        error:nil];
+  return YES;
 }
 
 }  // namespace
@@ -243,8 +245,15 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
     // Soundtrack — passthrough copies the source audio, mute drops it, replace
     // swaps in request.audioReplacementURL. AVAssetExportSession re-emits
     // whatever audio track the composition carries (no audioMix supplied).
-    insertAudioForMode(composition, asset, sourceRange, request.audioMode,
-                       request.audioReplacementURL);
+    if (!insertAudioForMode(composition, asset, sourceRange, request.audioMode,
+                            request.audioReplacementURL)) {
+      if (error) {
+        *error = makeError(
+            RNVPExportSessionErrorCodeSourceCorrupted,
+            @"audio replace: the replacement is missing or has no audio track");
+      }
+      return NO;
+    }
 
     // Per-frame composer wiring -----------------------------------------------
     // AVFoundation calls the handler once per output frame with the source
@@ -351,9 +360,16 @@ void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
     }
     videoComp.preferredTransform = sourceVideoTrack.preferredTransform;
     // The composition timeline starts at 0; insert audio over [0, windowDur].
-    insertAudioForMode(composition, asset,
-                       CMTimeRangeMake(kCMTimeZero, window.duration),
-                       request.audioMode, request.audioReplacementURL);
+    if (!insertAudioForMode(composition, asset,
+                            CMTimeRangeMake(kCMTimeZero, window.duration),
+                            request.audioMode, request.audioReplacementURL)) {
+      if (error) {
+        *error = makeError(
+            RNVPExportSessionErrorCodeSourceCorrupted,
+            @"audio replace: the replacement is missing or has no audio track");
+      }
+      return NO;
+    }
     exportInput = composition;
     presetName = AVAssetExportPresetPassthrough;
     audioWindowBakedIntoComposition = YES;

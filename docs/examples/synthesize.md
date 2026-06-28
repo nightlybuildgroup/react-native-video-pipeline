@@ -60,18 +60,24 @@ You can also stop with an `AbortSignal` — but `signal.abort()` discards the ou
 
 See [`cancel-and-finish.md`](./cancel-and-finish.md) for the full cancellation matrix.
 
-## With audio
+## Audio on a synthesized render
+
+A synthesized render is **video-only** — there is no source soundtrack. `audio.mode` `'passthrough'` and `'mute'` are both accepted and produce the same video-only output. `'replace'` is **rejected** with `InvalidSpecError`: a synthesized render has no source timeline to mux a soundtrack onto.
+
+To put a backing track under synthesized frames, render the video first, then add the audio in a second pass over a clip:
 
 ```ts
 await Video.synthesize({
-  output: { path: `${dir}/synth-audio.mp4`, width: 320, height: 240, fps: 30 },
+  output: { path: `${dir}/synth.mp4`, width: 320, height: 240, fps: 30 },
   duration: { mode: 'fixed', seconds: 4 },
-  audio: { mode: 'replace', replaceUri: backingTrackUri },
   drawFrame: myDrawer,
 });
+await Video.render({
+  clips: [{ uri: `${dir}/synth.mp4` }],
+  output: { path: `${dir}/synth-audio.mp4` },
+  audio: { mode: 'replace', replaceUri: backingTrackUri },
+});
 ```
-
-`audio.mode` is `'passthrough' | 'mute' | 'replace'`. On a synthesize path, `'passthrough'` is equivalent to `'mute'` — there's no source audio to pass through.
 
 ## With metadata
 

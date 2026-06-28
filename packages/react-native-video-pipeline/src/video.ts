@@ -248,22 +248,29 @@ function buildNativeSpecFromClipped(
   };
 }
 
-function validateAudio(audio: NativeVideoSpec['audio']): void {
+function validateAudio(audio: NativeVideoSpec['audio'], hasSourceClips: boolean): void {
   if (audio === undefined) return;
-  // 'passthrough' (keep the source audio, also the default) and 'mute' (drop
-  // the audio track) are wired into both native engines. 'replace' (swap in
-  // `replaceUri`) is still pending native support — reject it explicitly
-  // instead of quietly lying about a documented field. Tracked in #29; lift
-  // this guard and keep the granular replaceUri validation below when it lands.
+  // All three modes are wired into both native engines: 'passthrough' (keep the
+  // source audio, also the default), 'mute' (drop the audio track), and
+  // 'replace' (swap in `replaceUri`). Replace requires a non-empty file-URI
+  // replacement (the granular check #11 removed while replace was unimplemented).
   if (audio.mode === 'replace') {
-    // When native 'replace' lands (#29), lift this reject and restore the
-    // granular replaceUri validation (non-empty + file URI) that #11 removed.
-    fail(
-      "audio.mode='replace' is not implemented yet — only 'passthrough' and " +
-        "'mute' are supported. Swap the soundtrack in a separate step for now; " +
-        'native support is tracked in https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/29',
-      { mode: audio.mode },
-    );
+    // Replace muxes the new soundtrack onto the render's video timeline. A
+    // synthesized render (no source clips) has no such timeline to carry it —
+    // accepting it would silently produce video-only output. Reject until a
+    // synth-replace path lands (would need to post-mux the audio).
+    if (!hasSourceClips) {
+      fail(
+        "audio.mode='replace' is not supported on a synthesized render (no " +
+          'source clips to mux the soundtrack onto) — render the synthesized ' +
+          'video, then replace its audio in a second pass',
+        { mode: audio.mode },
+      );
+    }
+    if (audio.replaceUri === undefined || audio.replaceUri === '') {
+      fail("audio.mode='replace' requires a non-empty replaceUri");
+    }
+    validateFileUri('audio.replaceUri', audio.replaceUri);
   }
 }
 
@@ -308,7 +315,7 @@ function validateNativeSpec(spec: NativeVideoSpec, options: RenderOptions | unde
     }
   }
 
-  validateAudio(spec.audio);
+  validateAudio(spec.audio, !synth);
 }
 
 /**

@@ -141,13 +141,15 @@ internal object Remuxer {
   /// gap (the cursor advances regardless). `AudioMode.MUTE` writes video only.
   /// The output audio track is created from the first clip that carries audio,
   /// so passthrough concat assumes a shared audio format (same as the video
-  /// signature requirement). `AudioMode.REPLACE` is not wired on this path yet
-  /// and is rejected upstream.
+  /// signature requirement). `AudioMode.REPLACE` drops every clip's audio and
+  /// muxes the soundtrack from `audioReplacementUri` instead, capped to the
+  /// joined timeline's duration.
   fun remuxConcat(
     sources: List<ConcatSource>,
     outputPath: String,
     stopToken: VideoPipelineStopToken?,
     audioMode: AudioMode = AudioMode.PASSTHROUGH,
+    audioReplacementUri: String? = null,
   ) {
     if (sources.isEmpty()) {
       throw InvalidSpecException("concat: sources must not be empty")
@@ -172,21 +174,46 @@ internal object Remuxer {
     val extractors = resolvedPaths.map {
       MediaExtractor().apply { setDataSource(it) }
     }
+    // Replace: the soundtrack comes from a separate file, not the clips.
+    val replace = audioMode == AudioMode.REPLACE && audioReplacementUri != null
+    // Opened inside the try so a throwing setDataSource is still released by the
+    // finally (and never leaks the clip extractors either).
+    var replacementExtractor: MediaExtractor? = null
     try {
+      if (replace) {
+        val p = resolveFilePath(audioReplacementUri!!)
+        if (!File(p).exists()) {
+          throw RemuxerException("concat: audio replacement file not found at $p")
+        }
+        // Assign before setDataSource so a throwing setDataSource still leaves
+        // the extractor referenced for the finally to release.
+        replacementExtractor = MediaExtractor()
+        replacementExtractor.setDataSource(p)
+      }
       val videoIndexes = extractors.map { selectVideoIndex(it) }
       val sharedFormat = enforceSharedSignature(extractors, videoIndexes, resolvedPaths)
       val rotation = readRotation(resolvedPaths[0])
 
-      // Per-clip audio track index (-1 if the clip has no audio). The output
-      // audio track is created from the first clip that carries one; mute skips
-      // audio entirely.
+      // Per-clip audio track index (-1 if the clip has no audio). Passthrough
+      // splices each clip's audio; replace pulls a single soundtrack from the
+      // replacement file; mute skips audio entirely.
       val audioIndexes = extractors.map { selectTracks(it).audioIndex }
-      val firstAudioClip =
-        if (audioMode == AudioMode.MUTE) -1 else audioIndexes.indexOfFirst { it >= 0 }
-      // The joined timeline uses a single output audio track, so every clip
-      // that carries audio must share its format (a MediaMuxer track can hold
-      // only one). Reject mismatches up front with a clear error rather than
-      // letting writeSampleData fail late and leave a corrupt track.
+      val replacementAudioIndex = replacementExtractor?.let { selectTracks(it).audioIndex } ?: -1
+      // A replace render must not silently emit video-only.
+      if (replace && replacementAudioIndex < 0) {
+        throw InvalidSpecException(
+          "concat: audio replace — the replacement file has no audio track"
+        )
+      }
+      val firstAudioClip = when {
+        audioMode == AudioMode.MUTE -> -1
+        replace -> -1
+        else -> audioIndexes.indexOfFirst { it >= 0 }
+      }
+      // The joined timeline uses a single output audio track, so every
+      // passthrough clip that carries audio must share its format (a MediaMuxer
+      // track can hold only one). Reject mismatches up front with a clear error
+      // rather than letting writeSampleData fail late and leave a corrupt track.
       if (firstAudioClip >= 0) {
         enforceSharedAudioSignature(extractors, audioIndexes)
       }
@@ -196,12 +223,12 @@ internal object Remuxer {
       try {
         if (rotation != 0) muxer.setOrientationHint(rotation)
         val videoTrack = muxer.addTrack(sharedFormat)
-        val audioTrack = if (firstAudioClip >= 0) {
-          muxer.addTrack(
-            extractors[firstAudioClip].getTrackFormat(audioIndexes[firstAudioClip])
-          )
-        } else {
-          -1
+        val audioTrack = when {
+          replace && replacementAudioIndex >= 0 ->
+            muxer.addTrack(replacementExtractor!!.getTrackFormat(replacementAudioIndex))
+          firstAudioClip >= 0 ->
+            muxer.addTrack(extractors[firstAudioClip].getTrackFormat(audioIndexes[firstAudioClip]))
+          else -> -1
         }
         muxer.start()
 
@@ -224,10 +251,11 @@ internal object Remuxer {
             outputCursorUs = outputCursorUs,
             stopToken = stopToken,
           )
-          // Splice this clip's audio over the same window. A clip without audio
-          // leaves a silent gap; the cursor still advances by the video span so
-          // later clips stay in sync.
-          if (audioTrack >= 0 && audioIndexes[i] >= 0) {
+          // Passthrough: splice this clip's audio over the same window. A clip
+          // without audio leaves a silent gap; the cursor still advances by the
+          // video span so later clips stay in sync. (Replace copies one
+          // soundtrack after the loop; mute writes none.)
+          if (!replace && audioTrack >= 0 && audioIndexes[i] >= 0) {
             copyTrackRange(
               extractor = extractor,
               trackIndex = audioIndexes[i],
@@ -241,6 +269,21 @@ internal object Remuxer {
           }
           outputCursorUs += copied.durationUs
         }
+        // Replace: mux the replacement soundtrack once over the whole joined
+        // timeline, capped to its total duration (a shorter replacement leaves
+        // a silent tail, a longer one is truncated).
+        if (replace && audioTrack >= 0 && replacementAudioIndex >= 0) {
+          copyTrackRange(
+            extractor = replacementExtractor!!,
+            trackIndex = replacementAudioIndex,
+            muxer = muxer,
+            outputTrack = audioTrack,
+            sourceStartUs = 0L,
+            sourceEndUs = outputCursorUs,
+            outputCursorUs = 0L,
+            stopToken = stopToken,
+          )
+        }
         muxer.stop()
       } catch (t: Throwable) {
         try { muxer.release() } catch (_: Throwable) {}
@@ -250,6 +293,7 @@ internal object Remuxer {
       muxer.release()
     } finally {
       extractors.forEach { runCatching { it.release() } }
+      replacementExtractor?.let { runCatching { it.release() } }
     }
   }
 
@@ -376,6 +420,24 @@ internal object Remuxer {
   private fun propagateRotationHint(sourcePath: String, muxer: MediaMuxer) {
     val rotation = readRotation(sourcePath)
     if (rotation != 0) muxer.setOrientationHint(rotation)
+  }
+
+  /// Whether `uri` resolves to an existing file that carries an audio track.
+  /// Used to fail an `audio.mode = 'replace'` render loudly (rather than
+  /// silently emitting video-only) when the replacement has no audio. Returns
+  /// false for a missing or unreadable file.
+  fun hasAudioTrack(uri: String): Boolean {
+    val path = resolveFilePath(uri)
+    if (!File(path).exists()) return false
+    val ex = MediaExtractor()
+    return try {
+      ex.setDataSource(path)
+      selectTracks(ex).audioIndex >= 0
+    } catch (_: Throwable) {
+      false
+    } finally {
+      ex.release()
+    }
   }
 
   private fun selectTracks(extractor: MediaExtractor): TrackSelection {

@@ -338,13 +338,47 @@ describe('Video.render — validation', () => {
   // `validateNativeSpec` for the `Video.synthesize` internal path but are
   // unreachable from the public `Video.render` surface.
 
-  it("rejects audio.mode='replace' as not implemented (#29)", async () => {
-    // 'replace' has no native implementation yet (#29 follow-up), so the JS
-    // layer rejects it rather than producing output with unchanged audio —
-    // even a well-formed replaceUri is rejected until the native swap lands.
+  it("accepts audio.mode='replace' with a valid replaceUri", async () => {
+    const promise = Video.render({
+      ...baseClipSpec,
+      audio: { mode: 'replace', replaceUri: 'file:///tmp/track.m4a' },
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as {
+      audio?: { mode: string; replaceUri?: string };
+    };
+    expect(passed.audio).toEqual({
+      mode: 'replace',
+      replaceUri: 'file:///tmp/track.m4a',
+    });
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it("rejects audio.mode='replace' with an empty replaceUri", async () => {
     await expect(
       Video.render({
         ...baseClipSpec,
+        audio: { mode: 'replace', replaceUri: '' },
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it("rejects audio.mode='replace' with a non-file replaceUri", async () => {
+    await expect(
+      Video.render({
+        ...baseClipSpec,
+        audio: { mode: 'replace', replaceUri: 'https://example.com/track.m4a' },
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it("rejects audio.mode='replace' on a synthesized render (no source clips)", async () => {
+    await expect(
+      Video.synthesize({
+        output: { path: '/tmp/out.mp4', width: 16, height: 16, fps: 30 },
+        duration: { mode: 'fixed', seconds: 1 },
+        drawFrame: () => undefined,
         audio: { mode: 'replace', replaceUri: 'file:///tmp/track.m4a' },
       }),
     ).rejects.toBeInstanceOf(InvalidSpecError);
