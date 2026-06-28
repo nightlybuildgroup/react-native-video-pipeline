@@ -825,21 +825,28 @@ NSString *fourCCString(FourCharCode code) {
       AVAssetTrack *clipAudio =
           [assets[i] tracksWithMediaType:AVMediaTypeAudio].firstObject;
       if (clipAudio != nil) {
-        const CMTime audioEnd = CMTimeRangeGetEnd(clipAudio.timeRange);
-        CMTime insertDuration = clipDuration;
-        if (CMTimeCompare(CMTimeAdd(clipStart, clipDuration), audioEnd) > 0) {
-          insertDuration = CMTimeSubtract(audioEnd, clipStart);
-        }
-        if (CMTimeCompare(insertDuration, kCMTimeZero) > 0) {
+        // Intersect the requested window with the audio track's own available
+        // range (handles audio that starts after / ends before the video, e.g.
+        // edit-list offsets), and re-anchor the segment under the cursor by the
+        // same leading offset so it stays aligned to the video.
+        const CMTimeRange avail = clipAudio.timeRange;
+        const CMTime segStart = CMTimeMaximum(clipStart, avail.start);
+        const CMTime segEnd =
+            CMTimeMinimum(CMTimeAdd(clipStart, clipDuration),
+                          CMTimeRangeGetEnd(avail));
+        if (CMTimeCompare(segEnd, segStart) > 0) {
           if (compositionAudioTrack == nil) {
             compositionAudioTrack = [composition
                 addMutableTrackWithMediaType:AVMediaTypeAudio
                             preferredTrackID:kCMPersistentTrackID_Invalid];
           }
+          const CMTime atTime =
+              CMTimeAdd(cursor, CMTimeSubtract(segStart, clipStart));
           [compositionAudioTrack
-              insertTimeRange:CMTimeRangeMake(clipStart, insertDuration)
+              insertTimeRange:CMTimeRangeMake(segStart,
+                                              CMTimeSubtract(segEnd, segStart))
                       ofTrack:clipAudio
-                       atTime:cursor
+                       atTime:atTime
                         error:nil];
         }
       }

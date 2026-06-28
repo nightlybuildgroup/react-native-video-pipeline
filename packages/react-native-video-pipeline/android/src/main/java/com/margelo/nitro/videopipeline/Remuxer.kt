@@ -468,24 +468,44 @@ internal object Remuxer {
   ) {
     fun intOrNull(format: MediaFormat, key: String): Int? =
       if (format.containsKey(key)) format.getInteger(key) else null
+    // Codec-specific config (AAC ASC etc.). Two same-rate/channel tracks can
+    // still carry different csd / AAC profile and would mux into one track as a
+    // bad stream, so fold csd-0 + the AAC profile into the comparison.
+    fun csd0(format: MediaFormat): List<Byte>? =
+      if (format.containsKey("csd-0")) {
+        val bb = format.getByteBuffer("csd-0")?.duplicate() ?: return@csd0 null
+        ByteArray(bb.remaining()).also { bb.get(it) }.toList()
+      } else {
+        null
+      }
+
+    data class AudioSig(
+      val mime: String,
+      val rate: Int?,
+      val channels: Int?,
+      val profile: Int?,
+      val csd: List<Byte>?,
+    )
+    fun sigOf(format: MediaFormat) = AudioSig(
+      mime = format.getString(MediaFormat.KEY_MIME) ?: "?",
+      rate = intOrNull(format, MediaFormat.KEY_SAMPLE_RATE),
+      channels = intOrNull(format, MediaFormat.KEY_CHANNEL_COUNT),
+      profile = intOrNull(format, MediaFormat.KEY_AAC_PROFILE),
+      csd = csd0(format),
+    )
 
     val withAudio = audioIndexes.withIndex().filter { it.value >= 0 }
     if (withAudio.size < 2) return
-    val firstFmt = extractors[withAudio[0].index].getTrackFormat(withAudio[0].value)
-    val firstMime = firstFmt.getString(MediaFormat.KEY_MIME) ?: "?"
-    val firstRate = intOrNull(firstFmt, MediaFormat.KEY_SAMPLE_RATE)
-    val firstChannels = intOrNull(firstFmt, MediaFormat.KEY_CHANNEL_COUNT)
+    val firstSig = sigOf(extractors[withAudio[0].index].getTrackFormat(withAudio[0].value))
     for (entry in withAudio.drop(1)) {
-      val fmt = extractors[entry.index].getTrackFormat(entry.value)
-      val mime = fmt.getString(MediaFormat.KEY_MIME) ?: "?"
-      val rate = intOrNull(fmt, MediaFormat.KEY_SAMPLE_RATE)
-      val channels = intOrNull(fmt, MediaFormat.KEY_CHANNEL_COUNT)
-      if (mime != firstMime || rate != firstRate || channels != firstChannels) {
+      val sig = sigOf(extractors[entry.index].getTrackFormat(entry.value))
+      if (sig != firstSig) {
         throw InvalidSpecException(
-          "concat: clip[${entry.index}] audio format ($mime ${rate}Hz ${channels}ch) " +
-            "differs from clip[${withAudio[0].index}] ($firstMime ${firstRate}Hz ${firstChannels}ch) — " +
-            "a single concat output audio track needs a shared format; the " +
-            "transcode fallback lands in a later task"
+          "concat: clip[${entry.index}] audio format (${sig.mime} ${sig.rate}Hz ${sig.channels}ch) " +
+            "differs from clip[${withAudio[0].index}] (${firstSig.mime} ${firstSig.rate}Hz ${firstSig.channels}ch) — " +
+            "a single concat output audio track needs an identical format " +
+            "(codec, sample rate, channels, and codec config); the transcode " +
+            "fallback lands in a later task"
         )
       }
     }
