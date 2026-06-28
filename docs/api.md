@@ -73,7 +73,7 @@ await Video.render({
 });
 ```
 
-> **Multi-clip note.** Per-clip transforms, overlays, and output-side changes work on both single-clip **and** multi-clip renders: a multi-clip spec that needs a re-encode transcodes each clip to the shared output and concatenates them in one pass. A multi-clip spec with no re-encode stays on the lossless passthrough concat. The timeline is still contiguous (gaps/overlaps reject — see [`Clip`](#clip)).
+> **Multi-clip note.** Per-clip transforms, overlays, and output-side changes work on both single-clip **and** multi-clip renders: a multi-clip spec that needs a re-encode transcodes each clip to the shared output and concatenates them in one pass. A multi-clip spec with no re-encode stays on the lossless passthrough concat. A timeline **gap** (`clip.outputStartSec` past the previous clip's end) is filled with black + silence (forces a re-encode); **overlaps** still reject — see [`Clip`](#clip).
 
 Chaining `trim` → `stamp` → `render` through temp files would re-encode at every step (slow + lossy). One `Video.render` call decodes and encodes exactly once.
 
@@ -168,7 +168,7 @@ The full-spec native editing entry point. The native side picks the cheapest pat
   - crop, a native overlay, or an output-side change (`width`/`height`/`fps`/`codec`/`bitrate`) → **transcode** (re-encode), on both platforms.
   - A trim window (`startSec`/`durationSec` on the clip) composes with any of the above — render trims **and** transforms in one pass. Source audio is preserved through the transcode path on both platforms.
 
-**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on both single-clip and **multi-clip** specs. A multi-clip spec that needs a re-encode (any per-clip transform, an overlay, or an output-side change) transcodes each clip to the shared output and concatenates them; a multi-clip spec with no re-encode stays on the lossless passthrough concat. The timeline is still **contiguous** — gaps and overlaps (`clip.outputStartSec`) reject. When the output size is unpinned, multi-clip re-encode derives it from the first clip. Audio handling (`audio.mode`) — `passthrough` (default), `mute` (drop the track), and `replace` (swap in `replaceUri`) — is wired on every audio-carrying render path on both platforms; see [`AudioSpec`](#audiospec).
+**Scope today.** Per-clip transforms, overlays, and output-side changes are supported on both single-clip and **multi-clip** specs. A multi-clip spec that needs a re-encode (any per-clip transform, an overlay, or an output-side change) transcodes each clip to the shared output and concatenates them; a multi-clip spec with no re-encode stays on the lossless passthrough concat. A **gap** (`clip.outputStartSec` past the previous clip's end) is filled with black + silence (this forces a re-encode); **overlaps** (a clip starting before the previous one ends) still reject. Gaps with an HEVC output reject for now (the black fill is authored as H.264). When the output size is unpinned, multi-clip re-encode derives it from the first clip. Audio handling (`audio.mode`) — `passthrough` (default), `mute` (drop the track), and `replace` (swap in `replaceUri`) — is wired on every audio-carrying render path on both platforms; see [`AudioSpec`](#audiospec).
 
 `RenderSpec` requires a non-empty `clips` array at compile time — synthesized renders go through [`Video.synthesize`](#videosynthesize) instead.
 
@@ -382,7 +382,7 @@ interface ClipInput {
 
   // Forward-compatibility timeline hooks — see "Reserved timeline fields".
   id?: string;             // stable clip id; surfaced as FrameDrawerContext.clipId
-  outputStartSec?: number; // explicit output position; v0.1 must equal concat position
+  outputStartSec?: number; // explicit output position; a value past the previous clip opens a black gap, overlaps reject
   track?: number;          // multi-track index; v0.1 accepts only undefined or 0
 }
 
@@ -394,14 +394,14 @@ interface ClipTransform {
 }
 ```
 
-The timeline model is **concat-only**: clips are stitched end-to-end in array order. The first clip starts at output time `0`, the next picks up where it ended, and so on. There are no gaps and no overlaps; if you need either, render the segments separately and concat them.
+The timeline model stitches clips in array order. By default each clip picks up where the previous ended (`outputStartSec` omitted). An explicit `outputStartSec` past the previous clip's end opens a **gap**, filled with black + silence. **Overlaps** (a clip starting before the previous one ends) are not supported (they would need blending) and reject.
 
 #### Reserved timeline fields
 
-`id`, `outputStartSec`, and `track` reserve public field names for a future richer timeline (gaps, multi-track, transitions, clip-targeted overlays). They are **not** feature flags — v0.1 accepts only concat-compatible values and rejects everything else with `InvalidSpecError`:
+`id` and `track` reserve public field names for a future richer timeline (multi-track, transitions, clip-targeted overlays). `outputStartSec` is live — it positions a clip (opening a black gap when past the previous clip's end). Rejected cases still surface as `InvalidSpecError`:
 
 - **`id`** — optional stable identifier, surfaced as `FrameDrawerContext.clipId` on the compose path. Must be unique within a single spec.
-- **`outputStartSec`** — when provided, must equal the cumulative concat position (within 1ms). A larger value (gap) or smaller value (overlap) is rejected. Omit it to accept the computed position.
+- **`outputStartSec`** — when provided, a value at/after the previous clip's end opens a **gap** (filled with black + silence; forces a re-encode). A smaller value (**overlap**) rejects. Omit it for the contiguous position.
 - **`track`** — must be `undefined` or `0` (the single main track). Any other value is rejected.
 
 Code written against these fields today keeps working as the timeline model grows; the validation rules will loosen, not the field shapes.

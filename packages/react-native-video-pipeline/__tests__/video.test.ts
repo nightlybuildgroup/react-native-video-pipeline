@@ -476,16 +476,20 @@ describe('Video.render — validation', () => {
     await promise;
   });
 
-  it('rejects an outputStartSec gap (beyond the concat position)', () => {
-    expect(() =>
-      Video.render({
-        output: { path: '/tmp/out.mp4' },
-        clips: [
-          { uri: 'a.mp4', startSec: 0, durationSec: 3 },
-          { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 5 },
-        ],
-      }),
-    ).toThrow(InvalidSpecError);
+  it('accepts an outputStartSec gap (beyond the concat position) and forwards it', () => {
+    const promise = Video.render({
+      output: { path: '/tmp/out.mp4' },
+      clips: [
+        { uri: 'a.mp4', startSec: 0, durationSec: 3 },
+        { uri: 'b.mp4', startSec: 0, durationSec: 4, outputStartSec: 5 },
+      ],
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as { clips: Array<{ outputStart: number }> };
+    // The gap is preserved: clip B starts at 5 (a 2s gap after clip A ends at 3).
+    expect(passed.clips.map((c) => c.outputStart)).toEqual([0, 5]);
+    fake.renderCalls[0]?.resolve();
+    return promise;
   });
 
   it('rejects an outputStartSec overlap (before the concat position)', () => {

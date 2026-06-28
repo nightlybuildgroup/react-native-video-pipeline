@@ -34,9 +34,16 @@ typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode) {
             height:(NSInteger)height
                fps:(NSInteger)fps
              error:(NSError *_Nullable __autoreleasing *)error;
+- (BOOL)openVideoOnlyAtPath:(NSString *)path
+                      width:(NSInteger)width
+                     height:(NSInteger)height
+                        fps:(NSInteger)fps
+                      error:(NSError *_Nullable __autoreleasing *)error;
 - (BOOL)appendPixelBuffer:(CVPixelBufferRef)pixelBuffer
          presentationTime:(CMTime)pts
                     error:(NSError *_Nullable __autoreleasing *)error;
+@property(nonatomic, readonly) BOOL videoInputIsReady;
+@property(nonatomic, readonly) BOOL videoInputFailed;
 - (BOOL)closeWithError:(NSError *_Nullable __autoreleasing *)error;
 @end
 
@@ -7200,6 +7207,154 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:videoOnly error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+// Sample the center pixel of the frame at `t` seconds — returns the max RGB
+// component (0 = black). Used to assert a gap-fill segment renders black.
+static int maxRgbAtTime(NSString *path, double t) {
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+  AVAssetImageGenerator *gen =
+      [[AVAssetImageGenerator alloc] initWithAsset:asset];
+  gen.requestedTimeToleranceBefore = kCMTimeZero;
+  gen.requestedTimeToleranceAfter = kCMTimeZero;
+  CGImageRef img = [gen copyCGImageAtTime:CMTimeMakeWithSeconds(t, 600)
+                               actualTime:NULL
+                                    error:NULL];
+  if (img == NULL) return -1;
+  uint8_t px[4] = {0, 0, 0, 0};
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGContextRef ctx = CGBitmapContextCreate(
+      px, 1, 1, 8, 4, cs, kCGImageAlphaPremultipliedLast);
+  // Draw the image's center pixel by scaling the whole image into 1x1.
+  CGContextDrawImage(ctx, CGRectMake(0, 0, 1, 1), img);
+  CGContextRelease(ctx);
+  CGColorSpaceRelease(cs);
+  CGImageRelease(img);
+  return MAX(px[0], MAX(px[1], px[2]));
+}
+
+// Timeline gaps (#18): mirrors the multi-clip transcode gap fill — a black,
+// silent segment authored via RNVPAVMuxer bridges two transcoded clips, and
+// the concat joins them into one timeline. The gap window decodes as black.
+- (void)testMultiClipGapFilledWithBlack {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *clipA = authorMotionFixture(160, 120, kFps, 30, @"gap-a", &error);
+  NSString *clipB = authorMotionFixture(160, 120, kFps, 30, @"gap-b", &error);
+  XCTAssertNotNil(clipA, @"clipA author failed: %@", error);
+  XCTAssertNotNil(clipB, @"clipB author failed: %@", error);
+
+  RNVPTranscodeTarget *(^target)(void) = ^RNVPTranscodeTarget *(void) {
+    return [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                               height:80
+                                                  fps:(double)kFps
+                                                codec:RNVPTranscodeCodecH264
+                                              bitrate:0
+                                               rotate:-1
+                                                flipH:NO
+                                                flipV:NO
+                                                cropX:0
+                                                cropY:0
+                                            cropWidth:0
+                                           cropHeight:0
+                                          sourceStart:0.0
+                                       sourceDuration:0.0];
+  };
+  NSMutableArray<NSString *> *temps = [NSMutableArray array];
+  NSString *(^transcodeTemp)(NSString *) = ^NSString *(NSString *clip) {
+    NSString *t = [NSTemporaryDirectory()
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"gap-tx-%@.mp4", NSUUID.UUID.UUIDString]];
+    [temps addObject:t];
+    NSError *e = nil;
+    XCTAssertTrue([RNVPTranscoder transcodeFromURL:[NSURL fileURLWithPath:clip]
+                                             toURL:[NSURL fileURLWithPath:t]
+                                            target:target()
+                                          overlays:nil
+                                          metadata:nil
+                                              stop:nil
+                                          progress:nil
+                                             error:&e],
+                  @"transcode failed: %@", e);
+    return t;
+  };
+
+  // Author a 1.0s black gap clip the same way the gap fill does.
+  NSString *gap = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"gap-black-%@.mp4", NSUUID.UUID.UUIDString]];
+  [temps addObject:gap];
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  XCTAssertTrue([muxer openVideoOnlyAtPath:gap width:80 height:80 fps:kFps
+                                     error:&error],
+                @"black muxer open failed: %@", error);
+  CVPixelBufferRef pb = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, 80, 80, kCVPixelFormatType_32BGRA,
+                      (__bridge CFDictionaryRef) @{
+                        (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
+                      },
+                      &pb);
+  CVPixelBufferLockBaseAddress(pb, 0);
+  memset(CVPixelBufferGetBaseAddress(pb), 0,
+         CVPixelBufferGetBytesPerRow(pb) * 80);
+  CVPixelBufferUnlockBaseAddress(pb, 0);
+  for (NSInteger i = 0; i < kFps; i++) {
+    while (!muxer.videoInputIsReady && !muxer.videoInputFailed) {
+      [NSThread sleepForTimeInterval:0.001];
+    }
+    XCTAssertTrue([muxer appendPixelBuffer:pb
+                         presentationTime:CMTimeMake(i, (int32_t)kFps)
+                                    error:&error],
+                  @"append black frame failed: %@", error);
+  }
+  CVPixelBufferRelease(pb);
+  XCTAssertTrue([muxer closeWithError:&error], @"black close failed: %@", error);
+
+  // Concat [A, black-gap, B] → 3s timeline with a black middle second.
+  NSString *txA = transcodeTemp(clipA);
+  NSString *txB = transcodeTemp(clipB);
+  NSArray<RNVPRemuxerConcatSource *> *sources = @[
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:txA]
+                                           sourceStart:0.0
+                                        sourceDuration:1.0
+                                           outputStart:0.0],
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:gap]
+                                           sourceStart:0.0
+                                        sourceDuration:1.0
+                                           outputStart:1.0],
+    [[RNVPRemuxerConcatSource alloc] initWithSourceURL:[NSURL fileURLWithPath:txB]
+                                           sourceStart:0.0
+                                        sourceDuration:1.0
+                                           outputStart:2.0],
+  ];
+  NSString *out = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"gap-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxConcatSources:sources
+                                          toURL:[NSURL fileURLWithPath:out]
+                                           stop:nil
+                                          error:&error],
+                @"gap concat failed: %@", error);
+
+  RNVPAVDemuxer *demuxer = [[RNVPAVDemuxer alloc] init];
+  XCTAssertTrue([demuxer openAtURL:[NSURL fileURLWithPath:out] error:&error]);
+  XCTAssertEqualWithAccuracy(demuxer.durationSec, 3.0, 0.2,
+                             @"gapped timeline should be ~3.0s (got %f)",
+                             demuxer.durationSec);
+  [demuxer closeWithError:NULL];
+
+  // The gap window (~1.5s) decodes as black; a clip window (~0.5s) does not.
+  XCTAssertLessThan(maxRgbAtTime(out, 1.5), 24,
+                    @"the gap second should be black");
+  XCTAssertGreaterThan(maxRgbAtTime(out, 0.5), 24,
+                       @"the first clip should not be black (sanity)");
+
+  [[NSFileManager defaultManager] removeItemAtPath:clipA error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:clipB error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
+  for (NSString *t in temps) {
+    [[NSFileManager defaultManager] removeItemAtPath:t error:nil];
+  }
 }
 
 // Multi-clip transcode (#14): mirrors HybridVideoPipeline::render's

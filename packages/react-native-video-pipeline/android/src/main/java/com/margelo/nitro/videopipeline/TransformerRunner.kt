@@ -40,6 +40,7 @@ package com.margelo.nitro.videopipeline
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -69,6 +70,7 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
 internal object TransformerRunner {
@@ -124,6 +126,9 @@ internal object TransformerRunner {
     /// soundtrack (Media3 sequence ordering does not bound the export, so a
     /// longer replacement would otherwise extend it with an audio-only tail).
     val outputDurationSec: Double? = null,
+    /// Black + silent gap (seconds) inserted BEFORE this clip's item on the
+    /// multi-clip sequence (#18). 0 = no gap (contiguous).
+    val leadingGapSec: Double = 0.0,
   )
 
   fun interface ProgressSink {
@@ -171,6 +176,18 @@ internal object TransformerRunner {
     }
   }
 
+  /// Author a black PNG at the shared canvas size, used as the video source for
+  /// timeline-gap fills (#18). Returned file lives in the cache dir; the caller
+  /// deletes it.
+  private fun authorBlackImage(context: Context, w: Int, h: Int): File {
+    val bmp = Bitmap.createBitmap(w.coerceAtLeast(2), h.coerceAtLeast(2), Bitmap.Config.ARGB_8888)
+      .apply { eraseColor(Color.BLACK) }
+    val file = File.createTempFile("rnvp-gap-black", ".png", context.cacheDir)
+    java.io.FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    bmp.recycle()
+    return file
+  }
+
   private fun runMultiInternal(
     context: Context,
     clipSpecs: List<Spec>,
@@ -180,36 +197,65 @@ internal object TransformerRunner {
     val first = clipSpecs.first()
     File(first.outputPath).apply { if (exists()) delete() }
 
-    val items = clipSpecs.map { clip ->
-      EditedMediaItem.Builder(buildMediaItem(clip))
-        .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
-        // Passthrough keeps each clip's audio (Media3 concatenates the sequence);
-        // mute / replace drop it per item.
-        .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
-        .build()
-    }
-    val videoSeq = EditedMediaItemSequence.Builder(items).build()
-
-    val replaceUri = first.audioReplacementUri
-    val composition = if (replaceUri != null) {
-      val mediaItemBuilder = MediaItem.Builder().setUri(replaceUri)
-      first.outputDurationSec?.let { durSec ->
-        mediaItemBuilder.setClippingConfiguration(
-          MediaItem.ClippingConfiguration.Builder()
-            .setEndPositionMs((durSec * 1000.0).roundToLong())
+    // A timeline gap (#18) is filled with a BLACK IMAGE item rendered as video
+    // for the gap duration. Media3's addGap() is an audio-raw gap and does not
+    // author black video, so an image item is used instead. One black PNG sized
+    // to the shared canvas is reused for every gap and deleted on exit.
+    val needGaps = clipSpecs.any { it.leadingGapSec > 1e-3 }
+    val blackImage: File? =
+      if (needGaps) authorBlackImage(context, first.outCanvasW, first.outCanvasH) else null
+    try {
+      val seqBuilder = EditedMediaItemSequence.Builder()
+      clipSpecs.forEach { clip ->
+        if (clip.leadingGapSec > 1e-3 && blackImage != null) {
+          val gapFps = (clip.fps?.roundToInt() ?: 30).coerceAtLeast(1)
+          seqBuilder.addItem(
+            EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(blackImage)))
+              .setDurationUs((clip.leadingGapSec * 1_000_000.0).roundToLong())
+              .setFrameRate(gapFps)
+              .build()
+          )
+        }
+        seqBuilder.addItem(
+          EditedMediaItem.Builder(buildMediaItem(clip))
+            .setEffects(Effects(emptyList(), buildVideoEffects(clip)))
+            // Passthrough keeps each clip's audio (Media3 concatenates the
+            // sequence); mute / replace drop it per item.
+            .setRemoveAudio(clip.removeAudio || first.audioReplacementUri != null)
             .build()
         )
       }
-      val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
-        .setRemoveVideo(true)
-        .build()
-      Composition.Builder(videoSeq, EditedMediaItemSequence.Builder(audioItem).build()).build()
-    } else {
-      Composition.Builder(videoSeq).build()
-    }
+      val videoSeq = seqBuilder.build()
 
-    runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
-      transformer.start(composition, first.outputPath)
+      val replaceUri = first.audioReplacementUri
+      val composition = if (replaceUri != null) {
+        val mediaItemBuilder = MediaItem.Builder().setUri(replaceUri)
+        first.outputDurationSec?.let { durSec ->
+          mediaItemBuilder.setClippingConfiguration(
+            MediaItem.ClippingConfiguration.Builder()
+              .setEndPositionMs((durSec * 1000.0).roundToLong())
+              .build()
+          )
+        }
+        val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
+          .setRemoveVideo(true)
+          .build()
+        Composition.Builder(videoSeq, EditedMediaItemSequence.Builder(audioItem).build()).build()
+      } else {
+        // The black image items carry no audio; for PASSTHROUGH gaps force a
+        // continuous audio track so the source audio survives across the gaps as
+        // silence. Never force it for mute (removeAudio) — that must stay
+        // video-only.
+        Composition.Builder(videoSeq)
+          .experimentalSetForceAudioTrack(needGaps && !first.removeAudio)
+          .build()
+      }
+
+      runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
+        transformer.start(composition, first.outputPath)
+      }
+    } finally {
+      blackImage?.delete()
     }
   }
 
