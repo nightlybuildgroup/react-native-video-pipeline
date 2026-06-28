@@ -215,6 +215,13 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
   RNVPFlipAxisVertical = 1,
 };
 
+// Keep in lockstep with packages/react-native-video-pipeline/ios/RNVPAudio.h.
+typedef NS_ENUM(NSInteger, RNVPAudioMode) {
+  RNVPAudioModePassthrough = 0,
+  RNVPAudioModeMute = 1,
+  RNVPAudioModeReplace = 2,
+};
+
 @interface RNVPRemuxerConcatSource : NSObject
 @property(nonatomic, readonly) NSURL *sourceURL;
 @property(nonatomic, readonly) double sourceStart;
@@ -274,6 +281,29 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
                     toURL:(NSURL *)outputURL
                  metadata:(nullable RNVPStampMetadata *)metadata
                     error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)remuxTrimFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                startSec:(double)startSec
+             durationSec:(double)durationSec
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                   error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)remuxFlipFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                    axis:(RNVPFlipAxis)axis
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                   error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)remuxTransformFromURL:(NSURL *)sourceURL
+                        toURL:(NSURL *)outputURL
+                     startSec:(double)startSec
+                  durationSec:(double)durationSec
+                       rotate:(NSInteger)rotate
+                        flipH:(BOOL)flipH
+                        flipV:(BOOL)flipV
+                    audioMode:(RNVPAudioMode)audioMode
+          audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                        error:(NSError *_Nullable __autoreleasing *)error;
 @end
 
 // Forward-declare RNVPThumbnailer for the same clang-module reason as the
@@ -468,6 +498,16 @@ typedef void (^RNVPTranscoderProgressBlock)(double framesCompleted,
                   target:(RNVPTranscodeTarget *)target
                 overlays:(nullable NSArray *)overlays
                 metadata:(nullable RNVPStampMetadata *)metadata
+                    stop:(nullable RNVPStopToken *)stop
+                progress:(nullable RNVPTranscoderProgressBlock)progress
+                   error:(NSError *_Nullable __autoreleasing *)error;
++ (BOOL)transcodeFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                  target:(RNVPTranscodeTarget *)target
+                overlays:(nullable NSArray *)overlays
+                metadata:(nullable RNVPStampMetadata *)metadata
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
                     stop:(nullable RNVPStopToken *)stop
                 progress:(nullable RNVPTranscoderProgressBlock)progress
                    error:(NSError *_Nullable __autoreleasing *)error;
@@ -6626,6 +6666,194 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:winPath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:fullPath error:nil];
+}
+
+// --- T029 audio.mode = 'mute' / 'replace' -----------------------------------
+//
+// The render router can carry a soundtrack on two re-encode paths: the
+// transcode pump (crop / resize / overlay / output change) and the
+// rotation/flip transform-remux. Each must honour spec.audio: 'mute' drops the
+// audio track, 'replace' swaps in a separate soundtrack capped to the video
+// duration, 'passthrough' (the default) keeps the source audio. These drive
+// the native methods directly with an RNVPAudioMode, mirroring what
+// HybridVideoPipeline::render threads in from spec.audio.
+
+static NSUInteger audioTrackCount(NSString *path) {
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:path]];
+  return [asset tracksWithMediaType:AVMediaTypeAudio].count;
+}
+
+// Mute on the transcode path drops the audio track; passthrough keeps it.
+- (void)testTranscodeMuteDropsAudioTrack {
+  const NSInteger kFps = 30;
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, kFps, 30,
+                                                   @"mute-tx", &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+  XCTAssertGreaterThanOrEqual(audioTrackCount(sourcePath), 1u,
+                              @"source must carry audio for the test to mean "
+                              @"anything");
+
+  // Crop to 80x80 forces the transcode (re-encode) path.
+  RNVPTranscodeTarget *target =
+      [[RNVPTranscodeTarget alloc] initWithWidth:80
+                                          height:80
+                                             fps:(double)kFps
+                                           codec:RNVPTranscodeCodecH264
+                                         bitrate:0
+                                          rotate:-1
+                                           flipH:NO
+                                           flipV:NO
+                                           cropX:0
+                                           cropY:0
+                                       cropWidth:80
+                                      cropHeight:80
+                                     sourceStart:0.0
+                                  sourceDuration:0.0];
+
+  NSString *mutePath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"mute-tx-%@.mp4", NSUUID.UUID.UUIDString]];
+  NSString *keepPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"keep-tx-%@.mp4", NSUUID.UUID.UUIDString]];
+
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:[NSURL fileURLWithPath:mutePath]
+                                          target:target
+                                        overlays:nil
+                                        metadata:nil
+                                       audioMode:RNVPAudioModeMute
+                             audioReplacementURL:nil
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"mute transcode failed: %@", error);
+  XCTAssertTrue([RNVPTranscoder transcodeFromURL:sourceURL
+                                           toURL:[NSURL fileURLWithPath:keepPath]
+                                          target:target
+                                        overlays:nil
+                                        metadata:nil
+                                       audioMode:RNVPAudioModePassthrough
+                             audioReplacementURL:nil
+                                            stop:nil
+                                        progress:nil
+                                           error:&error],
+                @"passthrough transcode failed: %@", error);
+
+  XCTAssertEqual(audioTrackCount(mutePath), 0u,
+                 @"mute output must have no audio track");
+  XCTAssertGreaterThanOrEqual(audioTrackCount(keepPath), 1u,
+                              @"passthrough output must keep the audio track");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:keepPath error:nil];
+}
+
+// Mute on the rotation/flip transform-remux drops audio; passthrough keeps it.
+- (void)testRemuxTransformMuteDropsAudioTrack {
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, 30, 30,
+                                                   @"mute-xf", &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+  XCTAssertGreaterThanOrEqual(audioTrackCount(sourcePath), 1u);
+
+  NSString *mutePath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"mute-xf-%@.mp4", NSUUID.UUID.UUIDString]];
+  NSString *keepPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"keep-xf-%@.mp4", NSUUID.UUID.UUIDString]];
+
+  XCTAssertTrue([RNVPRemuxer remuxTransformFromURL:sourceURL
+                                             toURL:[NSURL fileURLWithPath:mutePath]
+                                          startSec:0.0
+                                       durationSec:0.0
+                                            rotate:90
+                                             flipH:NO
+                                             flipV:NO
+                                         audioMode:RNVPAudioModeMute
+                               audioReplacementURL:nil
+                                             error:&error],
+                @"mute transform failed: %@", error);
+  XCTAssertTrue([RNVPRemuxer remuxTransformFromURL:sourceURL
+                                             toURL:[NSURL fileURLWithPath:keepPath]
+                                          startSec:0.0
+                                       durationSec:0.0
+                                            rotate:90
+                                             flipH:NO
+                                             flipV:NO
+                                         audioMode:RNVPAudioModePassthrough
+                               audioReplacementURL:nil
+                                             error:&error],
+                @"passthrough transform failed: %@", error);
+
+  XCTAssertEqual(audioTrackCount(mutePath), 0u,
+                 @"mute output must have no audio track");
+  XCTAssertGreaterThanOrEqual(audioTrackCount(keepPath), 1u,
+                              @"passthrough output must keep the audio track");
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:keepPath error:nil];
+}
+
+// Replace on the transform-remux swaps the source soundtrack for a separate
+// asset, capped to the video duration. The source is silent in [0, 0.5) and a
+// tone in [0.5, 1.0); the replacement is the source's all-tone back half, so a
+// correct replace makes the output's *front* window a tone (the swapped audio),
+// where passthrough would leave it silent and mute would have no track at all.
+- (void)testRemuxTransformReplaceSwapsSoundtrack {
+  NSError *error = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(160, 120, 30, 30,
+                                                   @"repl-xf", &error);
+  XCTAssertNotNil(sourcePath, @"fixture author failed: %@", error);
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+
+  // Build an all-tone replacement by trimming the source's back half.
+  NSString *replPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-src-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer remuxTrimFromURL:sourceURL
+                                        toURL:[NSURL fileURLWithPath:replPath]
+                                     startSec:0.5
+                                  durationSec:0.5
+                                        error:&error],
+                @"replacement-trim failed: %@", error);
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"repl-out-%@.mp4", NSUUID.UUID.UUIDString]];
+  XCTAssertTrue([RNVPRemuxer
+                    remuxTransformFromURL:sourceURL
+                                    toURL:[NSURL fileURLWithPath:outPath]
+                                 startSec:0.0
+                              durationSec:0.0
+                                   rotate:90
+                                    flipH:NO
+                                    flipV:NO
+                                audioMode:RNVPAudioModeReplace
+                      audioReplacementURL:[NSURL fileURLWithPath:replPath]
+                                    error:&error],
+                @"replace transform failed: %@", error);
+
+  XCTAssertGreaterThanOrEqual(audioTrackCount(outPath), 1u,
+                              @"replace output must carry a (swapped) audio "
+                              @"track");
+  // Front window of the output should now be the swapped tone, not the
+  // source's front-half silence.
+  const double frontRMS = decodeAudioRMSWindow(outPath, 0.1, 0.35);
+  XCTAssertGreaterThan(frontRMS, 0.15,
+                       @"replaced soundtrack should make the front window a "
+                       @"tone (got %.4f) — proves the source audio was swapped",
+                       frontRMS);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:replPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
 @end

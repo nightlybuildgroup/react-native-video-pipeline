@@ -338,10 +338,10 @@ describe('Video.render — validation', () => {
   // `validateNativeSpec` for the `Video.synthesize` internal path but are
   // unreachable from the public `Video.render` surface.
 
-  it("rejects audio.mode='replace' as not implemented (#11/#29)", async () => {
-    // No native code reads spec.audio yet, so replace/mute would be a silent
-    // no-op. The JS layer rejects them instead of producing output with
-    // unchanged audio. Even a well-formed replaceUri is rejected.
+  it("rejects audio.mode='replace' as not implemented (#29)", async () => {
+    // 'replace' has no native implementation yet (#29 follow-up), so the JS
+    // layer rejects it rather than producing output with unchanged audio —
+    // even a well-formed replaceUri is rejected until the native swap lands.
     await expect(
       Video.render({
         ...baseClipSpec,
@@ -350,16 +350,21 @@ describe('Video.render — validation', () => {
     ).rejects.toBeInstanceOf(InvalidSpecError);
   });
 
-  it("rejects audio.mode='mute' as not implemented (#11/#29)", async () => {
-    await expect(
-      Video.render({
-        ...baseClipSpec,
-        audio: { mode: 'mute' },
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
+  it("accepts audio.mode='mute' (drops the audio track natively)", async () => {
+    // Wired into both engines (iOS: omit/skip the audio track; Android:
+    // EditedMediaItem.setRemoveAudio). The spec is forwarded to native.
+    const promise = Video.render({
+      ...baseClipSpec,
+      audio: { mode: 'mute' },
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    const passed = fake.renderCalls[0]?.spec as { audio?: { mode: string } };
+    expect(passed.audio).toEqual({ mode: 'mute' });
+    fake.renderCalls[0]?.resolve();
+    await promise;
   });
 
-  it("accepts audio.mode='passthrough' (the only wired mode)", async () => {
+  it("accepts audio.mode='passthrough' (keeps the source audio)", async () => {
     const promise = Video.render({
       ...baseClipSpec,
       audio: { mode: 'passthrough' },

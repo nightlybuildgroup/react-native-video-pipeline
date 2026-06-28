@@ -111,6 +111,11 @@ internal object TransformerRunner {
     /// the `Presentation` when a single output dimension is requested.
     val outCanvasW: Int = 0,
     val outCanvasH: Int = 0,
+    /// Audio handling (spec.audio). `false` (default) keeps the source audio,
+    /// which Media3 Transformer copies through. `true` drops the audio track
+    /// (audio.mode = 'mute'). Replace ('audio.mode' = 'replace') is not wired
+    /// on this path yet (#29 follow-up) and is rejected upstream.
+    val removeAudio: Boolean = false,
   )
 
   fun interface ProgressSink {
@@ -143,6 +148,7 @@ internal object TransformerRunner {
 
     val editedItem = EditedMediaItem.Builder(buildMediaItem(spec))
       .setEffects(Effects(emptyList(), buildVideoEffects(spec)))
+      .setRemoveAudio(spec.removeAudio)
       .build()
 
     val mainHandler = Handler(Looper.getMainLooper())

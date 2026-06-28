@@ -62,6 +62,41 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
   return CGSizeMake(std::fabs(applied.width), std::fabs(applied.height));
 }
 
+// Insert the soundtrack dictated by @p mode into @p composition over the video
+// timeline @p videoRange. @c Passthrough copies @p sourceAsset's own audio;
+// @c Replace pulls the first audio track from @p replacementURL, capped to the
+// video duration; @c Mute inserts nothing. Best-effort: a missing or
+// decode-failing audio track yields a silent (video-only) result rather than
+// failing the whole export, matching AVFoundation's lenient passthrough.
+void insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
+                        CMTimeRange videoRange, RNVPAudioMode mode,
+                        NSURL *replacementURL) {
+  if (mode == RNVPAudioModeMute) return;
+
+  AVAsset *audioAsset = sourceAsset;
+  CMTime usable = videoRange.duration;
+  if (mode == RNVPAudioModeReplace) {
+    if (replacementURL == nil) return;
+    audioAsset = [AVURLAsset assetWithURL:replacementURL];
+    // Cap the replacement to the video duration: a shorter track leaves the
+    // tail silent, a longer one is truncated to the picture.
+    const CMTime replacementDuration = audioAsset.duration;
+    if (CMTimeCompare(replacementDuration, usable) < 0) usable = replacementDuration;
+  }
+
+  AVAssetTrack *audioTrack =
+      [audioAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+  if (audioTrack == nil) return;
+
+  AVMutableCompositionTrack *audioComp = [composition
+      addMutableTrackWithMediaType:AVMediaTypeAudio
+                  preferredTrackID:kCMPersistentTrackID_Invalid];
+  [audioComp insertTimeRange:CMTimeRangeMake(kCMTimeZero, usable)
+                     ofTrack:audioTrack
+                      atTime:kCMTimeZero
+                       error:nil];
+}
+
 }  // namespace
 
 @implementation RNVPExportRequest
@@ -71,6 +106,8 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
                      timeRange:(CMTimeRange)timeRange
                       metadata:(NSArray<AVMetadataItem *> *)metadata
                       composer:(RNVPExportSessionComposer)composer
+                     audioMode:(RNVPAudioMode)audioMode
+           audioReplacementURL:(NSURL *)audioReplacementURL
                           stop:(RNVPStopToken *)stop
                       progress:(RNVPExportSessionProgress)progress {
   if ((self = [super init])) {
@@ -79,6 +116,8 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
     _timeRange = timeRange;
     _metadata = metadata;
     _composer = composer;
+    _audioMode = audioMode;
+    _audioReplacementURL = audioReplacementURL;
     _stop = stop;
     _progress = progress;
   }
@@ -98,6 +137,11 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
     _timeRange = kCMTimeRangeInvalid;
     _metadata = metadata;
     _composer = nil; // passthrough — no per-frame re-encode
+    // The composition already carries exactly the audio tracks the caller
+    // inserted (mute → none, replace → the swapped track), so the driver leaves
+    // the soundtrack alone on this path.
+    _audioMode = RNVPAudioModePassthrough;
+    _audioReplacementURL = nil;
     _stop = stop;
     _progress = progress;
   }
@@ -192,19 +236,11 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
     videoCompositionTrack.preferredTransform =
         sourceVideoTrack.preferredTransform;
 
-    // Audio passthrough — AVAssetExportSession re-emits the audio track from
-    // the composition automatically when no audioMix is supplied.
-    AVAssetTrack *sourceAudioTrack =
-        [asset tracksWithMediaType:AVMediaTypeAudio].firstObject;
-    if (sourceAudioTrack != nil) {
-      AVMutableCompositionTrack *audioCompositionTrack = [composition
-          addMutableTrackWithMediaType:AVMediaTypeAudio
-                      preferredTrackID:kCMPersistentTrackID_Invalid];
-      [audioCompositionTrack insertTimeRange:sourceRange
-                                       ofTrack:sourceAudioTrack
-                                        atTime:kCMTimeZero
-                                         error:nil];
-    }
+    // Soundtrack — passthrough copies the source audio, mute drops it, replace
+    // swaps in request.audioReplacementURL. AVAssetExportSession re-emits
+    // whatever audio track the composition carries (no audioMix supplied).
+    insertAudioForMode(composition, asset, sourceRange, request.audioMode,
+                       request.audioReplacementURL);
 
     // Per-frame composer wiring -----------------------------------------------
     // AVFoundation calls the handler once per output frame with the source
@@ -271,8 +307,42 @@ CGSize displayedSize(AVAssetTrack *videoTrack) {
 
     exportInput = composition;
     presetName = AVAssetExportPresetHighestQuality;
-  } else {
+  } else if (request.audioMode == RNVPAudioModePassthrough) {
+    // Plain passthrough — hand the raw asset to the Passthrough preset, which
+    // copies compressed video + audio samples verbatim.
     exportInput = asset;
+    presetName = AVAssetExportPresetPassthrough;
+  } else {
+    // Mute / replace on the passthrough path. The Passthrough preset cannot
+    // drop or swap a track on a raw asset, so wrap the source video in a
+    // composition carrying exactly the requested soundtrack and copy that
+    // through verbatim. The session timeRange still windows the output.
+    AVMutableComposition *composition = [AVMutableComposition composition];
+    AVMutableCompositionTrack *videoComp = [composition
+        addMutableTrackWithMediaType:AVMediaTypeVideo
+                    preferredTrackID:kCMPersistentTrackID_Invalid];
+    const CMTimeRange fullRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+    NSError *insertError = nil;
+    if (![videoComp insertTimeRange:fullRange
+                            ofTrack:sourceVideoTrack
+                             atTime:kCMTimeZero
+                              error:&insertError]) {
+      if (error) {
+        *error = makeError(
+            RNVPExportSessionErrorCodeSourceCorrupted,
+            [NSString stringWithFormat:
+                          @"could not insert source video track for audio "
+                          @"%@: %@",
+                          request.audioMode == RNVPAudioModeMute ? @"mute"
+                                                                 : @"replace",
+                          insertError.localizedDescription ?: @"(nil)"]);
+      }
+      return NO;
+    }
+    videoComp.preferredTransform = sourceVideoTrack.preferredTransform;
+    insertAudioForMode(composition, asset, fullRange, request.audioMode,
+                       request.audioReplacementURL);
+    exportInput = composition;
     presetName = AVAssetExportPresetPassthrough;
   }
 

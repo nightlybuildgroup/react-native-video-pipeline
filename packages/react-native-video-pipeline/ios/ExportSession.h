@@ -40,6 +40,8 @@
 
 #pragma once
 
+#import "RNVPAudio.h"
+
 #import <AVFoundation/AVFoundation.h>
 #import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
@@ -109,11 +111,22 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
 @property(nonatomic, readonly, nullable) RNVPStopToken *stop;
 @property(nonatomic, readonly, nullable) RNVPExportSessionProgress progress;
 
+/// Audio handling for the @c source path (the driver owns the soundtrack on
+/// the passthrough preset and the composer composition). @c Passthrough keeps
+/// the source audio; @c Mute drops it; @c Replace swaps in
+/// @c audioReplacementURL. Ignored on the @c composedAsset path — there the
+/// caller has already baked the audio tracks into the composition.
+@property(nonatomic, readonly) RNVPAudioMode audioMode;
+/// Non-nil only when @c audioMode is @c Replace.
+@property(nonatomic, readonly, nullable) NSURL *audioReplacementURL;
+
 - (instancetype)initWithSource:(NSURL *)source
                         output:(NSURL *)output
                      timeRange:(CMTimeRange)timeRange
                       metadata:(nullable NSArray<AVMetadataItem *> *)metadata
                       composer:(nullable RNVPExportSessionComposer)composer
+                     audioMode:(RNVPAudioMode)audioMode
+           audioReplacementURL:(nullable NSURL *)audioReplacementURL
                           stop:(nullable RNVPStopToken *)stop
                       progress:(nullable RNVPExportSessionProgress)progress
     NS_DESIGNATED_INITIALIZER;

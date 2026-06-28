@@ -343,6 +343,28 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
                     stop:(nullable RNVPStopToken *)stopToken
                 progress:(nullable RNVPTranscoderProgressBlock)progress
                    error:(NSError *_Nullable __autoreleasing *)error {
+  return [self transcodeFromURL:sourceURL
+                          toURL:outputURL
+                         target:target
+                       overlays:overlays
+                       metadata:metadata
+                      audioMode:RNVPAudioModePassthrough
+            audioReplacementURL:nil
+                           stop:stopToken
+                       progress:progress
+                          error:error];
+}
+
++ (BOOL)transcodeFromURL:(NSURL *)sourceURL
+                   toURL:(NSURL *)outputURL
+                  target:(RNVPTranscodeTarget *)target
+                overlays:(nullable NSArray *)overlays
+                metadata:(nullable RNVPStampMetadata *)metadata
+               audioMode:(RNVPAudioMode)audioMode
+     audioReplacementURL:(nullable NSURL *)audioReplacementURL
+                    stop:(nullable RNVPStopToken *)stopToken
+                progress:(nullable RNVPTranscoderProgressBlock)progress
+                   error:(NSError *_Nullable __autoreleasing *)error {
   const std::shared_ptr<margelo::nitro::videopipeline::StopToken> stop =
       stopToken != nil
           ? [stopToken cpp]
@@ -480,11 +502,16 @@ BOOL pumpAudioPassthrough(AVAssetReaderTrackOutput *audioOutput,
   // rebases the emitted packets to start at 0. The two readers run
   // sequentially (video loop fully drains before the audio pump starts), so
   // there is no concurrent-read contention on the asset.
+  // Passthrough keeps the source audio; Mute drops it (skip the dedicated
+  // reader so no audio input is added downstream). Replace on the transcode
+  // pump needs a second reader on the replacement file — not wired here yet
+  // (#29 follow-up); it is unreachable while the JS layer rejects 'replace',
+  // so it conservatively drops audio like mute.
   AVAssetReaderTrackOutput *audioOutput = nil;
   AVAssetReader *audioReader = nil;
   NSArray<AVAssetTrack *> *audioTracks =
       [asset tracksWithMediaType:AVMediaTypeAudio];
-  if (audioTracks.count > 0) {
+  if (audioMode == RNVPAudioModePassthrough && audioTracks.count > 0) {
     NSError *audioReaderError = nil;
     audioReader = [[AVAssetReader alloc] initWithAsset:asset
                                                  error:&audioReaderError];

@@ -123,6 +123,32 @@ std::string nsStringToUtf8(NSString* _Nullable s) {
   return utf8 != nullptr ? std::string(utf8) : std::string();
 }
 
+// Resolved audio directive for the native render paths. Maps the optional
+// nitro AudioSpec onto the RNVPAudioMode the Obj-C drivers speak. A missing
+// spec.audio (the common case) is Passthrough. Replace carries the resolved
+// replacement file URL (nil if replaceUri was absent — the JS layer rejects
+// that, and the native paths fall back to silent).
+struct ResolvedAudio {
+  RNVPAudioMode mode;
+  NSURL* replacementURL;
+};
+
+ResolvedAudio resolveAudio(const VideoSpec& spec) {
+  if (!spec.audio.has_value()) return {RNVPAudioModePassthrough, nil};
+  switch (spec.audio->mode) {
+    case AudioMode::PASSTHROUGH:
+      return {RNVPAudioModePassthrough, nil};
+    case AudioMode::MUTE:
+      return {RNVPAudioModeMute, nil};
+    case AudioMode::REPLACE:
+      return {RNVPAudioModeReplace,
+              spec.audio->replaceUri.has_value()
+                  ? urlFromUri(*spec.audio->replaceUri)
+                  : nil};
+  }
+  return {RNVPAudioModePassthrough, nil};
+}
+
 VideoInfo buildVideoInfoFromDemuxer(RNVPAVDemuxer* demuxer, const std::string& uri) {
   VideoInfo info;
   info.uri = uri;
@@ -753,6 +779,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       RNVPTranscodeTarget* target =
           buildTranscodeTarget(spec, sourceW, sourceH, sourceFps);
       NSURL* outputURL = urlFromUri(spec.output.path);
+      const ResolvedAudio resolvedAudio = resolveAudio(spec);
+      const RNVPAudioMode audioMode = resolvedAudio.mode;
+      NSURL* audioReplacementURL = resolvedAudio.replacementURL;
 
       NSMutableArray* nativeOverlays = nil;
       if (spec.overlays.has_value() && !spec.overlays->empty()) {
@@ -782,14 +811,17 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                          outputPath:outputPathForJournal
                                           stopToken:runnerToken];
       return Promise<void>::async(
-          [clipURL, outputURL, target, nativeOverlays, runnerToken,
-           tokenCopy, progressBlock, guard]() {
+          [clipURL, outputURL, target, nativeOverlays, audioMode,
+           audioReplacementURL, runnerToken, tokenCopy, progressBlock,
+           guard]() {
         NSError* err = nil;
         const BOOL ok = [RNVPTranscoder transcodeFromURL:clipURL
                                                    toURL:outputURL
                                                   target:target
                                                 overlays:nativeOverlays
                                                 metadata:nil
+                                               audioMode:audioMode
+                                     audioReplacementURL:audioReplacementURL
                                                     stop:runnerToken
                                                 progress:progressBlock
                                                    error:&err];
@@ -830,6 +862,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       NSURL* outputURLTransform = urlFromUri(spec.output.path);
       const double startSec = clip.sourceStart;
       const double durationSec = clip.sourceDuration;
+      const ResolvedAudio resolvedAudio = resolveAudio(spec);
+      const RNVPAudioMode audioMode = resolvedAudio.mode;
+      NSURL* audioReplacementURL = resolvedAudio.replacementURL;
 
       const std::string transformTokenCopy = renderToken;
       std::shared_ptr<StopToken> transformStop =
@@ -850,7 +885,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                           stopToken:transformRunnerToken];
       return Promise<void>::async(
           [clipURL, outputURLTransform, startSec, durationSec, rotate, flipH,
-           flipV, transformTokenCopy, transformGuard]() {
+           flipV, audioMode, audioReplacementURL, transformTokenCopy,
+           transformGuard]() {
         NSError* err = nil;
         const BOOL ok = [RNVPRemuxer remuxTransformFromURL:clipURL
                                                      toURL:outputURLTransform
@@ -859,6 +895,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                                     rotate:rotate
                                                      flipH:flipH
                                                      flipV:flipV
+                                                 audioMode:audioMode
+                                       audioReplacementURL:audioReplacementURL
                                                      error:&err];
         RenderTokenRegistry::unregisterToken(transformTokenCopy);
         [transformGuard end];
@@ -1269,10 +1307,18 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
   // the metadata story instead of inventing a parallel pass-through.
   RNVPStampMetadata* stampMetadata = buildStampMetadata(spec.metadata);
 
+  // Compose-on-clip carries the source clip's audio through the export driver;
+  // honour spec.audio (mute drops it, replace swaps it). Synthesize has no
+  // source audio, so the directive is a no-op there.
+  const ResolvedAudio resolvedAudio = resolveAudio(spec);
+  const RNVPAudioMode audioMode = resolvedAudio.mode;
+  NSURL* audioReplacementURL = resolvedAudio.replacementURL;
+
   return Promise<void>::async([isSynthesized, specWidth, specHeight, specFps,
                                specSeconds, outputPath, clipUri,
                                drawFrameCopy, onProgressCopy, stop,
-                               tokenCopy, stampMetadata]() {
+                               tokenCopy, stampMetadata, audioMode,
+                               audioReplacementURL]() {
     NSString* outputPathNS =
         [NSString stringWithUTF8String:outputPath.c_str()] ?: @"";
     NSFileManager* fm = [NSFileManager defaultManager];
@@ -1462,6 +1508,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
                timeRange:kCMTimeRangeInvalid
                 metadata:mergedMetadata
                 composer:composer
+               audioMode:audioMode
+     audioReplacementURL:audioReplacementURL
                     stop:runnerToken
                 progress:progressBlock];
       NSError* err = nil;
