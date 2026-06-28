@@ -30,6 +30,7 @@ export type {
   TextShadow,
   TextStyle,
   ThumbnailOptions,
+  TrackFrame,
   VideoCodec,
   VideoContainer,
   VideoInfo,

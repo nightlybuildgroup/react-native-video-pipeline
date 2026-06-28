@@ -383,7 +383,8 @@ interface ClipInput {
   // Forward-compatibility timeline hooks — see "Reserved timeline fields".
   id?: string;             // stable clip id; surfaced as FrameDrawerContext.clipId
   outputStartSec?: number; // explicit output position; past the previous clip opens a black gap, before it crossfades (iOS; Android rejects)
-  track?: number;          // multi-track index; v0.1 accepts only undefined or 0
+  track?: number;          // 0/undefined = base timeline; >0 = overlay/PiP track (iOS; Android rejects)
+  frame?: { x: number; y: number; w: number; h: number }; // PiP placement, normalized 0..1 (overlay tracks only)
 }
 
 interface ClipTransform {
@@ -396,13 +397,14 @@ interface ClipTransform {
 
 The timeline model stitches clips in array order. By default each clip picks up where the previous ended (`outputStartSec` omitted). An explicit `outputStartSec` past the previous clip's end opens a **gap**, filled with black + silence. A value before it is an **overlap**: on **iOS** the two clips are crossfade-dissolved over the overlap window (opacity ramp + audio volume ramp), limited to adjacent-pair overlaps; on **Android** overlaps reject for now.
 
-#### Reserved timeline fields
+#### Multi-track (PiP) and reserved timeline fields
 
-`id` and `track` reserve public field names for a future richer timeline (multi-track, transitions, clip-targeted overlays). `outputStartSec` is live — it positions a clip (opening a black gap when past the previous clip's end). Rejected cases still surface as `InvalidSpecError`:
+`id` reserves a public field name for a future richer timeline (transitions, clip-targeted overlays). `outputStartSec`, `track`, and `frame` are live. Rejected cases surface as `InvalidSpecError`:
 
 - **`id`** — optional stable identifier, surfaced as `FrameDrawerContext.clipId` on the compose path. Must be unique within a single spec.
 - **`outputStartSec`** — when provided, a value at/after the previous clip's end opens a **gap** (filled with black + silence; forces a re-encode). A smaller value is an **overlap**: crossfade-dissolved on iOS (adjacent-pair only — an overlap spanning two clips rejects), rejected on Android. Omit it for the contiguous position.
-- **`track`** — must be `undefined` or `0` (the single main track). Any other value is rejected.
+- **`track`** — `0`/`undefined` is the base timeline. A value **> 0** is an **overlay/PiP track** composited on top of the base, in ascending z-order (**iOS only** — Android rejects overlay tracks for now). An overlay-track clip **requires** an explicit `outputStartSec` (it has no implicit concat slot) and a base-track clip to composite onto. Must be a non-negative integer.
+- **`frame`** — placement for an overlay-track clip, in normalized output coordinates (`0..1`, origin top-left). Omitted = fill the frame. Only valid on an overlay track; must lie within the output (`x+w` and `y+h ≤ 1`). Example PiP: `{ x: 0.7, y: 0.05, w: 0.25, h: 0.25 }`.
 
 Code written against these fields today keeps working as the timeline model grows; the validation rules will loosen, not the field shapes.
 

@@ -99,6 +99,16 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
     val clips = spec.clips
+    // Multi-track / PiP overlay tracks (#17) composite on iOS only for now —
+    // the Android Media3 spatial compositor is a follow-up. Reject explicitly.
+    if (clips != null && clips.any { (it.track ?: 0.0) > 0.5 }) {
+      return Promise.rejected(
+        VideoPipelineInvalidSpecException(
+          "overlay tracks (clip.track > 0) are not supported on Android yet — " +
+            "they composite as PiP on iOS; use a single track on Android"
+        )
+      )
+    }
     // Timeline overlaps (a clip starting before the previous one ends) are
     // crossfade-composited on iOS (#18). The Android Media3 crossfade — a
     // multi-sequence Composition with a time-ramped alpha — is not implemented

@@ -143,11 +143,56 @@ function validateTimelineFields(inputs: NonEmptyArray<ClipInput>): void {
       }
       seenIds.add(c.id);
     }
-    if (c.track !== undefined && c.track !== 0) {
-      fail(`clip.track ${c.track} is not supported yet — v0.1 accepts only the main track (0)`, {
-        track: c.track,
-      });
+    if (c.track !== undefined) {
+      if (!Number.isInteger(c.track) || c.track < 0) {
+        fail(`clip.track must be a non-negative integer — got ${c.track}`, { track: c.track });
+      }
     }
+    const track = c.track ?? 0;
+    if (track > 0) {
+      // Overlay-track clips need an explicit position (there is no implicit
+      // concat slot for them) and their placement rect, if given, must be a
+      // sane normalized box.
+      if (c.outputStartSec === undefined) {
+        fail(`clip.track ${track} (overlay) requires an explicit outputStartSec`, { track });
+      }
+      if (c.frame !== undefined) validateTrackFrame(c.frame);
+    } else if (c.frame !== undefined) {
+      fail('clip.frame is only valid on an overlay track (track > 0)', { track });
+    }
+  }
+  // An overlay track needs a base timeline to composite onto.
+  const hasOverlayTrack = inputs.some((c) => (c.track ?? 0) > 0);
+  const hasBaseTrack = inputs.some((c) => (c.track ?? 0) === 0);
+  if (hasOverlayTrack && !hasBaseTrack) {
+    fail(
+      'an overlay track (track > 0) requires at least one base-track (0) clip to composite onto',
+    );
+  }
+}
+
+/** Validate a normalized (0..1) placement rect for an overlay-track clip. */
+function validateTrackFrame(f: { x: number; y: number; w: number; h: number }): void {
+  for (const [k, v] of [
+    ['x', f.x],
+    ['y', f.y],
+    ['w', f.w],
+    ['h', f.h],
+  ] as const) {
+    if (typeof v !== 'number' || Number.isNaN(v) || v < 0 || v > 1) {
+      fail(`clip.frame.${k} must be a normalized 0..1 value — got ${v}`, { [k]: v });
+    }
+  }
+  if (f.w <= 0 || f.h <= 0) {
+    fail('clip.frame must have positive width and height', { w: f.w, h: f.h });
+  }
+  if (f.x + f.w > 1 + 1e-6 || f.y + f.h > 1 + 1e-6) {
+    fail('clip.frame must lie within the output (x+w and y+h ≤ 1)', {
+      x: f.x,
+      y: f.y,
+      w: f.w,
+      h: f.h,
+    });
   }
 }
 
@@ -199,6 +244,24 @@ function finalizeClips(
     validateFileUri('clip.uri', input.uri);
     requireNonNeg('clip.startSec', sourceStart);
     requirePositive('clip.durationSec', sourceDuration);
+    const track = input.track ?? 0;
+    if (track > 0) {
+      // Overlay/PiP track (#17): positioned explicitly (validated above), it
+      // layers over the base timeline for its own window and never advances the
+      // base concat cursor. `frame` (default full-frame) places it spatially.
+      const overlayStart = input.outputStartSec as number;
+      requireNonNeg('clip.outputStartSec', overlayStart);
+      out.push({
+        uri: input.uri,
+        sourceStart,
+        sourceDuration,
+        outputStart: overlayStart,
+        track,
+        ...(input.transform !== undefined ? { transform: input.transform } : {}),
+        ...(input.frame !== undefined ? { frame: input.frame } : {}),
+      });
+      continue;
+    }
     // An explicit outputStartSec at or after the running position opens a GAP
     // before the clip (filled with black + silence). A value before it is an
     // OVERLAP — the render engine crossfades the two clips over the overlap

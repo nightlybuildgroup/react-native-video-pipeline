@@ -14,6 +14,7 @@ import type {
   OutputSpec as NativeOutputSpec,
   Progress,
   TimeRange,
+  TrackFrame,
   WGS84Coordinate,
 } from './nitro/VideoPipeline.nitro';
 import type { Overlay } from './overlay';
@@ -143,11 +144,20 @@ export interface ClipInput {
    */
   outputStartSec?: number;
   /**
-   * Track index for future multi-track composition. v0.1 accepts only
-   * `undefined` or `0` (the single main track); any other value is rejected
-   * with `InvalidSpecError`.
+   * Track index for multi-track composition (#17). `undefined`/`0` is the base
+   * timeline; a higher index is an overlay/PiP track composited on top in
+   * ascending z-order. **iOS only** — Android rejects overlay tracks for now.
+   * An overlay-track clip plays over its own `[outputStartSec, +durationSec]`
+   * window on top of the base timeline.
    */
   track?: number;
+  /**
+   * Output placement for an overlay-track clip (`track` > 0), in normalized
+   * output coordinates (0..1, origin top-left). Omitted = fill the frame.
+   * Ignored on the base track. Example: a quarter-size top-right PiP is
+   * `{ x: 0.7, y: 0.05, w: 0.25, h: 0.25 }`.
+   */
+  frame?: TrackFrame;
 }
 
 /**

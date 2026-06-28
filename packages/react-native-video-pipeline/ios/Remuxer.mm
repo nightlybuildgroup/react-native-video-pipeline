@@ -218,6 +218,27 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
 
 @end
 
+@implementation RNVPOverlayTrackSource
+
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                      sourceStart:(double)sourceStart
+                   sourceDuration:(double)sourceDuration
+                      outputStart:(double)outputStart
+                            frame:(CGRect)frame
+                           zOrder:(NSInteger)zOrder {
+  if ((self = [super init])) {
+    _sourceURL = sourceURL;
+    _sourceStart = sourceStart;
+    _sourceDuration = sourceDuration;
+    _outputStart = outputStart;
+    _frame = frame;
+    _zOrder = zOrder;
+  }
+  return self;
+}
+
+@end
+
 @implementation RNVPRemuxer
 
 + (BOOL)remuxTrimFromURL:(NSURL *)sourceURL
@@ -1206,6 +1227,212 @@ NSString *fourCCString(FourCharCode code) {
       } else {
         *error = exportError ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
                                           @"crossfade: export failed.");
+      }
+    }
+    return NO;
+  }
+  return YES;
+}
+
++ (BOOL)composeOverlayTracks:(NSURL *)baseURL
+              overlaySources:(NSArray<RNVPOverlayTrackSource *> *)overlays
+                  renderSize:(CGSize)renderSize
+               frameDuration:(CMTime)frameDuration
+                       toURL:(NSURL *)outputURL
+                        stop:(nullable RNVPStopToken *)stopToken
+                       error:(NSError *_Nullable __autoreleasing *)error {
+  if (stopToken != nil && stopToken.abortRequested) {
+    if (error)
+      *error = makeError(RNVPRemuxerErrorCodeCancelled,
+                         @"Overlay compose aborted before it started.");
+    return NO;
+  }
+  if (![[NSFileManager defaultManager] fileExistsAtPath:baseURL.path]) {
+    if (error)
+      *error = makeError(RNVPRemuxerErrorCodeNotFound,
+                         @"overlay compose: base timeline not found");
+    return NO;
+  }
+
+  AVURLAsset *baseAsset = [AVURLAsset assetWithURL:baseURL];
+  AVAssetTrack *baseVideo =
+      [baseAsset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  if (baseVideo == nil) {
+    if (error)
+      *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                         @"overlay compose: base has no video track");
+    return NO;
+  }
+
+  AVMutableComposition *composition = [AVMutableComposition composition];
+  // Base layer fills the frame.
+  AVMutableCompositionTrack *baseTrack = [composition
+      addMutableTrackWithMediaType:AVMediaTypeVideo
+                  preferredTrackID:kCMPersistentTrackID_Invalid];
+  const CMTime baseDuration = baseAsset.duration;
+  if (![baseTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, baseDuration)
+                          ofTrack:baseVideo
+                           atTime:kCMTimeZero
+                            error:nil]) {
+    if (error)
+      *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                         @"overlay compose: base video splice failed");
+    return NO;
+  }
+  // Carry the base soundtrack through (overlay audio is dropped in v1).
+  AVAssetTrack *baseAudio =
+      [baseAsset tracksWithMediaType:AVMediaTypeAudio].firstObject;
+  if (baseAudio != nil) {
+    AVMutableCompositionTrack *audioComp = [composition
+        addMutableTrackWithMediaType:AVMediaTypeAudio
+                    preferredTrackID:kCMPersistentTrackID_Invalid];
+    const CMTimeRange aAvail = baseAudio.timeRange;
+    const CMTime aDur = CMTimeMinimum(baseDuration, CMTimeRangeGetEnd(aAvail));
+    [audioComp insertTimeRange:CMTimeRangeMake(aAvail.start,
+                                               CMTimeSubtract(aDur, aAvail.start))
+                       ofTrack:baseAudio
+                        atTime:kCMTimeZero
+                         error:nil];
+  }
+
+  // Insert each overlay onto its own track at its outputStart, remembering the
+  // (track, frame, z, window) so the layer instructions below can place it.
+  struct OverlayLayer {
+    AVMutableCompositionTrack *track;
+    double start;
+    double end;
+    CGRect frame;
+    NSInteger z;
+  };
+  std::vector<OverlayLayer> layers;
+  const double W = renderSize.width, H = renderSize.height;
+  for (RNVPOverlayTrackSource *ov in overlays) {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:ov.sourceURL.path]) {
+      if (error)
+        *error = makeError(RNVPRemuxerErrorCodeNotFound,
+                           @"overlay compose: an overlay clip was not found");
+      return NO;
+    }
+    AVURLAsset *oa = [AVURLAsset assetWithURL:ov.sourceURL];
+    AVAssetTrack *ot = [oa tracksWithMediaType:AVMediaTypeVideo].firstObject;
+    if (ot == nil) {
+      if (error)
+        *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                           @"overlay compose: an overlay clip has no video");
+      return NO;
+    }
+    AVMutableCompositionTrack *ct = [composition
+        addMutableTrackWithMediaType:AVMediaTypeVideo
+                    preferredTrackID:kCMPersistentTrackID_Invalid];
+    const CMTime os = CMTimeMakeWithSeconds(ov.sourceStart, NSEC_PER_SEC);
+    const CMTime od = CMTimeMakeWithSeconds(ov.sourceDuration, NSEC_PER_SEC);
+    const CMTime at = CMTimeMakeWithSeconds(ov.outputStart, NSEC_PER_SEC);
+    if (![ct insertTimeRange:CMTimeRangeMake(os, od)
+                     ofTrack:ot
+                      atTime:at
+                       error:nil]) {
+      if (error)
+        *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
+                           @"overlay compose: overlay splice failed");
+      return NO;
+    }
+    layers.push_back({ct, ov.outputStart, ov.outputStart + ov.sourceDuration,
+                      ov.frame, ov.zOrder});
+  }
+
+  // Partition the timeline at the base bounds and every overlay window edge.
+  const double kEps = 1e-3;
+  std::vector<double> bounds = {0.0, CMTimeGetSeconds(baseDuration)};
+  for (const auto &l : layers) {
+    bounds.push_back(l.start);
+    bounds.push_back(l.end);
+  }
+  std::sort(bounds.begin(), bounds.end());
+  bounds.erase(std::unique(bounds.begin(), bounds.end(),
+                           [&](double a, double b) {
+                             return std::fabs(a - b) < kEps;
+                           }),
+               bounds.end());
+
+  NSMutableArray<AVMutableVideoCompositionInstruction *> *instructions =
+      [NSMutableArray array];
+  for (size_t b = 0; b + 1 < bounds.size(); b++) {
+    const double r0 = bounds[b], r1 = bounds[b + 1];
+    if (r1 - r0 < kEps) continue;
+    const CMTime t0 = CMTimeMakeWithSeconds(r0, NSEC_PER_SEC);
+    const CMTime t1 = CMTimeMakeWithSeconds(r1, NSEC_PER_SEC);
+    const double mid = (r0 + r1) / 2.0;
+
+    // Active overlays in this region, sorted so higher z is drawn on top
+    // (front = earlier in the layerInstructions array).
+    std::vector<const OverlayLayer *> active;
+    for (const auto &l : layers) {
+      if (l.start <= mid && mid <= l.end) active.push_back(&l);
+    }
+    std::sort(active.begin(), active.end(),
+              [](const OverlayLayer *a, const OverlayLayer *b) {
+                return a->z > b->z;  // highest z first (front)
+              });
+
+    NSMutableArray<AVMutableVideoCompositionLayerInstruction *> *lis =
+        [NSMutableArray array];
+    for (const OverlayLayer *l : active) {
+      AVMutableVideoCompositionLayerInstruction *li =
+          [AVMutableVideoCompositionLayerInstruction
+              videoCompositionLayerInstructionWithAssetTrack:l->track];
+      // Scale the full-frame overlay into its normalized destination rect and
+      // translate to its origin. `frame` is top-left normalized, but the video
+      // composition's coordinate space has its origin at the BOTTOM-left, so the
+      // y translation is measured from the bottom: (1 - y - h) * H.
+      CGAffineTransform scale =
+          CGAffineTransformMakeScale(l->frame.size.width, l->frame.size.height);
+      CGAffineTransform translate = CGAffineTransformMakeTranslation(
+          l->frame.origin.x * W,
+          (1.0 - l->frame.origin.y - l->frame.size.height) * H);
+      [li setTransform:CGAffineTransformConcat(scale, translate) atTime:t0];
+      [lis addObject:li];
+    }
+    // Base last = behind everything.
+    AVMutableVideoCompositionLayerInstruction *baseLI =
+        [AVMutableVideoCompositionLayerInstruction
+            videoCompositionLayerInstructionWithAssetTrack:baseTrack];
+    [baseLI setOpacity:1.0f atTime:t0];
+    [lis addObject:baseLI];
+
+    AVMutableVideoCompositionInstruction *inst =
+        [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    inst.timeRange = CMTimeRangeMake(t0, CMTimeSubtract(t1, t0));
+    inst.layerInstructions = lis;
+    [instructions addObject:inst];
+  }
+
+  AVMutableVideoComposition *videoComposition =
+      [AVMutableVideoComposition videoComposition];
+  videoComposition.renderSize = renderSize;
+  videoComposition.frameDuration =
+      (CMTIME_IS_VALID(frameDuration) && CMTimeGetSeconds(frameDuration) > 0.0)
+          ? frameDuration
+          : CMTimeMake(1, 30);
+  videoComposition.instructions = instructions;
+
+  RNVPExportRequest *request = [[RNVPExportRequest alloc]
+      initWithComposedAsset:composition
+           videoComposition:videoComposition
+                   audioMix:nil
+                     output:outputURL
+                   metadata:baseAsset.metadata
+                       stop:stopToken
+                   progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
+    if (error) {
+      if ([exportError.domain isEqualToString:RNVPExportSessionErrorDomain] &&
+          exportError.code == RNVPExportSessionErrorCodeCancelled) {
+        *error = makeError(RNVPRemuxerErrorCodeCancelled,
+                           @"Overlay compose aborted.");
+      } else {
+        *error = exportError ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
+                                          @"overlay compose: export failed.");
       }
     }
     return NO;

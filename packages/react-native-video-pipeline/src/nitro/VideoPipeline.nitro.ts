@@ -185,6 +185,27 @@ export interface Clip {
   /** seconds on output timeline. */
   outputStart: number;
   transform?: ClipTransform;
+  /**
+   * Track index for multi-track composition (#17). 0 (or omitted) is the base
+   * timeline; a higher index is an overlay/PiP track composited on top, in
+   * ascending z-order. Overlay-track clips play over their own
+   * `[outputStart, outputStart+sourceDuration]` window.
+   */
+  track?: number;
+  /**
+   * Output placement for an overlay-track clip, in normalized output
+   * coordinates (0..1; origin top-left). Omitted = fill the frame. Ignored on
+   * the base track (0), which always fills the frame.
+   */
+  frame?: TrackFrame;
+}
+
+/** Normalized (0..1) output-space rectangle for an overlay-track clip (#17). */
+export interface TrackFrame {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 export interface ClipTransform {

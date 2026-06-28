@@ -192,6 +192,27 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
 + (instancetype)new NS_UNAVAILABLE;
 @end
 
+/// One overlay-track (PiP) clip composited on top of a base timeline (#17).
+/// @c frame is the destination rect in **normalized** output coordinates
+/// (0..1, origin top-left); @c zOrder sets stacking (higher = on top).
+@interface RNVPOverlayTrackSource : NSObject
+@property(nonatomic, readonly) NSURL *sourceURL;
+@property(nonatomic, readonly) double sourceStart;
+@property(nonatomic, readonly) double sourceDuration;
+@property(nonatomic, readonly) double outputStart;
+@property(nonatomic, readonly) CGRect frame;  // normalized 0..1
+@property(nonatomic, readonly) NSInteger zOrder;
+
+- (instancetype)initWithSourceURL:(NSURL *)sourceURL
+                      sourceStart:(double)sourceStart
+                   sourceDuration:(double)sourceDuration
+                      outputStart:(double)outputStart
+                            frame:(CGRect)frame
+                           zOrder:(NSInteger)zOrder NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+@end
+
 @interface RNVPRemuxer (Concat)
 
 /// Concat-by-remux: copy compressed video samples from @p sources in spec
@@ -258,6 +279,23 @@ typedef NS_ENUM(NSInteger, RNVPFlipAxis) {
                           toURL:(NSURL *)outputURL
                            stop:(nullable RNVPStopToken *)stop
                           error:(NSError *_Nullable __autoreleasing *)error;
+
+/// Composite overlay/PiP tracks (#17) on top of an already-rendered base
+/// timeline @p baseURL (full-frame). Each overlay in @p overlays is scaled and
+/// positioned into its normalized @c frame and shown over its
+/// @c [outputStart, outputStart+sourceDuration] window, stacked by @c zOrder.
+/// Re-encodes (HighestQuality). The base soundtrack is carried through; overlay
+/// audio is dropped in v1. @p baseURL is expected at @p renderSize.
+///
+/// Returns @c YES on success; on failure populates @p error and deletes any
+/// partial output file.
++ (BOOL)composeOverlayTracks:(NSURL *)baseURL
+              overlaySources:(NSArray<RNVPOverlayTrackSource *> *)overlays
+                  renderSize:(CGSize)renderSize
+               frameDuration:(CMTime)frameDuration
+                       toURL:(NSURL *)outputURL
+                        stop:(nullable RNVPStopToken *)stop
+                       error:(NSError *_Nullable __autoreleasing *)error;
 
 @end
 
