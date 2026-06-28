@@ -26,6 +26,7 @@ import type {
   RenderSpec,
   SynthesizeOutputSpec,
 } from './types';
+import { createWorkletDispatcher, type WorkletFrameMeta } from './worklet-compose';
 
 export interface TrimOptions extends RenderOptions {
   startSec: number;
@@ -507,12 +508,53 @@ async function runCompose(
   // re-read the spec. Empty on the synthesize path (no source clips).
   const clipTimeline = spec.clips ?? [];
   const fps = spec.output.fps;
+
+  // Experimental off-thread path (#34): run `drawFrame` on a worklets-core
+  // context instead of inline on the JS thread. Built once per render; a
+  // missing optional peer dep rejects up front rather than per frame.
+  const dispatcher = options?.offthread
+    ? createWorkletDispatcher(drawFrame, () => controller?.finish())
+    : undefined;
+  if (options?.offthread === true && dispatcher === undefined) {
+    fail(
+      'offthread compose requires react-native-worklets-core to be installed (optional peer dependency)',
+    );
+  }
+
+  /** Shared per-frame clip context, computed on the JS thread either way. */
+  const frameMeta = (timeSec: number, frameIndex: number): WorkletFrameMeta => {
+    const activeClip = activeClipFor(clipTimeline, timeSec);
+    const clipId = activeClip !== undefined ? clipIds?.[activeClip.index] : undefined;
+    return {
+      frameIndex,
+      timeSec,
+      elapsedMs: Date.now() - renderStartMs,
+      ...(fps !== undefined ? { fps } : {}),
+      ...(activeClip !== undefined
+        ? {
+            clip: {
+              clipIndex: activeClip.index,
+              sourceUri: activeClip.clip.uri,
+              sourceTimeSec: activeClip.clip.sourceStart + (timeSec - activeClip.clip.outputStart),
+            },
+          }
+        : {}),
+      ...(clipId !== undefined ? { clipId } : {}),
+    };
+  };
+
   const wrapped = (
     target: FrameTarget,
     source: FrameSource | undefined,
     frameIndex: number,
     timeSec: number,
-  ): boolean => {
+  ): boolean | Promise<boolean> => {
+    if (dispatcher !== undefined) {
+      // Off-thread: dispatch to the worklet context and resolve `true` once it
+      // has written the frame. The native pump awaits this promise, so the
+      // FrameTarget stays valid for the worklet's duration.
+      return dispatcher(target, source, frameMeta(timeSec, frameIndex)).then(() => true);
+    }
     const activeClip = activeClipFor(clipTimeline, timeSec);
     const clipId = activeClip !== undefined ? clipIds?.[activeClip.index] : undefined;
     const ctx: FrameDrawerContext = {
@@ -549,7 +591,17 @@ async function runCompose(
   };
 
   try {
-    await native.renderCompose(spec, token, wrapped, options?.onProgress);
+    // The Nitro callback is typed `=> boolean`, but the generated C++ shape is
+    // `Promise<bool>` and the native pump awaits it — so returning a Promise
+    // from the off-thread path is correct at runtime. Cast to satisfy the
+    // narrower JS-facing type.
+    const composeCallback = wrapped as unknown as (
+      target: FrameTarget,
+      source: FrameSource | undefined,
+      frameIndex: number,
+      timeSec: number,
+    ) => boolean;
+    await native.renderCompose(spec, token, composeCallback, options?.onProgress);
     if (controller !== undefined) controller._markDone();
   } catch (err) {
     if (signal?.aborted === true || controller?.state === 'aborted') {
@@ -619,6 +671,7 @@ function pickRenderOptions(opts: RenderOptions): RenderOptions {
   if (opts.signal !== undefined) out.signal = opts.signal;
   if (opts.controller !== undefined) out.controller = opts.controller;
   if (opts.onProgress !== undefined) out.onProgress = opts.onProgress;
+  if (opts.offthread !== undefined) out.offthread = opts.offthread;
   return out;
 }
 

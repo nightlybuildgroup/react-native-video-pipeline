@@ -207,6 +207,23 @@ export interface RenderOptions {
   /** Graceful finish for open-ended renders; see `VideoRenderController`. */
   controller?: VideoRenderController;
   onProgress?: (p: Progress) => void;
+  /**
+   * **Experimental (#34).** `compose`/`synthesize` only. When `true`, the
+   * `'worklet'` `drawFrame` runs on a `react-native-worklets-core` context
+   * (off the React JS thread) instead of inline on the JS thread: each frame's
+   * `FrameTarget`/`FrameSource` HybridObjects are boxed (`NitroModules.box`),
+   * handed to the worklet context, and `unbox()`ed inside the worklet. Requires
+   * `react-native-worklets-core` to be installed (it's an optional peer dep) —
+   * otherwise the render rejects with `InvalidSpec`. Ignored by trim/flip/stamp.
+   *
+   * **Status:** experimental, not on by default. The off-thread runner is a
+   * `'worklet'`, so it only executes once this library is built with the
+   * `react-native-worklets-core` Babel plugin applied; without it, worklets-core
+   * rejects the runner at runtime. Per-frame pixel-correctness is verified on a
+   * device/simulator (host unit tests have no JSI/worklets runtime). Tracked by
+   * #34.
+   */
+  offthread?: boolean;
 }
 
 // ---------------------------------------------------------------------------
