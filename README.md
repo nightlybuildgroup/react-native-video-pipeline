@@ -105,7 +105,7 @@ import { Video, Overlay } from 'react-native-video-pipeline';
 
 await Video.stamp(sourceUri, {
   outPath: `${dir}/stamped.mp4`,
-  watermark: Overlay.Image({ uri: logoUri, anchor: 'br', size: { w: 0.2 } }),
+  watermark: Overlay.Image({ uri: logoUri, anchor: 'br', size: { width: { unit: 'ratio', value: 0.2 } } }),
   metadata: { software: 'MyApp 1.4', creationDate: new Date() },
 });
 ```
