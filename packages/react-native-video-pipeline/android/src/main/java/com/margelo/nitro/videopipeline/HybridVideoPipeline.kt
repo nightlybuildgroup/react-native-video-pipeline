@@ -989,10 +989,11 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
   /// Overlay-track audio is dropped; the base audio honours passthrough / mute /
   /// replace (#52: replace muxes a separate soundtrack on a parallel sequence).
   /// Spec-level overlays (watermarks) composite on top of the whole output as a
-  /// composition-level effect (#52). Remaining limit (documented in
-  /// docs/rendering-android.md): base-track overlaps combined with PiP overlay
-  /// tracks still reject — that needs the crossfade compositor composed with the
-  /// PiP one.
+  /// composition-level effect (#52). Base-track overlaps are crossfade-dissolved
+  /// in a first pass (#52, mirroring iOS): the base renders to a temp via
+  /// runCompositeCrossfade — which resolves the audio.mode — and the overlay
+  /// tracks then composite on top of that temp here (the PiP pass carries the
+  /// temp's audio through). A non-overlapping base skips the extra pass.
   ///
   /// Resolve every spec-level overlay (decode bitmaps / rasterize text) on the
   /// worker. The TransformerRunner run call takes ownership and recycles the
@@ -1029,6 +1030,8 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     return Promise.parallel {
+      // The crossfaded-base temp for an overlapping base (#52); deleted on exit.
+      var baseTemp: File? = null
       try {
         val output = spec.output
         if (spec.duration != null) {
@@ -1046,17 +1049,15 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             "overlay tracks (track > 0) require at least one base-track (track 0) clip"
           )
         }
-        // The base track is a normal timeline; overlaps among base clips are
-        // crossfade-only (not yet on Android — #43). Gaps are allowed.
+        // The base track is a normal timeline. Gaps are allowed. An overlap (a
+        // base clip starting before the previous one ends) is crossfade-dissolved
+        // in a first pass (#52, mirroring iOS): the base is rendered to a temp via
+        // runCompositeCrossfade, then the overlay/PiP tracks composite on top of
+        // that temp in the second pass. A non-overlapping base skips pass 1.
         var basePrevEnd = 0.0
+        var baseHasOverlap = false
         baseClips.forEach { c ->
-          if (c.outputStart < basePrevEnd - 1e-3) {
-            throw VideoPipelineInvalidSpecException(
-              "base-track overlaps combined with overlay (PiP) tracks are not " +
-                "supported on Android yet (#52); overlay tracks compose on top of " +
-                "a non-overlapping base — render the crossfade in a separate pass"
-            )
-          }
+          if (c.outputStart < basePrevEnd - 1e-3) baseHasOverlap = true
           basePrevEnd = c.outputStart + c.sourceDuration
         }
         // Spec-level overlays (watermarks) composite on top of the whole PiP
@@ -1105,6 +1106,122 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         val baseEff = baseClips.indices.map { effDur(baseClips[it], baseInfos[it]) }
         val totalDurationSec = baseClips.last().outputStart + baseEff.last()
 
+        // Pass 1 (#52): an overlapping base is crossfade-dissolved to a temp via
+        // runCompositeCrossfade, then the overlay/PiP tracks composite on top of
+        // that temp below (mirrors iOS: crossfade the base, then composeOverlay).
+        // The audio.mode is resolved in THIS pass — mute / replace / passthrough
+        // (volume-ramped per clip) — so the PiP pass below just carries the temp's
+        // audio through (pipMuteBase = false, pipReplaceUri = null). A
+        // non-overlapping base is rendered in one pass, exactly as before.
+        val effectiveBaseClips: List<Clip>
+        val effectiveBaseInfos: List<VideoInfo>
+        val pipMuteBase: Boolean
+        val pipReplaceUri: String?
+        if (baseHasOverlap) {
+          // Re-check the adjacent-pair overlap invariant for the base (JS enforces
+          // it; re-check here so a direct native caller can't slip an invalid
+          // overlap shape past runCompositeCrossfade, which only requires size>=2).
+          // Mirrors renderCompositeCrossfade.
+          for (i in 1 until baseClips.size) {
+            val start = baseClips[i].outputStart
+            val prevStart = baseClips[i - 1].outputStart
+            val prevEnd = prevStart + baseEff[i - 1]
+            if (start < prevStart - 1e-3) {
+              throw VideoPipelineInvalidSpecException(
+                "base crossfade: clip $i starts before the previous clip — an overlap " +
+                  "may only reach back into the immediately preceding clip"
+              )
+            }
+            if (i >= 2) {
+              val prevPrevEnd = baseClips[i - 2].outputStart + baseEff[i - 2]
+              if (start < prevPrevEnd - 1e-3) {
+                throw VideoPipelineInvalidSpecException(
+                  "base crossfade: clip $i overlaps two clips back — only adjacent-pair " +
+                    "overlaps are supported"
+                )
+              }
+            }
+            if (start + baseEff[i] < prevEnd - 1e-3) {
+              throw VideoPipelineInvalidSpecException(
+                "base crossfade: clip $i is fully contained in the previous clip — not supported"
+              )
+            }
+          }
+          val temp = File(ctx.cacheDir, "rnvp-pip-base-$renderToken.mp4")
+            .apply { if (exists()) delete() }
+          baseTemp = temp
+          val muteAll = spec.audio?.mode == AudioMode.MUTE
+          val baseCfClips = baseClips.indices.map { i ->
+            val clip = baseClips[i]
+            val info = baseInfos[i]
+            val t = clip.transform
+            val isRealTrim = clip.sourceStart > 1e-3 || clip.sourceDuration < info.durationSec - 0.05
+            TransformerRunner.CrossfadeClip(
+              spec = TransformerRunner.Spec(
+                sourceUri = clip.uri,
+                outputPath = temp.absolutePath,
+                sourceWidth = info.codedWidth.roundToInt(),
+                sourceHeight = info.codedHeight.roundToInt(),
+                startSec = if (isRealTrim) clip.sourceStart else 0.0,
+                durationSec = if (isRealTrim) clip.sourceDuration else 0.0,
+                rotate = t?.rotate?.roundToInt() ?: -1,
+                flipH = t?.flipH ?: false,
+                flipV = t?.flipV ?: false,
+                cropX = t?.crop?.x ?: 0.0,
+                cropY = t?.crop?.y ?: 0.0,
+                cropW = t?.crop?.w ?: 0.0,
+                cropH = t?.crop?.h ?: 0.0,
+                outWidth = canvasW,
+                outHeight = canvasH,
+                fps = resolveMedia3TargetFps(output.fps, info.fps),
+                hevc = output.codec == VideoCodec.HEVC,
+                bitrate = output.bitrate?.roundToInt(),
+                outCanvasW = canvasW,
+                outCanvasH = canvasH,
+                removeAudio = muteAll,
+                audioReplacementUri = replaceUri,
+                outputDurationSec = totalDurationSec,
+              ),
+              outputStartSec = clip.outputStart,
+              effDurSec = baseEff[i],
+            )
+          }
+          // Pass-1 progress is omitted (the visible progress is the PiP pass);
+          // folding two encode passes into one ramp would add little.
+          TransformerRunner.runCompositeCrossfade(
+            ctx, baseCfClips, totalDurationSec, emptyList(), stopToken, progress = null,
+          )
+          effectiveBaseClips = listOf(
+            Clip(
+              uri = temp.absolutePath,
+              sourceStart = 0.0,
+              sourceDuration = totalDurationSec,
+              outputStart = 0.0,
+              transform = null,
+              track = 0.0,
+              frame = null,
+            )
+          )
+          effectiveBaseInfos = listOf(ProbeRunner.info(temp.absolutePath))
+          pipMuteBase = false
+          pipReplaceUri = null
+        } else {
+          effectiveBaseClips = baseClips
+          effectiveBaseInfos = baseInfos
+          pipMuteBase = spec.audio?.mode == AudioMode.MUTE
+          pipReplaceUri = replaceUri
+        }
+        // The crossfaded temp spans exactly the base timeline by construction, so
+        // use totalDurationSec rather than re-clamping against the temp's probed
+        // container duration (which can drift by a frame). For a non-overlapping
+        // base, derive each clip's effective duration as before.
+        val effBaseEff = if (baseHasOverlap) {
+          listOf(totalDurationSec)
+        } else {
+          effectiveBaseClips.indices
+            .map { effDur(effectiveBaseClips[it], effectiveBaseInfos[it]) }
+        }
+
         fun buildSpec(
           clip: Clip,
           info: VideoInfo,
@@ -1145,20 +1262,21 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           )
         }
 
-        val muteBase = spec.audio?.mode == AudioMode.MUTE
-        val baseSpecs = baseClips.indices.map { i ->
+        val baseSpecs = effectiveBaseClips.indices.map { i ->
           val leadingGap = if (i == 0) {
-            baseClips[i].outputStart
+            effectiveBaseClips[i].outputStart
           } else {
-            baseClips[i].outputStart - (baseClips[i - 1].outputStart + baseEff[i - 1])
+            effectiveBaseClips[i].outputStart -
+              (effectiveBaseClips[i - 1].outputStart + effBaseEff[i - 1])
           }.coerceAtLeast(0.0)
           // Replace rides a parallel sequence (TransformerRunner); tag every base
           // spec so buildClipSequence strips the source audio. removeAudio stays
-          // mute-only — replace is not a mute.
+          // mute-only — replace is not a mute. For an overlapping base these are
+          // both no-ops (audio was resolved into the temp in pass 1).
           buildSpec(
-            baseClips[i], baseInfos[i], leadingGap,
-            removeAudio = muteBase,
-            audioReplacementUri = replaceUri,
+            effectiveBaseClips[i], effectiveBaseInfos[i], leadingGap,
+            removeAudio = pipMuteBase,
+            audioReplacementUri = pipReplaceUri,
           )
         }
 
@@ -1215,6 +1333,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       } catch (e: Transcoder.InvalidSpecException) {
         throw VideoPipelineInvalidSpecException(e.message ?: "transcode rejected")
       } finally {
+        baseTemp?.let { runCatching { it.delete() } }
         guard.end()
         RenderTokenRegistry.unregisterToken(renderToken)
       }
