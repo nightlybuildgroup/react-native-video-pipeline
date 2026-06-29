@@ -2,7 +2,7 @@
 
 Offline video editing for React Native (iOS + Android) built on Nitro Modules. Trim, flip, stamp, compose, synthesize, and probe — no FFmpeg, no network, no realtime pacing.
 
-> **Status:** pre-alpha (v0.1 scaffolding). API may change before the first tagged release.
+> **Status:** v0.4.x (pre-1.0). Trim, flip, stamp, compose, synthesize, and probe all work on iOS and Android. The public API may still change before 1.0.
 
 - **iOS 13+** via AVFoundation
 - **Android API 24+** via Media3 Transformer
@@ -14,14 +14,26 @@ Offline video editing for React Native (iOS + Android) built on Nitro Modules. T
 
 ```sh
 yarn add react-native-video-pipeline react-native-nitro-modules react-native-worklets-core
-yarn add -D babel-plugin-video-pipeline
 ```
 
-`react-native-nitro-modules` and `react-native-worklets-core` are required peer dependencies. `@shopify/react-native-skia` and `react-native-reanimated` are optional peers — only consumers of the worklet `compose` / `synthesize` path need them.
+`react-native-nitro-modules` and `react-native-worklets-core` are required peer dependencies. `@shopify/react-native-skia` is an optional peer — only the Skia compose path (`drawWithSkia`) needs it. You do **not** need `react-native-reanimated`; see the [build-time worklet lint](#setup-babel-plugin-video-pipeline-optional-build-time-lint) note below. To read and write files you also need a filesystem library — see [Filesystem paths](#filesystem-paths).
 
 ## Quickstart
 
 The library exposes a single `Video` namespace plus an `Overlay` builder. Every operation writes to an `outPath` you supply.
+
+### Filesystem paths
+
+The examples below read a `sourceUri` / `logoUri` and write to `` `${dir}/out.mp4` ``. React Native core ships **no** API for a writable directory or for picking a source file, so bring a filesystem library and derive the paths yourself — e.g. [`@dr.pogodin/react-native-fs`](https://github.com/birdofpreyru/react-native-fs) (bare RN) or [`expo-file-system`](https://docs.expo.dev/versions/latest/sdk/filesystem/) (Expo):
+
+```ts
+import { TemporaryDirectoryPath } from '@dr.pogodin/react-native-fs';
+
+const dir = TemporaryDirectoryPath;            // a writable directory
+const sourceUri = `file://${dir}/input.mp4`;   // a file your app downloaded/recorded
+```
+
+All `outPath` and `uri` values are plain filesystem paths or `file://` URIs.
 
 ### Remux — trim without re-encoding
 
@@ -84,11 +96,15 @@ const info = await Video.info(sourceUri);
 // { width, height, fps, durationSec, codec, container, hasAudio, isHDR, ... }
 ```
 
-## Setup: babel-plugin-video-pipeline (strongly recommended)
+## Setup: babel-plugin-video-pipeline (optional, build-time lint)
 
-`Video.compose` and `Video.synthesize` accept a `drawFrame` callback that runs on the Reanimated UI runtime. Reanimated requires every such function to begin with a `'worklet';` directive so it can be serialized onto the UI thread. Forgetting the directive produces a runtime crash on the first frame with an error that's hard to trace back to the call site.
+`Video.compose` and `Video.synthesize` take a `drawFrame` callback that must begin with a `'worklet';` directive. **Today that directive is enforced at build time only** — `drawFrame` currently runs on the JS thread ([#34](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/34)), so you do **not** need `react-native-reanimated` or any worklet babel transform to run the compose / synthesize examples; the default React Native preset is enough (that's exactly what `apps/bare-example` uses). The directive is required so consumer code is ready for the planned move to a dedicated worklet runtime.
 
-`babel-plugin-video-pipeline` catches this at build time. Add it to your `babel.config.js`:
+`babel-plugin-video-pipeline` is an optional build-time lint that catches a missing directive before it bites: it fails the bundle if an inline function passed as `drawFrame` to `Video.compose` / `Video.synthesize` doesn't start with `'worklet';`. To enable it:
+
+```sh
+yarn add -D babel-plugin-video-pipeline
+```
 
 ```js
 // babel.config.js
@@ -96,12 +112,13 @@ module.exports = {
   presets: ['module:@react-native/babel-preset'],
   plugins: [
     'babel-plugin-video-pipeline',
-    'react-native-reanimated/plugin', // must come after
+    // If you also use Reanimated for your own reasons, its plugin must come last:
+    // 'react-native-reanimated/plugin',
   ],
 };
 ```
 
-The plugin inspects any inline function literal passed as `drawFrame` to `Video.compose` / `Video.synthesize` and fails the bundle if the function body does not start with `'worklet';`. Passing a named identifier (e.g. `drawFrame: myDrawer`) is allowed — the plugin only checks inline literals. The library never runs the directive check at runtime; the guarantee is entirely build-time.
+The plugin only inspects inline function literals; passing a named identifier (e.g. `drawFrame: myDrawer`) is allowed. The library never runs the directive check at runtime — the guarantee is entirely build-time.
 
 ## Docs
 
@@ -110,7 +127,7 @@ The plugin inspects any inline function literal passed as `drawFrame` to `Video.
 - **[Rendering — iOS](../../docs/rendering-ios.md)** — how the three iOS render paths share `CVPixelBuffer`
 - **[Rendering — Android](../../docs/rendering-android.md)** — Media3 + AHardwareBuffer pipeline and Y-flip discipline
 
-The `apps/bare-example` and `apps/expo-example` workspaces in this repo are runnable consumer apps for each path.
+The `apps/bare-example` workspace in this repo is a runnable consumer app covering each path. The package also ships an Expo config plugin (`app.plugin.js`), so it works in Expo prebuild projects; a dedicated `apps/expo-example` app is not in the repo yet ([#71](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/71)).
 
 ## Invariants
 

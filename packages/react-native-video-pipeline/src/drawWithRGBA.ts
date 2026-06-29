@@ -15,9 +15,8 @@ import type { FrameDrawer, FrameDrawerContext } from './nitro/VideoPipeline.nitr
  * - `Video.synthesize` (null-input) → output is H.264, which has no alpha
  *   channel. Whatever alpha you write is discarded by the encoder. Write
  *   `a = 255` unless you have a specific reason not to.
- * - `Video.compose` over a source clip (future; not in v0.1) → alpha is
- *   the blend key: 0 = source wins, 255 = your pixel wins, in-between is
- *   mixed.
+ * - `Video.compose` over a source clip → alpha is the blend key: 0 = source
+ *   wins, 255 = your pixel wins, in-between is mixed.
  */
 export type RGBADrawer = (pixels: Uint8Array, ctx: FrameDrawerContext) => void;
 
