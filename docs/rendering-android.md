@@ -159,15 +159,27 @@ hand-rolled MediaCodec/EOS plumbing:
 - **Crop / rotate / flip** → `Effects`: `Crop` (source-pixel rect mapped to
   NDC), `ScaleAndRotateTransformation` (rotation is clockwise per the public
   contract → negated for Media3; flips are scale ±1).
-- **Explicit output size** → `Presentation`. Either dimension alone is enough:
-  the router resolves `(output.width ?: fallbackW, output.height ?: fallbackH)`
-  where the fallback is the crop rect (or source), swapped for a quarter-turn
-  rotation — so a single requested dimension stretches that axis and keeps the
-  other at content size, matching iOS `makeTranscodeTarget`. When neither
-  dimension is pinned (and there is no overlay), no `Presentation` is added and
-  Media3 derives the size (a 90° rotation yields portrait output without the
-  caller pinning dimensions). A single dimension already forces a re-encode, so
-  honoring it never costs the transmux fast path.
+- **Explicit output size** → `Presentation` with `LAYOUT_STRETCH_TO_FIT`. Either
+  dimension alone is enough: the router resolves
+  `(output.width ?: fallbackW, output.height ?: fallbackH)` where the fallback is
+  the crop rect (or source), swapped for a quarter-turn rotation — so a single
+  requested dimension stretches that axis and keeps the other at content size,
+  matching iOS `makeTranscodeTarget`. The layout is **stretch**, not scale-to-fit:
+  the content is scaled non-uniformly to *fill* the canvas (no letterbox /
+  pillarbox bars when the canvas aspect differs from the source), matching the
+  iOS transcoder's non-uniform `CGAffineTransformMakeScale` to the render size.
+  The output frame size is the requested width×height under either layout — only
+  the in-frame content scaling differs. When neither dimension is pinned (and
+  there is no overlay), no `Presentation` is added and Media3 derives the size (a
+  90° rotation yields portrait output without the caller pinning dimensions). A
+  single dimension already forces a re-encode, so honoring it never costs the
+  transmux fast path.
+  - **Coded vs displayed dimensions:** a hardware AVC encoder may store a
+    portrait frame as a coded landscape frame plus a rotation flag (observed on
+    the API 36 emulator: a displayed 80×120 output is coded 120×80 + rotation 90).
+    The displayed size is correct; tests reading dimensions must apply rotation
+    (e.g. decode a frame) rather than trusting `METADATA_KEY_VIDEO_WIDTH/HEIGHT`,
+    which report the pre-rotation coded grid.
 - **Target fps** → `FrameDropEffect` when `output.fps` is **below** the source
   rate. Media3 has no frame interpolation, so it can only drop frames: a target
   equal to the source is a no-op, and a target *above* the source rate is

@@ -565,22 +565,60 @@ class RenderTransformInstrumentedTest {
     val src = synthFixture("out-w-only")
     val out = File(ctx.cacheDir, "xform-out-w-only.mp4").absolutePath
     // Request width=80 only on a 160x120 source. Height falls back to source
-    // (120). Media3 may align to even dims, so allow ±2px.
+    // (120) → displayed 80x120. Use displayedDimensions(), not dimensions():
+    // the API 36 hardware AVC encoder stores this portrait frame as a coded
+    // 120x80 + rotation=90 flag, so METADATA_KEY_VIDEO_WIDTH/HEIGHT report the
+    // pre-rotation 120x80 (#49). Media3 may align to even dims, so allow ±2px.
     TransformerRunner.run(ctx, spec(src, out, outWidth = 80), stopToken = null, progress = null)
-    val (w, h) = dimensions(out)
+    val (w, h) = displayedDimensions(out)
     assertTrue("requested width honored ~80 (got $w)", abs(w - 80) <= 2)
     assertTrue("height falls back to source ~120 (got $h)", abs(h - 120) <= 2)
+    assertNoLetterbox(out)
   }
 
   @Test
   fun singleOutputHeightResizesAndFallsBackOnWidth() {
     val src = synthFixture("out-h-only")
     val out = File(ctx.cacheDir, "xform-out-h-only.mp4").absolutePath
-    // Request height=60 only on a 160x120 source. Width falls back to source (160).
+    // Request height=60 only on a 160x120 source. Width falls back to source
+    // (160) → displayed 160x60. See the width test for why displayedDimensions().
     TransformerRunner.run(ctx, spec(src, out, outHeight = 60), stopToken = null, progress = null)
-    val (w, h) = dimensions(out)
+    val (w, h) = displayedDimensions(out)
     assertTrue("width falls back to source ~160 (got $w)", abs(w - 160) <= 2)
     assertTrue("requested height honored ~60 (got $h)", abs(h - 60) <= 2)
+    assertNoLetterbox(out)
+  }
+
+  /// Asserts the content fills the whole displayed frame (no letterbox/pillarbox
+  /// bars), confirming the LAYOUT_STRETCH_TO_FIT non-uniform scale that matches
+  /// iOS. The synth fixture is a flat per-frame RGB fill, so a stretched frame is
+  /// uniform edge-to-edge; a letterboxed one would have black bars on the padded
+  /// axis. Sample the four edge midpoints against the centre.
+  private fun assertNoLetterbox(path: String) {
+    val r = MediaMetadataRetriever()
+    try {
+      r.setDataSource(path)
+      val bmp = r.getFrameAtIndex(0) ?: error("no frame 0 in $path")
+      val w = bmp.width
+      val h = bmp.height
+      val center = bmp.getPixel(w / 2, h / 2)
+      // Codec YUV rounding shifts colours a few levels; compare per channel with
+      // a tolerance well below the gap to pure black a bar would introduce.
+      fun close(a: Int, b: Int): Boolean =
+        abs(Color.red(a) - Color.red(b)) <= 12 &&
+          abs(Color.green(a) - Color.green(b)) <= 12 &&
+          abs(Color.blue(a) - Color.blue(b)) <= 12
+      val top = bmp.getPixel(w / 2, 1)
+      val bottom = bmp.getPixel(w / 2, h - 2)
+      val left = bmp.getPixel(1, h / 2)
+      val right = bmp.getPixel(w - 2, h / 2)
+      assertTrue("top edge filled (no letterbox bar)", close(top, center))
+      assertTrue("bottom edge filled (no letterbox bar)", close(bottom, center))
+      assertTrue("left edge filled (no pillarbox bar)", close(left, center))
+      assertTrue("right edge filled (no pillarbox bar)", close(right, center))
+    } finally {
+      runCatching { r.release() }
+    }
   }
 
   @Test
