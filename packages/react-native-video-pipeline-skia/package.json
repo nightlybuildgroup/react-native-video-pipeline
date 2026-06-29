@@ -6,7 +6,7 @@
   "license": "MIT",
   "main": "lib/commonjs/index.js",
   "module": "lib/module/index.js",
-  "types": "lib/typescript/src/index.d.ts",
+  "types": "lib/typescript/commonjs/src/index.d.ts",
   "react-native": "src/index.ts",
   "source": "src/index.ts",
   "files": [
@@ -18,7 +18,34 @@
     "!**/.*"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "bob build",
+    "clean": "del-cli lib",
+    "prepack": "yarn workspace react-native-video-pipeline build && yarn build"
+  },
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "commonjs",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ]
+    ]
   },
   "keywords": [
     "react-native",
@@ -34,6 +61,8 @@
   },
   "devDependencies": {
     "@shopify/react-native-skia": "^2.6.2",
+    "del-cli": "^7.0.0",
+    "react-native-builder-bob": "^0.41.0",
     "typescript": "^5.4.0"
   },
   "publishConfig": {

@@ -7293,6 +7293,8 @@ __metadata:
   resolution: "react-native-video-pipeline-skia@workspace:packages/react-native-video-pipeline-skia"
   dependencies:
     "@shopify/react-native-skia": "npm:^2.6.2"
+    del-cli: "npm:^7.0.0"
+    react-native-builder-bob: "npm:^0.41.0"
     typescript: "npm:^5.4.0"
   peerDependencies:
     "@shopify/react-native-skia": ">=2"
