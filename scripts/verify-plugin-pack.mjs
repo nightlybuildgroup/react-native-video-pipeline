@@ -43,10 +43,24 @@ function run(cmd, args) {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  return `${res.stdout ?? ''}\n${res.stderr ?? ''}`;
+  return {
+    output: `${res.stdout ?? ''}\n${res.stderr ?? ''}`,
+    status: res.status,
+    error: res.error,
+  };
 }
 
-function check(label, output) {
+function check(label, { output, status, error }) {
+  // A packer that errored out (or exited nonzero) may still have printed a
+  // partial manifest before dying — never trust the text in that case.
+  if (error) {
+    console.error(`✗ ${label}: packer failed to run — ${error.message}`);
+    return false;
+  }
+  if (status !== 0) {
+    console.error(`✗ ${label}: packer exited ${status} (no tarball produced)`);
+    return false;
+  }
   const missing = REQUIRED.filter((p) => !output.includes(p));
   if (missing.length > 0) {
     console.error(`✗ ${label}: tarball is MISSING ${missing.join(', ')}`);
