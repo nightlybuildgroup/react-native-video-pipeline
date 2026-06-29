@@ -9,7 +9,10 @@ name: Android Instrumented Tests
 # Matrix rationale (from running these locally):
 #   - API 36 catches hardware-AVC-encoder dimension quirks — #49 (single-dimension
 #     output stored as coded-landscape + rotation flag) only reproduced there.
-#   - API 24 is the library's minSdk floor; a useful second axis.
+#   - API 26 is the floor: the library's own minSdk is 24, but the instrumented
+#     APK is assembled from apps/bare-example/android, which pins minSdk 26 (the
+#     Skia AHardwareBuffer compose path needs __ANDROID_API__ >= 26). A 24-image
+#     emulator can't install a minSdk-26 APK, so 26 is the lowest runnable axis.
 
 on:
   push:
@@ -43,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api-level: [36, 24]
+        api-level: [36, 26]
     env:
       # Build only the emulator's ABI. The debug APK otherwise bundles all four
       # ABIs (~183 MB of native libs) and the default AVD's 6 GB data partition
