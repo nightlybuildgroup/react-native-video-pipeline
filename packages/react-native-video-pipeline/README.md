@@ -45,7 +45,7 @@ await Video.stamp(sourceUri, {
   watermark: Overlay.Image({
     uri: logoUri,
     anchor: 'br',
-    size: { w: 0.2 },
+    size: { width: { unit: 'ratio', value: 0.2 } }, // 20% of output width
   }),
   metadata: { software: 'MyApp 1.4', creationDate: new Date() },
 });
