@@ -1,0 +1,27 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "lib/typescript",
+    // Pin the declaration root to the package dir so emitted types land under
+    // `lib/typescript/<variant>/src/**` (matching the `types` entry point).
+    // Safe here only because `paths` is cleared below — the sibling package
+    // arrives as a node_modules .d.ts, so no first-party source sits outside
+    // this dir. Kept out of tsconfig.json so `typecheck` (which resolves the
+    // sibling's source via `paths`) doesn't trip TS6059.
+    "rootDir": ".",
+    // Build-only override: resolve `react-native-video-pipeline` to its built
+    // package types via node_modules instead of the sibling's source (the
+    // `paths` mapping in tsconfig.json is for `typecheck` against src). With
+    // the mapping cleared, the only first-party sources in the program are
+    // this package's own `src/**`, so `rootDir` stays valid and the sibling
+    // arrives as a .d.ts (allowed outside rootDir). The main library must be
+    // built first; this package's `prepack` builds it before `bob build`, so a
+    // standalone `npm pack`/`publish` from a clean checkout is self-sufficient.
+    "paths": {}
+  },
+  "include": ["src"],
+  "exclude": ["lib", "node_modules", "**/__tests__"]
+}
