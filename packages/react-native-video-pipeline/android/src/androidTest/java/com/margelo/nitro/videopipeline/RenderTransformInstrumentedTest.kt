@@ -594,14 +594,24 @@ class RenderTransformInstrumentedTest {
   /// iOS. The synth fixture is a flat per-frame RGB fill, so a stretched frame is
   /// uniform edge-to-edge; a letterboxed one would have black bars on the padded
   /// axis. Sample the four edge midpoints against the centre.
+  ///
+  /// Frame 0 of the synth pattern is pure black (`patternForFrame(0)` → 0,0,0),
+  /// so black bars would compare *equal* to a black centre and the check would be
+  /// vacuous. Sample a later frame whose fill is solidly non-black, and guard by
+  /// asserting the centre itself is non-black before the edge comparisons.
   private fun assertNoLetterbox(path: String) {
     val r = MediaMetadataRetriever()
     try {
       r.setDataSource(path)
-      val bmp = r.getFrameAtIndex(0) ?: error("no frame 0 in $path")
+      val frameIdx = 5 // patternForFrame(5) = (55, 9, 229) — solidly non-black
+      val bmp = r.getFrameAtIndex(frameIdx) ?: error("no frame $frameIdx in $path")
       val w = bmp.width
       val h = bmp.height
       val center = bmp.getPixel(w / 2, h / 2)
+      assertTrue(
+        "sampled centre is non-black (else the bar check is vacuous), got $center",
+        Color.red(center) + Color.green(center) + Color.blue(center) > 60,
+      )
       // Codec YUV rounding shifts colours a few levels; compare per channel with
       // a tolerance well below the gap to pure black a bar would introduce.
       fun close(a: Int, b: Int): Boolean =
