@@ -18,6 +18,7 @@
     "format": "biome format --write .",
     "test": "jest",
     "test:native": "bash scripts/test-native.sh",
+    "verify:pack": "node scripts/verify-plugin-pack.mjs",
     "test:golden": "node scripts/golden.mjs",
     "test:e2e:ios": "maestro test .maestro/e2e-trim-synth-stamp-ios.yaml",
     "test:e2e:android": "maestro test .maestro/e2e-trim-synth-stamp-android.yaml",
