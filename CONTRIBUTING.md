@@ -56,7 +56,7 @@ yarn nitrogen          # regenerate native bindings from the Nitro spec
 | `yarn test:golden` | Cross-platform golden pixel-hash suite (see [`__tests__/golden/README.md`](./__tests__/golden/README.md)). App-free: renders on the Android emulator + iOS host, compares signatures. `--update` regenerates references. | booted Android emulator + macOS/Xcode |
 | `yarn test:e2e:android` / `yarn test:e2e:ios` | Maestro smoke flow (synthesize + trim + stamp) against `bare-example` (see [`.maestro/README.md`](./.maestro/README.md)) | installed app + Metro + Maestro |
 | `yarn smoke:ios` | lint + typecheck + `test` + `test:native`, then a `bare-example` simulator build | macOS + Xcode + simulator |
-| Android instrumented | `./gradlew :react-native-video-pipeline:connectedDebugAndroidTest` (overlay/foreground-service/golden render) | booted Android emulator |
+| Android instrumented | `./gradlew :react-native-video-pipeline:connectedDebugAndroidTest` (overlay/foreground-service/golden render + the Media3 composite paths). Run locally before landing Android changes; the matching CI workflow is manual-only — see [Continuous integration](#continuous-integration). | booted Android emulator |
 
 ### Running the example apps
 
@@ -118,8 +118,26 @@ For agent-driven task commits, prefix the subject with the task ID — e.g. `fea
 ## Pull requests
 
 - PRs target `main`. Reference the PRD section(s) the change implements or the issue it closes.
-- CI (once `T005` lands) will run `yarn lint`, `yarn typecheck`, `yarn test`, the iOS simulator build + Jest integration suite, the Android emulator build + Jest integration suite, and the golden-file pixel-hash suite. All jobs must be green.
 - If your change touches the Nitro spec, confirm `yarn nitrogen` produces a clean diff *outside* your PR (the generated files stay gitignored).
+
+---
+
+## Continuous integration
+
+CI lives under [`.github/workflows/`](./.github/workflows/). It is being built out incrementally; the planned full gate (`yarn lint`, `yarn typecheck`, `yarn test`, the iOS simulator build + Jest integration suite, and the golden-file pixel-hash suite) is tracked separately.
+
+### `android-instrumented.yml`
+
+Runs the Android **instrumented** suite (`connectedDebugAndroidTest`) on a GitHub-hosted emulator across an **API 36 + API 26** matrix. This is the only job that exercises the real Media3 encode/composite pipeline — hardware-encoder behaviour, coded-vs-displayed dimensions/rotation, `OverlayEffect` / `VideoCompositorSettings`, audio muxing — none of which the offline Kotlin compile or host JS/iOS suites can reach.
+
+**This workflow is disabled in CI — it runs only on manual `workflow_dispatch`, not on pushes or PRs.** Booting a GitHub-hosted emulator per run is too slow/expensive to gate every push/PR for this project, so the instrumented suite is run **locally against a booted emulator** before landing Android changes ([#56](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/56), closed won't-do). The workflow is kept so it can be dispatched on demand (e.g. to reproduce an API-36-specific failure on a clean image) and so the hard-won setup notes below aren't lost. To re-enable automatic runs, add `push` / `pull_request` triggers back to the `on:` block.
+
+Notes for anyone editing this workflow:
+
+- **API 36 is load-bearing.** [#49](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/49) (single-dimension output stored as coded-landscape + rotation) only reproduced on API 36's hardware AVC encoder. Don't drop it from the matrix. The lower leg is **API 26**, not the library's `minSdk` of 24: the instrumented APK is assembled from `apps/bare-example/android`, which pins `minSdkVersion = 26` (the Skia AHardwareBuffer compose path needs `__ANDROID_API__ >= 26`), so a 24-image emulator can't install it.
+- **Build one ABI.** `reactNativeArchitectures=x86_64` is forced via `ORG_GRADLE_PROJECT_reactNativeArchitectures` so the APK stays small *and* its native `.so` matches the x86_64 emulator image (see the disk-space note above).
+- **Nitrogen runs before Gradle.** `nitrogen/` is gitignored; the Android build applies a generated autolinking `.gradle` file, so `yarn nitrogen` must run first.
+- The native toolchain (`ndk;27.1.12297006`, `cmake;3.22.1`, `platforms;android-36`, `build-tools;36.0.0`) is pinned explicitly so the build doesn't depend on the runner image's preinstalled set.
 
 ---
 

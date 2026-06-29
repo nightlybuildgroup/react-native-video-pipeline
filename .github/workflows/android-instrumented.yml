@@ -1,0 +1,140 @@
+name: Android Instrumented Tests
+
+# Runs the Android *instrumented* suite (connectedDebugAndroidTest) on a real
+# emulator — the only thing that exercises the Media3 encode/composite pipeline
+# (hardware encoder behaviour, coded-vs-displayed dims/rotation, OverlayEffect /
+# VideoCompositorSettings, audio muxing). The offline Kotlin compile + host JS /
+# iOS-native suites CI also runs cannot reach any of that. See issue #56.
+#
+# Matrix rationale (from running these locally):
+#   - API 36 catches hardware-AVC-encoder dimension quirks — #49 (single-dimension
+#     output stored as coded-landscape + rotation flag) only reproduced there.
+#   - API 26 is the floor: the library's own minSdk is 24, but the instrumented
+#     APK is assembled from apps/bare-example/android, which pins minSdk 26 (the
+#     Skia AHardwareBuffer compose path needs __ANDROID_API__ >= 26). A 24-image
+#     emulator can't install a minSdk-26 APK, so 26 is the lowest runnable axis.
+
+# DISABLED in CI: the emulator boot + connectedDebugAndroidTest legs are too
+# slow/expensive to run on every push/PR, so we run this suite locally instead
+# (see the "Android instrumented suite" note in CLAUDE.md). The automatic push /
+# pull_request triggers are intentionally removed; the job only runs on manual
+# dispatch. Re-add the triggers below to turn CI back on.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: android-instrumented-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  instrumented:
+    name: connectedDebugAndroidTest (API ${{ matrix.api-level }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [36, 26]
+    env:
+      # Build only the emulator's ABI. The debug APK otherwise bundles all four
+      # ABIs (~183 MB of native libs) and the default AVD's 6 GB data partition
+      # fills up on install; x86_64 also matches the CI emulator image so the
+      # NitroVideoPipeline .so actually loads. See CONTRIBUTING.md "disk space".
+      ORG_GRADLE_PROJECT_reactNativeArchitectures: x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Hardware acceleration for the emulator. ubuntu-latest exposes /dev/kvm
+      # but the default udev rules deny access to the runner user.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Yarn 4 (Berry) is pinned via the root package.json `packageManager` field.
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install JS dependencies
+        run: yarn install --immutable
+
+      # nitrogen/ is gitignored and regenerated; the Android Gradle build applies
+      # nitrogen/generated/android/NitroVideoPipeline+autolinking.gradle, so the
+      # codegen MUST run before any Gradle invocation.
+      - name: Nitrogen codegen
+        run: yarn nitrogen
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Pin the exact native toolchain the example app declares so the build is
+      # deterministic and doesn't depend on the runner image's preinstalled set.
+      - name: Install NDK + CMake + build tools
+        run: |
+          yes | sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1"
+
+      - name: Set up Gradle (with cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: AVD cache
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ matrix.api-level }}
+
+      - name: Create AVD snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          # No -no-snapshot-save here: this step must WRITE the snapshot so the
+          # cache above can store it and the test step boots from it.
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "Generated AVD snapshot for API ${{ matrix.api-level }}."
+
+      - name: Run instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot-save
+          disable-animations: true
+          working-directory: apps/bare-example/android
+          # Each test authors at most ~1 s of tiny-dimension video and bootstraps
+          # its own fixtures (SynthesizeRunner / VideoEncoder) — no binary assets.
+          script: ./gradlew :react-native-video-pipeline:connectedDebugAndroidTest
+
+      - name: Upload test reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports-api-${{ matrix.api-level }}
+          path: |
+            packages/react-native-video-pipeline/android/build/reports/androidTests/**
+            packages/react-native-video-pipeline/android/build/outputs/androidTest-results/**
+          if-no-files-found: ignore

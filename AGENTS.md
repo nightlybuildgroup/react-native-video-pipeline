@@ -35,8 +35,9 @@ Guidance for any coding agent (Codex, Cursor, Aider, etc.) working in this repo.
 - `yarn test:native` — **default for any change to `cpp/**` or `ios/**/*.{h,mm}`**. Compiles against `-sdk macosx` and runs XCTests directly on the host (~6s, no simulator). Covers AVMuxer, AVDemuxer, WorkletFrameBridge, SynthesizeRunner, Remuxer, ComposeRunner, StopToken — all remux / transcode / probe / thumbnail work.
 - `yarn smoke:ios` — **only run when the task exercises the RN → Nitro → native bridge** (JS → Nitro → C++/Obj-C++ at runtime): changes to `src/video.ts`, `src/native.ts`, the Nitro spec, `VideoPipeline.mm`, or anything that needs Metro + Hermes + the HybridObject registry. Otherwise `yarn test:native` is sufficient and ~30× faster. This is what CI will run.
 - iOS build (Pods + `xcodebuild`) and/or Android build (Gradle) when native code changed
+- Android instrumented suite (`connectedDebugAndroidTest`) needs a booted emulator (no host fast-path); gate Android Kotlin edits locally with the offline compile of **both** source sets (`compileDebugKotlin` + `compileDebugAndroidTestKotlin --offline`), then run the full suite against a booted local emulator before landing — that's the gate, not CI. The `.github/workflows/android-instrumented.yml` workflow can run the same suite on a GitHub-hosted API 36 + 26 emulator matrix, but it's **disabled in CI** (manual `workflow_dispatch` only) — the emulator boot is too slow/expensive to gate every push/PR (issue #56, closed won't-do). If dispatched: lower leg is 26, not the lib's minSdk 24, because the bare-example gradle root that builds the test APK pins minSdk 26.
 
-CI is deliberately the last task — local verification is the gate throughout.
+CI is deliberately the last task — local verification is the gate throughout. The first CI workflow to land is `.github/workflows/android-instrumented.yml`.
 
 ---
 
