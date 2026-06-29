@@ -239,13 +239,20 @@ it to the rect) plus `setBackgroundFrameAnchor` at the rect centre, mapped to ND
 the iOS `CGAffineTransform` does). The base input is left full-frame. During a
 transparent-pad frame the overlay contributes alpha 0, so the base shows through.
 
-v1 limits (mirror iOS, enforced in `renderCompositePip`): overlay audio is
-dropped; the base audio honours `passthrough`/`mute` (`audio.mode = 'replace'`
-with overlay tracks rejects — a follow-up); spec-level overlays (watermarks)
-combined with overlay tracks reject (ambiguous z-order against the PiP boxes).
-Unlike iOS — whose `HighestQuality` export preset is H.264-only — the Android
-Transformer re-encodes the composite directly, so an HEVC output and an explicit
-bitrate are honoured for PiP too.
+Audio + static overlays on the PiP path (`renderCompositePip`): overlay-track
+audio is always dropped (mirrors iOS multi-track). The base track honours all
+three `audio.mode`s — `passthrough` keeps the base clips' audio, `mute` drops it,
+and `replace` (#52) strips the base audio and muxes a separate soundtrack on a
+**parallel audio-only sequence** appended after the video sequences (so it isn't a
+video-compositor input and doesn't shift the `inputId`→layer mapping). Spec-level
+overlays (watermarks) compose on top of the whole PiP output via a
+**composition-level** `OverlayEffect` (`Composition.Builder.setEffects`) — the
+natural z-order for a watermark (#52). The one remaining gap: a **base-track
+overlap** combined with PiP overlay tracks still rejects (it needs the crossfade
+ping-pong compositor composed with the PiP one). Unlike iOS — whose
+`HighestQuality` export preset is H.264-only — the Android Transformer re-encodes
+the composite directly, so an HEVC output and an explicit bitrate are honoured for
+PiP too.
 
 ### Timeline-overlap crossfade (#43, parity with iOS #18)
 
@@ -281,7 +288,11 @@ overlap and whose tail ramps `1→0` when it is the outgoing side, so the two
 overlapping audio sequences sum to a crossfade rather than a doubled-volume bump —
 the same envelope the iOS `AVMutableAudioMix` applies. The audio sequences are only
 built when at least one clip actually has audio. `mute` drops audio entirely;
-`audio.mode = 'replace'` rejects on the crossfade path for now (follow-up).
+`audio.mode = 'replace'` (#52) drops the per-clip ramped soundtracks and muxes a
+single replacement on one parallel audio-only sequence instead (the same helper
+the PiP / single / multi paths use). Spec-level overlays (watermarks) likewise
+compose on top of the dissolved output via a composition-level `OverlayEffect`
+(#52).
 
 Only **adjacent-pair** overlaps are supported (a clip overlapping two neighbours
 or fully containing another rejects — enforced in JS and re-checked in

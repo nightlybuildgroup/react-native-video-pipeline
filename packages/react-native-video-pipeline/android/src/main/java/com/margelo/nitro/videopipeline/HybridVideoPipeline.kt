@@ -986,10 +986,39 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
   /// its `[outputStart, +effDur]` window. Runs as one Media3 multi-sequence
   /// [Composition] via [TransformerRunner.runCompositePip].
   ///
-  /// v1 limits (documented in docs/rendering-android.md): overlay audio is
-  /// dropped; the base audio honours passthrough/mute (audio.mode = 'replace'
-  /// with overlay tracks rejects); spec-level overlays (watermarks) combined
-  /// with overlay tracks reject — the z-order against PiP boxes is ambiguous.
+  /// Overlay-track audio is dropped; the base audio honours passthrough / mute /
+  /// replace (#52: replace muxes a separate soundtrack on a parallel sequence).
+  /// Spec-level overlays (watermarks) composite on top of the whole output as a
+  /// composition-level effect (#52). Remaining limit (documented in
+  /// docs/rendering-android.md): base-track overlaps combined with PiP overlay
+  /// tracks still reject — that needs the crossfade compositor composed with the
+  /// PiP one.
+  ///
+  /// Resolve every spec-level overlay (decode bitmaps / rasterize text) on the
+  /// worker. The TransformerRunner run call takes ownership and recycles the
+  /// bitmaps; if resolving a later overlay throws, recycle the ones already
+  /// decoded here so they don't leak. Shared by the PiP and crossfade composite
+  /// paths.
+  private fun resolveSpecOverlays(
+    overlays: Array<Overlay>?,
+  ): ArrayList<Transcoder.ResolvedOverlay> {
+    val resolved = ArrayList<Transcoder.ResolvedOverlay>()
+    try {
+      overlays?.forEach { ov ->
+        resolved.add(
+          when (ov) {
+            is Overlay.First -> Transcoder.resolveImageOverlay(ov.value)
+            is Overlay.Second -> Transcoder.resolveTextOverlay(ov.value)
+          }
+        )
+      }
+    } catch (t: Throwable) {
+      resolved.forEach { runCatching { it.bitmap.recycle() } }
+      throw t
+    }
+    return resolved
+  }
+
   private fun renderCompositePip(
     spec: VideoSpec,
     clips: List<Clip>,
@@ -1030,20 +1059,20 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           }
           basePrevEnd = c.outputStart + c.sourceDuration
         }
-        // Spec-level overlays (watermarks) + overlay tracks have an ambiguous
-        // z-order against the PiP boxes; reject the combo for now (follow-up).
-        if (spec.overlays?.isNotEmpty() == true) {
+        // Spec-level overlays (watermarks) composite on top of the whole PiP
+        // output via a composition-level effect (#52); resolved below, just
+        // before the run call.
+        // Overlay-track audio is always dropped (mirrors iOS multi-track). The
+        // base track honours audio.mode: passthrough keeps the base clips' audio,
+        // mute drops it, and replace (#52) swaps in a separate soundtrack carried
+        // on a parallel audio-only sequence alongside the compositor. Fail loudly
+        // if the replacement has no audio track, like the single-clip path.
+        val replaceUri = spec.audio
+          ?.takeIf { it.mode == AudioMode.REPLACE }
+          ?.replaceUri
+        if (replaceUri != null && !Remuxer.hasAudioTrack(replaceUri)) {
           throw VideoPipelineInvalidSpecException(
-            "static overlays combined with overlay/PiP tracks are not supported " +
-              "yet — render the watermark in a separate pass"
-          )
-        }
-        // Overlay audio is dropped in v1; audio.mode = 'replace' on the base is a
-        // follow-up (the replacement soundtrack would need a parallel sequence
-        // alongside the compositor).
-        if (spec.audio?.mode == AudioMode.REPLACE) {
-          throw VideoPipelineInvalidSpecException(
-            "audio.mode = 'replace' with overlay/PiP tracks is not supported yet"
+            "audio replace — the replacement file has no audio track"
           )
         }
         val ctx = NitroModules.applicationContext?.applicationContext
@@ -1081,6 +1110,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           info: VideoInfo,
           leadingGap: Double,
           removeAudio: Boolean,
+          audioReplacementUri: String? = null,
         ): TransformerRunner.Spec {
           val t = clip.transform
           val rotateDeg = t?.rotate?.roundToInt() ?: -1
@@ -1109,6 +1139,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             outCanvasW = canvasW,
             outCanvasH = canvasH,
             removeAudio = removeAudio,
+            audioReplacementUri = audioReplacementUri,
             outputDurationSec = totalDurationSec,
             leadingGapSec = leadingGap,
           )
@@ -1121,7 +1152,14 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           } else {
             baseClips[i].outputStart - (baseClips[i - 1].outputStart + baseEff[i - 1])
           }.coerceAtLeast(0.0)
-          buildSpec(baseClips[i], baseInfos[i], leadingGap, removeAudio = muteBase)
+          // Replace rides a parallel sequence (TransformerRunner); tag every base
+          // spec so buildClipSequence strips the source audio. removeAudio stays
+          // mute-only — replace is not a mute.
+          buildSpec(
+            baseClips[i], baseInfos[i], leadingGap,
+            removeAudio = muteBase,
+            audioReplacementUri = replaceUri,
+          )
         }
 
         val overlayLayers = overlayClips.indices.map { i ->
@@ -1159,8 +1197,12 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           )
         }
 
+        // Static overlays are resolved last (after every spec validation) so a
+        // rejected spec never leaks a decoded bitmap; runCompositePip takes
+        // ownership and recycles them.
+        val compositionOverlays = resolveSpecOverlays(spec.overlays)
         TransformerRunner.runCompositePip(
-          ctx, baseSpecs, overlayLayers, totalDurationSec, stopToken,
+          ctx, baseSpecs, overlayLayers, totalDurationSec, compositionOverlays, stopToken,
           wrapTransformerProgress(onProgress),
         )
 
@@ -1185,11 +1227,12 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
   /// alpha via [TransformerRunner.runCompositeCrossfade].
   ///
   /// v1 limits: only adjacent-pair overlaps (a clip overlapping two neighbours or
-  /// fully containing another rejects — enforced in JS and re-checked here); the
-  /// base audio honours passthrough (volume-ramped per clip) / mute, while
-  /// `audio.mode = 'replace'` rejects (follow-up). Unlike iOS — whose H.264-only
-  /// export preset rejects an HEVC overlap output — Android re-encodes directly,
-  /// so HEVC and an explicit bitrate are honoured.
+  /// fully containing another rejects — enforced in JS and re-checked here). The
+  /// audio honours all three modes — passthrough (volume-ramped per clip), mute,
+  /// and replace (#52: a separate soundtrack on a parallel sequence). Spec-level
+  /// overlays (watermarks) compose on top via a composition-level effect (#52).
+  /// Unlike iOS — whose H.264-only export preset rejects an HEVC overlap output —
+  /// Android re-encodes directly, so HEVC and an explicit bitrate are honoured.
   private fun renderCompositeCrossfade(
     spec: VideoSpec,
     clips: List<Clip>,
@@ -1208,14 +1251,18 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         if (clips.size < 2) {
           throw VideoPipelineInvalidSpecException("a crossfade overlap needs at least two clips")
         }
-        if (spec.overlays?.isNotEmpty() == true) {
+        // Spec-level overlays (watermarks) composite on top of the dissolved
+        // output via a composition-level effect (#52); resolved below, just
+        // before the run call.
+        // audio.mode: passthrough volume-ramps each clip's audio over the overlap
+        // windows; mute drops it; replace (#52) drops the per-clip soundtracks and
+        // muxes a single replacement on a parallel sequence (TransformerRunner).
+        val replaceUri = spec.audio
+          ?.takeIf { it.mode == AudioMode.REPLACE }
+          ?.replaceUri
+        if (replaceUri != null && !Remuxer.hasAudioTrack(replaceUri)) {
           throw VideoPipelineInvalidSpecException(
-            "static overlays combined with crossfade overlaps are not supported yet"
-          )
-        }
-        if (spec.audio?.mode == AudioMode.REPLACE) {
-          throw VideoPipelineInvalidSpecException(
-            "audio.mode = 'replace' with crossfade overlaps is not supported yet"
+            "audio replace — the replacement file has no audio track"
           )
         }
         val ctx = NitroModules.applicationContext?.applicationContext
@@ -1304,6 +1351,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
             outCanvasW = canvasW,
             outCanvasH = canvasH,
             removeAudio = muteAll,
+            // Only the first clip's spec is read for the replacement (runCompositeCrossfade
+            // uses clips.first().spec), but tag every clip for consistency.
+            audioReplacementUri = replaceUri,
             outputDurationSec = totalDurationSec,
           )
           TransformerRunner.CrossfadeClip(
@@ -1313,8 +1363,11 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           )
         }
 
+        // Resolved last (after every spec validation) so a rejected spec never
+        // leaks a decoded bitmap; runCompositeCrossfade takes ownership.
+        val compositionOverlays = resolveSpecOverlays(spec.overlays)
         TransformerRunner.runCompositeCrossfade(
-          ctx, crossfadeClips, totalDurationSec, stopToken,
+          ctx, crossfadeClips, totalDurationSec, compositionOverlays, stopToken,
           wrapTransformerProgress(onProgress),
         )
 

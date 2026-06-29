@@ -263,7 +263,8 @@ class RenderTransformInstrumentedTest {
     )
     TransformerRunner.runCompositePip(
       ctx, listOf(baseSpec), listOf(overlay),
-      totalDurationSec = frameCount / fps.toDouble(), stopToken = null, progress = null,
+      totalDurationSec = frameCount / fps.toDouble(),
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
     )
     assertTrue("pip output exists", File(out).exists())
     // Output spans the full base duration (~1.0s), not the overlay window.
@@ -308,7 +309,8 @@ class RenderTransformInstrumentedTest {
     )
     TransformerRunner.runCompositePip(
       ctx, listOf(baseSpec), listOf(layer(lowZ), layer(highZ)),
-      totalDurationSec = total, stopToken = null, progress = null,
+      totalDurationSec = total,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
     )
     assertTrue("z-order output exists", File(out).exists())
 
@@ -353,7 +355,8 @@ class RenderTransformInstrumentedTest {
       ),
     )
     TransformerRunner.runCompositeCrossfade(
-      ctx, clips, totalDurationSec = total, stopToken = null, progress = null,
+      ctx, clips, totalDurationSec = total,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
     )
     assertTrue("crossfade output exists", File(out).exists())
     assertEquals(total, durationSec(out), 0.3)
@@ -397,7 +400,8 @@ class RenderTransformInstrumentedTest {
     val total = 1.2 + clipDur // C ends at 2.2
     TransformerRunner.runCompositeCrossfade(
       ctx, listOf(cf(red, 0.0), cf(green, 0.6), cf(blue, 1.2)),
-      totalDurationSec = total, stopToken = null, progress = null,
+      totalDurationSec = total,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
     )
     assertTrue("3-clip crossfade output exists", File(out).exists())
 
@@ -443,12 +447,158 @@ class RenderTransformInstrumentedTest {
           outputStartSec = overlapStart, effDurSec = clipDur,
         ),
       ),
-      totalDurationSec = total, stopToken = null, progress = null,
+      totalDurationSec = total,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
     )
     val mimes = trackMimes(out)
     assertTrue("crossfade output keeps a video track", mimes.any { it.startsWith("video/") })
     assertTrue("crossfade output keeps an audio track", mimes.any { it.startsWith("audio/") })
     assertEquals("crossfade spans the overlap-shortened timeline", total, durationSec(out), 0.3)
+  }
+
+  /// A 40x40 opaque watermark bitmap anchored at the frame centre — a static
+  /// (spec-level) overlay for the composite-path tests (#52).
+  private fun centerWatermark(r: Int, g: Int, b: Int): Transcoder.ResolvedOverlay {
+    val bmp = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)
+      .apply { eraseColor(Color.rgb(r, g, b)) }
+    return Transcoder.ResolvedOverlay(
+      bitmap = bmp,
+      sizeW = null, sizeH = null,
+      anchorX = 0.5, anchorY = 0.5,
+      opacity = 1.0, timeRange = null,
+    )
+  }
+
+  // #52 (1): audio.mode = 'replace' on the PiP composite path. The base audio is
+  // stripped and a separate soundtrack is muxed on a parallel sequence alongside
+  // the compositor; the output keeps a video track and carries the replacement
+  // audio. Mirrors the single-clip transformReplaceSwapsAudioTrack.
+  @Test
+  fun pipReplaceSwapsAudioTrack() {
+    val base = authorAudioVideoFixture("pip-repl-base")
+    val pip = solidFixture("pip-repl-over", 0, 0, 220)
+    val replacement = authorAudioVideoFixture("pip-repl-audio")
+    val out = File(ctx.cacheDir, "pip-replace.mp4").absolutePath
+    File(out).delete()
+    val total = frameCount / fps.toDouble()
+    val baseSpec = spec(base, out, outWidth = width, outHeight = height, audioReplacementUri = replacement)
+    val overlay = TransformerRunner.OverlayLayer(
+      spec = spec(pip, out, outWidth = width, outHeight = height, durationSec = 0.4),
+      frameX = 0.6, frameY = 0.6, frameW = 0.3, frameH = 0.3,
+      outputStartSec = 0.3, effDurSec = 0.4,
+    )
+    TransformerRunner.runCompositePip(
+      ctx, listOf(baseSpec), listOf(overlay),
+      totalDurationSec = total,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("pip+replace keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue("pip+replace carries the replacement audio track", mimes.any { it.startsWith("audio/") })
+  }
+
+  // #52 (1): audio.mode = 'replace' on the crossfade composite path. The per-clip
+  // ramped soundtracks are dropped and a single replacement is muxed on a
+  // parallel sequence; the output keeps video + the replacement audio.
+  @Test
+  fun crossfadeReplaceSwapsAudioTrack() {
+    val a = authorAudioVideoFixture("xf-repl-a")
+    val b = authorAudioVideoFixture("xf-repl-b")
+    val replacement = authorAudioVideoFixture("xf-repl-audio")
+    val out = File(ctx.cacheDir, "crossfade-replace.mp4").absolutePath
+    File(out).delete()
+    val clipDur = frameCount / fps.toDouble()
+    val overlapStart = 0.6
+    val total = overlapStart + clipDur
+    TransformerRunner.runCompositeCrossfade(
+      ctx,
+      listOf(
+        // Only the first clip's spec is read for the replacement.
+        TransformerRunner.CrossfadeClip(
+          spec = spec(a, out, outWidth = width, outHeight = height, audioReplacementUri = replacement),
+          outputStartSec = 0.0, effDurSec = clipDur,
+        ),
+        TransformerRunner.CrossfadeClip(
+          spec = spec(b, out, outWidth = width, outHeight = height),
+          outputStartSec = overlapStart, effDurSec = clipDur,
+        ),
+      ),
+      totalDurationSec = total,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
+    )
+    val mimes = trackMimes(out)
+    assertTrue("crossfade+replace keeps a video track", mimes.any { it.startsWith("video/") })
+    assertTrue("crossfade+replace carries the replacement audio track", mimes.any { it.startsWith("audio/") })
+  }
+
+  // #52 (2): a static (spec-level) overlay composited on TOP of the PiP output
+  // via a composition-level effect. A green watermark at the frame centre must
+  // win over the red base there (the blue PiP box sits bottom-right, away from
+  // the centre), proving the watermark draws above the whole composited frame.
+  @Test
+  fun pipCompositesStaticOverlayOnTop() {
+    val base = solidFixture("pip-wm-base", 220, 0, 0) // red
+    val pip = solidFixture("pip-wm-over", 0, 0, 220) // blue
+    val out = File(ctx.cacheDir, "pip-static-overlay.mp4").absolutePath
+    File(out).delete()
+    val total = frameCount / fps.toDouble()
+    val baseSpec = spec(base, out, outWidth = width, outHeight = height)
+    val overlay = TransformerRunner.OverlayLayer(
+      spec = spec(pip, out, outWidth = width, outHeight = height, durationSec = 0.4),
+      frameX = 0.6, frameY = 0.6, frameW = 0.3, frameH = 0.3,
+      outputStartSec = 0.3, effDurSec = 0.4,
+    )
+    TransformerRunner.runCompositePip(
+      ctx, listOf(baseSpec), listOf(overlay),
+      totalDurationSec = total,
+      compositionOverlays = listOf(centerWatermark(0, 220, 0)), // green
+      stopToken = null, progress = null,
+    )
+    assertTrue("pip+watermark output exists", File(out).exists())
+    val center = centerPixel(out)
+    assertTrue(
+      "centre pixel is the green watermark (composited on top) got #${Integer.toHexString(center)}",
+      Color.green(center) > 120 &&
+        Color.green(center) > Color.red(center) + 40 &&
+        Color.green(center) > Color.blue(center) + 40,
+    )
+  }
+
+  // #52 (2): a static overlay composited on TOP of the crossfade output. The
+  // green watermark at the centre must win over the dissolving red/blue clips.
+  @Test
+  fun crossfadeCompositesStaticOverlayOnTop() {
+    val a = solidFixture("xf-wm-a", 220, 0, 0) // red
+    val b = solidFixture("xf-wm-b", 0, 0, 220) // blue
+    val out = File(ctx.cacheDir, "crossfade-static-overlay.mp4").absolutePath
+    File(out).delete()
+    val clipDur = frameCount / fps.toDouble()
+    val overlapStart = 0.6
+    val total = overlapStart + clipDur
+    TransformerRunner.runCompositeCrossfade(
+      ctx,
+      listOf(
+        TransformerRunner.CrossfadeClip(
+          spec = spec(a, out, outWidth = width, outHeight = height),
+          outputStartSec = 0.0, effDurSec = clipDur,
+        ),
+        TransformerRunner.CrossfadeClip(
+          spec = spec(b, out, outWidth = width, outHeight = height),
+          outputStartSec = overlapStart, effDurSec = clipDur,
+        ),
+      ),
+      totalDurationSec = total,
+      compositionOverlays = listOf(centerWatermark(0, 220, 0)), // green
+      stopToken = null, progress = null,
+    )
+    assertTrue("crossfade+watermark output exists", File(out).exists())
+    val center = centerPixel(out)
+    assertTrue(
+      "centre pixel is the green watermark (composited on top) got #${Integer.toHexString(center)}",
+      Color.green(center) > 120 &&
+        Color.green(center) > Color.red(center) + 40 &&
+        Color.green(center) > Color.blue(center) + 40,
+    )
   }
 
   // The crossfade audio envelope (VolumeRampAudioProcessor): a 1.0s constant-tone
