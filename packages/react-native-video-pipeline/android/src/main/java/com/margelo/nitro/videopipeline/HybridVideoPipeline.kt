@@ -1426,8 +1426,9 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           throw t
         }
 
-        // One shared output canvas for every clip so they align after Presentation
-        // SCALE_TO_FIT. Pinned output dims win; otherwise derive from the first
+        // One shared output canvas for every clip so they align after the
+        // Presentation STRETCH_TO_FIT in buildVideoEffects. Pinned output dims
+        // win; otherwise derive from the first
         // clip (post its own rotation), the multi-clip analogue of the single-clip
         // fallback.
         val t0 = clips[0].transform

@@ -809,9 +809,19 @@ internal object TransformerRunner {
     // a single dimension already forces a re-encode, so there is none to lose.
     val pinCanvas = spec.outWidth != null || spec.outHeight != null || spec.overlays.isNotEmpty()
     if (pinCanvas && spec.outCanvasW > 0 && spec.outCanvasH > 0) {
+      // LAYOUT_STRETCH_TO_FIT, not SCALE_TO_FIT: the content is scaled
+      // non-uniformly to exactly fill the canvas, matching iOS, where the
+      // transcoder applies a non-uniform CGAffineTransformMakeScale to the
+      // render size (Transcoder.mm "Final scale to exactly the encoder target
+      // dimensions"). With SCALE_TO_FIT, an asymmetric canvas (e.g. a single
+      // pinned dimension whose fallback axis differs in aspect from the source)
+      // letterboxes/pillarboxes instead of filling, diverging from iOS. The
+      // output *frame* size is identical under either layout — Media3's
+      // Presentation.configure() returns the requested width×height regardless;
+      // only the in-frame content scaling differs.
       effects.add(
         Presentation.createForWidthAndHeight(
-          spec.outCanvasW, spec.outCanvasH, Presentation.LAYOUT_SCALE_TO_FIT
+          spec.outCanvasW, spec.outCanvasH, Presentation.LAYOUT_STRETCH_TO_FIT
         )
       )
     }
