@@ -247,12 +247,16 @@ and `replace` (#52) strips the base audio and muxes a separate soundtrack on a
 video-compositor input and doesn't shift the `inputId`→layer mapping). Spec-level
 overlays (watermarks) compose on top of the whole PiP output via a
 **composition-level** `OverlayEffect` (`Composition.Builder.setEffects`) — the
-natural z-order for a watermark (#52). The one remaining gap: a **base-track
-overlap** combined with PiP overlay tracks still rejects (it needs the crossfade
-ping-pong compositor composed with the PiP one). Unlike iOS — whose
-`HighestQuality` export preset is H.264-only — the Android Transformer re-encodes
-the composite directly, so an HEVC output and an explicit bitrate are honoured for
-PiP too.
+natural z-order for a watermark (#52). A **base-track overlap** combined with PiP
+overlay tracks is handled in **two passes** (#52, mirroring iOS): pass 1
+crossfade-dissolves the overlapping base clips to a temp via
+`runCompositeCrossfade` — which resolves the `audio.mode` (mute / replace /
+passthrough-ramp) into the temp — and pass 2 composites the overlay tracks on top
+of that single temp base via `runCompositePip` (passthrough, so the temp's audio
+carries through). The temp is written to `cacheDir` and deleted on exit; a
+non-overlapping base skips pass 1. Unlike iOS — whose `HighestQuality` export
+preset is H.264-only — the Android Transformer re-encodes the composite directly,
+so an HEVC output and an explicit bitrate are honoured for PiP too.
 
 ### Timeline-overlap crossfade (#43, parity with iOS #18)
 

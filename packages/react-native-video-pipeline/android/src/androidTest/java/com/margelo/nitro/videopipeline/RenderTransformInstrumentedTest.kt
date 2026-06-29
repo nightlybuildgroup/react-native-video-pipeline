@@ -601,6 +601,73 @@ class RenderTransformInstrumentedTest {
     )
   }
 
+  // #52 (3): a base-track OVERLAP combined with a PiP overlay track. The Hybrid
+  // renderCompositePip does this in two passes (mirroring iOS): pass 1
+  // crossfade-dissolves the overlapping base clips to a temp via
+  // runCompositeCrossfade, pass 2 composites the overlay tracks on top of that
+  // temp via runCompositePip. This test runs the same two passes and asserts the
+  // dissolved base (red clip A early, blue clip B late, in a region away from the
+  // PiP box) AND the green PiP box on top — i.e. both compositors compose.
+  @Test
+  fun pipOverCrossfadedBaseCompositesBoth() {
+    val baseA = solidFixture("pipxf-base-a", 220, 0, 0) // red
+    val baseB = solidFixture("pipxf-base-b", 0, 0, 220) // blue
+    val temp = File(ctx.cacheDir, "pipxf-base-temp.mp4").absolutePath
+    File(temp).delete()
+    val clipDur = frameCount / fps.toDouble()
+    val overlapStart = 0.6
+    val baseTotal = overlapStart + clipDur
+
+    // Pass 1: crossfade the overlapping base clips to the temp.
+    TransformerRunner.runCompositeCrossfade(
+      ctx,
+      listOf(
+        TransformerRunner.CrossfadeClip(
+          spec = spec(baseA, temp, outWidth = width, outHeight = height),
+          outputStartSec = 0.0, effDurSec = clipDur,
+        ),
+        TransformerRunner.CrossfadeClip(
+          spec = spec(baseB, temp, outWidth = width, outHeight = height),
+          outputStartSec = overlapStart, effDurSec = clipDur,
+        ),
+      ),
+      totalDurationSec = baseTotal,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
+    )
+    assertTrue("base crossfade temp exists", File(temp).exists())
+
+    // Pass 2: PiP a solid GREEN overlay (bottom-right box) over the dissolved base.
+    val pip = solidFixture("pipxf-over", 0, 220, 0) // green
+    val out = File(ctx.cacheDir, "pipxf-out.mp4").absolutePath
+    File(out).delete()
+    val baseSpec = spec(temp, out, outWidth = width, outHeight = height)
+    val overlay = TransformerRunner.OverlayLayer(
+      spec = spec(pip, out, outWidth = width, outHeight = height),
+      frameX = 0.6, frameY = 0.6, frameW = 0.3, frameH = 0.3,
+      outputStartSec = 0.0, effDurSec = baseTotal,
+    )
+    TransformerRunner.runCompositePip(
+      ctx, listOf(baseSpec), listOf(overlay),
+      totalDurationSec = baseTotal,
+      compositionOverlays = emptyList(), stopToken = null, progress = null,
+    )
+    assertTrue("pip-over-crossfade output exists", File(out).exists())
+
+    fun isRed(c: Int) = Color.red(c) > Color.blue(c) + 40 && Color.red(c) > Color.green(c) + 40
+    fun isBlue(c: Int) = Color.blue(c) > Color.red(c) + 40 && Color.blue(c) > Color.green(c) + 40
+    fun isGreen(c: Int) = Color.green(c) > Color.red(c) + 40 && Color.green(c) > Color.blue(c) + 40
+
+    // Base region away from the PiP box (top-left): clip A red early, clip B blue
+    // late — proving the base dissolved across the overlap.
+    val earlyBase = pixelAt(out, 0.1, 0.1, 0.2)
+    val lateBase = pixelAt(out, 0.1, 0.1, 1.4)
+    assertTrue("base shows clip A (red) early (got ${Integer.toHexString(earlyBase)})", isRed(earlyBase))
+    assertTrue("base shows clip B (blue) late (got ${Integer.toHexString(lateBase)})", isBlue(lateBase))
+    // PiP box (centre 0.75,0.75) shows the green overlay on top of the base.
+    val pipBox = pixelAt(out, 0.75, 0.75, 0.8)
+    assertTrue("PiP box is green on top of the base (got ${Integer.toHexString(pipBox)})", isGreen(pipBox))
+  }
+
   // The crossfade audio envelope (VolumeRampAudioProcessor): a 1.0s constant-tone
   // PCM stream with a 0.4s tail ramp should be full-amplitude before the ramp,
   // ~half at the ramp midpoint, and ~silent at the end. Validated directly on the
