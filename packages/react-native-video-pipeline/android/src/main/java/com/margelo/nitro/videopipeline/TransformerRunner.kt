@@ -242,15 +242,20 @@ internal object TransformerRunner {
     baseSpecs: List<Spec>,
     overlays: List<OverlayLayer>,
     totalDurationSec: Double,
+    compositionOverlays: List<Transcoder.ResolvedOverlay>,
     stopToken: VideoPipelineStopToken?,
     progress: ProgressSink?,
   ) {
     require(baseSpecs.isNotEmpty()) { "runCompositePip requires a base track" }
     require(overlays.isNotEmpty()) { "runCompositePip requires at least one overlay" }
     try {
-      runCompositePipInternal(context, baseSpecs, overlays, totalDurationSec, stopToken, progress)
+      runCompositePipInternal(
+        context, baseSpecs, overlays, totalDurationSec, compositionOverlays, stopToken, progress,
+      )
     } finally {
-      val all = baseSpecs.flatMap { it.overlays } + overlays.flatMap { it.spec.overlays }
+      val all = baseSpecs.flatMap { it.overlays } +
+        overlays.flatMap { it.spec.overlays } +
+        compositionOverlays
       all.toHashSet().forEach { runCatching { it.bitmap.recycle() } }
     }
   }
@@ -260,6 +265,7 @@ internal object TransformerRunner {
     baseSpecs: List<Spec>,
     overlays: List<OverlayLayer>,
     totalDurationSec: Double,
+    compositionOverlays: List<Transcoder.ResolvedOverlay>,
     stopToken: VideoPipelineStopToken?,
     progress: ProgressSink?,
   ) {
@@ -311,13 +317,32 @@ internal object TransformerRunner {
         }
       }
 
+      // audio.mode = 'replace': the base clips were audio-stripped in
+      // buildClipSequence (it strips when first.audioReplacementUri != null) and
+      // overlay tracks always strip, so the only sound is the replacement, added
+      // as a parallel audio-only sequence. Appended AFTER the video sequences so
+      // it isn't a video-compositor input and doesn't shift the inputId→layer
+      // mapping the compositor relies on (audio-only sequences are never passed
+      // to getOverlaySettings).
+      val replaceUri = first.audioReplacementUri
+      val sequences = orderedSeqs.toMutableList()
+      if (replaceUri != null) {
+        sequences.add(replacementAudioSequence(replaceUri, first.outputDurationSec))
+      }
+
       // The base's black gap-fill images carry no audio; for a gapped base with
       // passthrough audio, force a continuous audio track so the source audio
       // survives across the gaps as silence (same as runMulti). Never force it
-      // when the base is muted.
-      val composition = Composition.Builder(orderedSeqs)
+      // when the base is muted or when a replacement soundtrack already supplies
+      // a continuous audio track.
+      val composition = Composition.Builder(sequences)
         .setVideoCompositorSettings(compositor)
-        .experimentalSetForceAudioTrack(needBaseGaps && !first.removeAudio)
+        .experimentalSetForceAudioTrack(needBaseGaps && !first.removeAudio && replaceUri == null)
+        .apply {
+          // Static (spec-level) overlays composite on top of the whole PiP
+          // output — a watermark's natural z-order (#52).
+          compositionOverlayEffect(compositionOverlays, canvasW, canvasH)?.let { setEffects(it) }
+        }
         .build()
 
       runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
@@ -327,6 +352,31 @@ internal object TransformerRunner {
       blackImage?.delete()
       transparent.delete()
     }
+  }
+
+  /// A standalone audio-only [EditedMediaItemSequence] carrying the replacement
+  /// soundtrack for `audio.mode = 'replace'`. Clipped to the output video
+  /// duration so a longer track can't extend the export with an audio-only tail
+  /// (Media3 sequence ordering alone does not cap it); a shorter track leaves a
+  /// silent tail. Added as a parallel sequence alongside the (audio-stripped)
+  /// video — shared by the single, multi-clip, and composite (PiP/crossfade)
+  /// paths so they agree on replacement semantics.
+  private fun replacementAudioSequence(
+    replaceUri: String,
+    outputDurationSec: Double?,
+  ): EditedMediaItemSequence {
+    val mediaItemBuilder = MediaItem.Builder().setUri(replaceUri)
+    outputDurationSec?.let { durSec ->
+      mediaItemBuilder.setClippingConfiguration(
+        MediaItem.ClippingConfiguration.Builder()
+          .setEndPositionMs((durSec * 1000.0).roundToLong())
+          .build()
+      )
+    }
+    val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
+      .setRemoveVideo(true)
+      .build()
+    return EditedMediaItemSequence.Builder(audioItem).build()
   }
 
   /// A transparent-pad image item of the given duration, used to position an
@@ -402,14 +452,18 @@ internal object TransformerRunner {
     context: Context,
     clips: List<CrossfadeClip>,
     totalDurationSec: Double,
+    compositionOverlays: List<Transcoder.ResolvedOverlay>,
     stopToken: VideoPipelineStopToken?,
     progress: ProgressSink?,
   ) {
     require(clips.size >= 2) { "runCompositeCrossfade requires at least two clips" }
     try {
-      runCompositeCrossfadeInternal(context, clips, totalDurationSec, stopToken, progress)
+      runCompositeCrossfadeInternal(
+        context, clips, totalDurationSec, compositionOverlays, stopToken, progress,
+      )
     } finally {
-      clips.flatMap { it.spec.overlays }.toHashSet().forEach { runCatching { it.bitmap.recycle() } }
+      val all = clips.flatMap { it.spec.overlays } + compositionOverlays
+      all.toHashSet().forEach { runCatching { it.bitmap.recycle() } }
     }
   }
 
@@ -419,6 +473,7 @@ internal object TransformerRunner {
     context: Context,
     clips: List<CrossfadeClip>,
     totalDurationSec: Double,
+    compositionOverlays: List<Transcoder.ResolvedOverlay>,
     stopToken: VideoPipelineStopToken?,
     progress: ProgressSink?,
   ) {
@@ -452,8 +507,12 @@ internal object TransformerRunner {
     // (not muted) AND at least one source clip has an audio track. A clip with no
     // audio contributes silence (an `addGap` of its span) so the envelope on the
     // audio-bearing clips stays time-aligned.
+    // audio.mode = 'replace' drops the per-clip ramped soundtracks entirely and
+    // muxes a single replacement sequence instead (built below). Passthrough
+    // (the default) ramps each source clip's audio over its overlap windows.
+    val replaceUri = first.audioReplacementUri
     val clipHasAudio = clips.map { runCatching { Remuxer.hasAudioTrack(it.spec.sourceUri) }.getOrDefault(false) }
-    val buildAudio = !first.removeAudio && clipHasAudio.any { it }
+    val buildAudio = replaceUri == null && !first.removeAudio && clipHasAudio.any { it }
     val transparent = authorTransparentImage(context, canvasW, canvasH)
     try {
       val videoBuilders = Array(2) { EditedMediaItemSequence.Builder() }
@@ -499,6 +558,8 @@ internal object TransformerRunner {
       if (buildAudio) {
         sequences.add(audioBuilders[0].build())
         sequences.add(audioBuilders[1].build())
+      } else if (replaceUri != null) {
+        sequences.add(replacementAudioSequence(replaceUri, first.outputDurationSec))
       }
 
       val compositor = object : VideoCompositorSettings {
@@ -522,6 +583,11 @@ internal object TransformerRunner {
 
       val composition = Composition.Builder(sequences)
         .setVideoCompositorSettings(compositor)
+        .apply {
+          // Static (spec-level) overlays composite on top of the dissolved
+          // output — a watermark's natural z-order (#52).
+          compositionOverlayEffect(compositionOverlays, canvasW, canvasH)?.let { setEffects(it) }
+        }
         .build()
 
       runTransformer(context, first.outputPath, first.hevc, first.bitrate, stopToken, progress) { transformer ->
@@ -578,18 +644,10 @@ internal object TransformerRunner {
 
       val replaceUri = first.audioReplacementUri
       val composition = if (replaceUri != null) {
-        val mediaItemBuilder = MediaItem.Builder().setUri(replaceUri)
-        first.outputDurationSec?.let { durSec ->
-          mediaItemBuilder.setClippingConfiguration(
-            MediaItem.ClippingConfiguration.Builder()
-              .setEndPositionMs((durSec * 1000.0).roundToLong())
-              .build()
-          )
-        }
-        val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
-          .setRemoveVideo(true)
-          .build()
-        Composition.Builder(videoSeq, EditedMediaItemSequence.Builder(audioItem).build()).build()
+        Composition.Builder(
+          videoSeq,
+          replacementAudioSequence(replaceUri, first.outputDurationSec),
+        ).build()
       } else {
         // The black image items carry no audio; for PASSTHROUGH gaps force a
         // continuous audio track so the source audio survives across the gaps as
@@ -626,23 +684,9 @@ internal object TransformerRunner {
       .setRemoveAudio(spec.removeAudio || replaceUri != null)
       .build()
     val composition: Composition? = replaceUri?.let { uri ->
-      // Clip the replacement to the output video duration so a longer track
-      // can't extend the export with an audio-only tail (Media3 sequence
-      // ordering alone does not cap it). A shorter track leaves a silent tail.
-      val mediaItemBuilder = MediaItem.Builder().setUri(uri)
-      spec.outputDurationSec?.let { durSec ->
-        mediaItemBuilder.setClippingConfiguration(
-          MediaItem.ClippingConfiguration.Builder()
-            .setEndPositionMs((durSec * 1000.0).roundToLong())
-            .build()
-        )
-      }
-      val audioItem = EditedMediaItem.Builder(mediaItemBuilder.build())
-        .setRemoveVideo(true)
-        .build()
       Composition.Builder(
         EditedMediaItemSequence.Builder(editedItem).build(),
-        EditedMediaItemSequence.Builder(audioItem).build(),
+        replacementAudioSequence(uri, spec.outputDurationSec),
       ).build()
     }
 
@@ -836,6 +880,23 @@ internal object TransformerRunner {
       effects.add(OverlayEffect(ArrayList<TextureOverlay>(textureOverlays)))
     }
     return effects
+  }
+
+  /// Composition-level video [Effects] for static (spec-level) overlays, anchored
+  /// to the output canvas exactly like the single-clip transcode overlays. Applied
+  /// via `Composition.Builder.setEffects`, so they composite on top of the final
+  /// PiP/crossfade frame — the natural z-order for a watermark (#52). Returns null
+  /// when there are no static overlays (nothing to set).
+  private fun compositionOverlayEffect(
+    overlays: List<Transcoder.ResolvedOverlay>,
+    canvasW: Int,
+    canvasH: Int,
+  ): Effects? {
+    if (overlays.isEmpty()) return null
+    val w = canvasW.coerceAtLeast(1)
+    val h = canvasH.coerceAtLeast(1)
+    val textureOverlays = overlays.map { buildOverlay(it, w, h) }
+    return Effects(emptyList(), listOf(OverlayEffect(ArrayList<TextureOverlay>(textureOverlays))))
   }
 
   /// Maps one resolved overlay to a Media3 [TextureOverlay]. The GL compose path
