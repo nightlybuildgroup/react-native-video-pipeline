@@ -1118,6 +1118,35 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         val pipMuteBase: Boolean
         val pipReplaceUri: String?
         if (baseHasOverlap) {
+          // Re-check the adjacent-pair overlap invariant for the base (JS enforces
+          // it; re-check here so a direct native caller can't slip an invalid
+          // overlap shape past runCompositeCrossfade, which only requires size>=2).
+          // Mirrors renderCompositeCrossfade.
+          for (i in 1 until baseClips.size) {
+            val start = baseClips[i].outputStart
+            val prevStart = baseClips[i - 1].outputStart
+            val prevEnd = prevStart + baseEff[i - 1]
+            if (start < prevStart - 1e-3) {
+              throw VideoPipelineInvalidSpecException(
+                "base crossfade: clip $i starts before the previous clip — an overlap " +
+                  "may only reach back into the immediately preceding clip"
+              )
+            }
+            if (i >= 2) {
+              val prevPrevEnd = baseClips[i - 2].outputStart + baseEff[i - 2]
+              if (start < prevPrevEnd - 1e-3) {
+                throw VideoPipelineInvalidSpecException(
+                  "base crossfade: clip $i overlaps two clips back — only adjacent-pair " +
+                    "overlaps are supported"
+                )
+              }
+            }
+            if (start + baseEff[i] < prevEnd - 1e-3) {
+              throw VideoPipelineInvalidSpecException(
+                "base crossfade: clip $i is fully contained in the previous clip — not supported"
+              )
+            }
+          }
           val temp = File(ctx.cacheDir, "rnvp-pip-base-$renderToken.mp4")
             .apply { if (exists()) delete() }
           baseTemp = temp
@@ -1182,8 +1211,16 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
           pipMuteBase = spec.audio?.mode == AudioMode.MUTE
           pipReplaceUri = replaceUri
         }
-        val effBaseEff = effectiveBaseClips.indices
-          .map { effDur(effectiveBaseClips[it], effectiveBaseInfos[it]) }
+        // The crossfaded temp spans exactly the base timeline by construction, so
+        // use totalDurationSec rather than re-clamping against the temp's probed
+        // container duration (which can drift by a frame). For a non-overlapping
+        // base, derive each clip's effective duration as before.
+        val effBaseEff = if (baseHasOverlap) {
+          listOf(totalDurationSec)
+        } else {
+          effectiveBaseClips.indices
+            .map { effDur(effectiveBaseClips[it], effectiveBaseInfos[it]) }
+        }
 
         fun buildSpec(
           clip: Clip,
