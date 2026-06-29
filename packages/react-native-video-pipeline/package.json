@@ -23,7 +23,7 @@
     "ios",
     "android",
     "nitrogen",
-    "plugin/build",
+    "plugin/build/**",
     "app.plugin.js",
     "nitro.json",
     "NitroVideoPipeline.podspec",
