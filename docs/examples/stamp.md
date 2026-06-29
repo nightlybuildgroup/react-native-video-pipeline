@@ -60,7 +60,7 @@ await Video.stamp(sourceUri, {
 });
 ```
 
-Text is rendered natively (`CATextLayer` on iOS, Media3 `TextOverlay` on Android). Cross-platform pixel-identical text is **not** a goal — if you need that, rasterize a PNG yourself and use `Overlay.Image`.
+Text is rendered natively (`CoreText` on iOS, Media3 `TextOverlay` on Android). Cross-platform pixel-identical text is **not** a goal — if you need that, rasterize a PNG yourself and use `Overlay.Image`.
 
 ## Watermark + metadata together
 

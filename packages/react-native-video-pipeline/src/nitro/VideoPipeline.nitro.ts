@@ -325,7 +325,7 @@ export interface TimeRange {
 }
 
 /**
- * Rendered natively (CATextLayer on iOS, Media3 TextOverlay on Android).
+ * Rendered natively (CoreText on iOS, Media3 TextOverlay on Android).
  * Intentionally minimal — advanced typography is out of scope. Users who need
  * pixel-identical cross-platform text should rasterize a PNG themselves and
  * pass it as `Overlay.Image` (see `docs/api.md` recipe).

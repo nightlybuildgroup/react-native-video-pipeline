@@ -79,7 +79,7 @@ Chaining `trim` → `stamp` → `render` through temp files would re-encode at e
 
 ### `render` vs `compose`/`synthesize`
 
-`Video.render` covers **remux and transcode** — the native side decodes/encodes (or passthrough-copies) frames without ever calling back into JavaScript. Overlays on this path are native (`CIFilter` + `CATextLayer` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android).
+`Video.render` covers **remux and transcode** — the native side decodes/encodes (or passthrough-copies) frames without ever calling back into JavaScript. Overlays on this path are native (`CIFilter` + `CoreText` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android).
 
 `Video.compose` and `Video.synthesize` are the **only** entry points where your JS worklet draws into each frame. The native pump invokes `drawFrame` per frame with a live `FrameTarget`. That has different cost (per-frame JS overhead), different requirements (worklet directive, see [`babel-plugin-video-pipeline`](#worklet-directive-enforcement)), and different capabilities (arbitrary drawing via plain RGBA, Skia, or Metal texture blit) than the native overlay path.
 
@@ -213,7 +213,7 @@ Overlay.Image({ uri, anchor, size, opacity?, timeRange? }): ImageOverlay
 Overlay.Text({ text, style, anchor, timeRange? }): TextOverlay
 ```
 
-Both variants are rendered natively (`CIFilter` + `CATextLayer` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android). Advanced typography is intentionally out of scope; if you need pixel-identical cross-platform text, rasterize a PNG and use `Overlay.Image`.
+Both variants are rendered natively (`CIFilter` + `CoreText` on iOS, Media3 `BitmapOverlay` + `TextOverlay` on Android). Advanced typography is intentionally out of scope; if you need pixel-identical cross-platform text, rasterize a PNG and use `Overlay.Image`.
 
 For per-frame JS drawing, use [`Video.compose`](#videocompose) / [`Video.synthesize`](#videosynthesize) — they take `drawFrame` as a first-class argument, not as an overlay.
 
