@@ -56,7 +56,7 @@ yarn nitrogen          # regenerate native bindings from the Nitro spec
 | `yarn test:golden` | Cross-platform golden pixel-hash suite (see [`__tests__/golden/README.md`](./__tests__/golden/README.md)). App-free: renders on the Android emulator + iOS host, compares signatures. `--update` regenerates references. | booted Android emulator + macOS/Xcode |
 | `yarn test:e2e:android` / `yarn test:e2e:ios` | Maestro smoke flow (synthesize + trim + stamp) against `bare-example` (see [`.maestro/README.md`](./.maestro/README.md)) | installed app + Metro + Maestro |
 | `yarn smoke:ios` | lint + typecheck + `test` + `test:native`, then a `bare-example` simulator build | macOS + Xcode + simulator |
-| Android instrumented | `./gradlew :react-native-video-pipeline:connectedDebugAndroidTest` (overlay/foreground-service/golden render + the Media3 composite paths). Also runs in CI on an emulator — see [Continuous integration](#continuous-integration). | booted Android emulator |
+| Android instrumented | `./gradlew :react-native-video-pipeline:connectedDebugAndroidTest` (overlay/foreground-service/golden render + the Media3 composite paths). Run locally before landing Android changes; the matching CI workflow is manual-only — see [Continuous integration](#continuous-integration). | booted Android emulator |
 
 ### Running the example apps
 
@@ -128,7 +128,9 @@ CI lives under [`.github/workflows/`](./.github/workflows/). It is being built o
 
 ### `android-instrumented.yml`
 
-Runs the Android **instrumented** suite (`connectedDebugAndroidTest`) on a GitHub-hosted emulator across an **API 36 + API 26** matrix. This is the only job that exercises the real Media3 encode/composite pipeline — hardware-encoder behaviour, coded-vs-displayed dimensions/rotation, `OverlayEffect` / `VideoCompositorSettings`, audio muxing — none of which the offline Kotlin compile or host JS/iOS suites can reach. It triggers on pushes to `main` and on PRs that touch the Android module, the C++ core, the Nitro spec, the bare-example Android project, or the workflow itself; it can also be launched manually via **workflow_dispatch**.
+Runs the Android **instrumented** suite (`connectedDebugAndroidTest`) on a GitHub-hosted emulator across an **API 36 + API 26** matrix. This is the only job that exercises the real Media3 encode/composite pipeline — hardware-encoder behaviour, coded-vs-displayed dimensions/rotation, `OverlayEffect` / `VideoCompositorSettings`, audio muxing — none of which the offline Kotlin compile or host JS/iOS suites can reach.
+
+**This workflow is disabled in CI — it runs only on manual `workflow_dispatch`, not on pushes or PRs.** Booting a GitHub-hosted emulator per run is too slow/expensive to gate every push/PR for this project, so the instrumented suite is run **locally against a booted emulator** before landing Android changes ([#56](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/56), closed won't-do). The workflow is kept so it can be dispatched on demand (e.g. to reproduce an API-36-specific failure on a clean image) and so the hard-won setup notes below aren't lost. To re-enable automatic runs, add `push` / `pull_request` triggers back to the `on:` block.
 
 Notes for anyone editing this workflow:
 
