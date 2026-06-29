@@ -2,7 +2,7 @@
 
 Offline video editing for React Native (iOS + Android) built on Nitro Modules. Trim, flip, stamp, compose, synthesize, and probe — no FFmpeg, no network, no realtime pacing.
 
-> **Status:** v0.4.x (pre-1.0). Trim, flip, stamp, compose, synthesize, and probe all work on iOS and Android. The public API may still change before 1.0.
+> **Status:** v0.4.x (pre-1.0). Trim, flip, stamp, compose, synthesize, and probe all work on iOS and Android — source-backed `compose` (drawing over a clip) needs Android API 26+. The public API may still change before 1.0.
 
 - **iOS 13+** via AVFoundation
 - **Android API 24+** via Media3 Transformer
