@@ -6,7 +6,7 @@
 /// loop. Two variants are supported:
 ///
 ///   - @c RNVPImageOverlay — static bitmap overlay loaded from disk (T034).
-///   - @c RNVPTextOverlay  — CATextLayer-rasterized text overlay (T035).
+///   - @c RNVPTextOverlay  — CoreText-rasterized text overlay (T035).
 ///
 /// Both overlay variants flow through the same @c RNVPOverlayRenderer; the
 /// renderer handles each one at init time by building a ready-to-composite

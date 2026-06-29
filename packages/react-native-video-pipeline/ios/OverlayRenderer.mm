@@ -7,7 +7,6 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreText/CoreText.h>
 #import <ImageIO/ImageIO.h>
-#import <QuartzCore/QuartzCore.h>
 
 #include <cmath>
 #include <vector>
@@ -147,11 +146,14 @@ BOOL parseColorString(NSString *input, double *outR, double *outG,
   return NO;
 }
 
-// Pre-rasterize a text overlay into a CIImage. Uses CATextLayer to drive the
-// layout (matches docs/api.md "native font rendering"); CoreText is consulted
-// once up front to measure the text extent so the layer size matches the
-// glyph advance. Shadow, when present, adds padding around the measured
-// extent so a large blur radius doesn't clip.
+// Pre-rasterize a text overlay into a CIImage. CoreText drives both the
+// measurement and the drawing (matches docs/api.md "native font rendering"):
+// CTFramesetter measures the text extent so the bitmap matches the glyph
+// advance, then CTFrameDraw rasterizes into a CGBitmapContext. Shadow, when
+// present, adds padding around the measured extent so a large blur radius
+// doesn't clip. CoreText (not CATextLayer) is used deliberately so the
+// rasterization is coordinate-system-uniform across iOS and macOS — see the
+// render block below and issue #65.
 CIImage *rasterizeTextOverlay(RNVPTextOverlay *overlay,
                               NSError *_Nullable __autoreleasing *error) {
   // --- Color parsing ------------------------------------------------------
@@ -189,16 +191,13 @@ CIImage *rasterizeTextOverlay(RNVPTextOverlay *overlay,
   }
 
   // --- Attributed string for measurement ---------------------------------
-  // Paragraph alignment goes into the attributed string so CTFramesetter
-  // sees it for bounds; CATextLayer's alignmentMode also gets set below.
+  // Paragraph alignment goes into the attributed string so both CTFramesetter
+  // (bounds) and CTFrameDraw (multi-line layout) honour it.
   CTTextAlignment ctAlignment = kCTTextAlignmentLeft;
-  NSString *layerAlignMode = kCAAlignmentLeft;
   if (overlay.alignment == RNVPTextAlignmentCenter) {
     ctAlignment = kCTTextAlignmentCenter;
-    layerAlignMode = kCAAlignmentCenter;
   } else if (overlay.alignment == RNVPTextAlignmentRight) {
     ctAlignment = kCTTextAlignmentRight;
-    layerAlignMode = kCAAlignmentRight;
   }
   CTParagraphStyleSetting paragraphSettings[] = {
       {kCTParagraphStyleSpecifierAlignment, sizeof(CTTextAlignment),
@@ -255,53 +254,19 @@ CIImage *rasterizeTextOverlay(RNVPTextOverlay *overlay,
     return nil;
   }
 
-  // --- CATextLayer --------------------------------------------------------
-  CATextLayer *textLayer = [CATextLayer layer];
-  textLayer.bounds = CGRectMake(0, 0, (CGFloat)W, (CGFloat)H);
-  textLayer.anchorPoint = CGPointMake(0, 0);
-  textLayer.position = CGPointMake(0, 0);
-  textLayer.contentsScale = 1.0;
-  textLayer.wrapped = NO;
-  // CATextLayer interprets an NSAttributedString string directly — the font,
-  // color, and alignment attributes on @c attr drive glyph selection +
-  // rasterization. Set @c alignmentMode too so the layer centers the run
-  // within its own bounds even if the attributed string omits an alignment.
-  textLayer.string = attr;
-  textLayer.alignmentMode = layerAlignMode;
-  if (overlay.hasShadow) {
-    double sr = 0, sg = 0, sb = 0, sa = 1.0;
-    if (overlay.shadowColorString.length > 0) {
-      parseColorString(overlay.shadowColorString, &sr, &sg, &sb, &sa);
-    }
-    const CGFloat shadowComps[4] = {(CGFloat)sr, (CGFloat)sg, (CGFloat)sb,
-                                     (CGFloat)sa};
-    CGColorRef shadowCGColor = CGColorCreate(cs, shadowComps);
-    textLayer.shadowColor = shadowCGColor;
-    textLayer.shadowOpacity = 1.0;
-    textLayer.shadowOffset =
-        CGSizeMake(overlay.shadowDx, overlay.shadowDy);
-    textLayer.shadowRadius = overlay.shadowBlur;
-    CGColorRelease(shadowCGColor);
-  }
-  // Nudge the text inside the padded bitmap. Without sublayerTransform the
-  // glyphs would sit at (0, 0) in the layer's coordinate system, which with
-  // shadow padding translates to the very-top-left of the bitmap and cuts off
-  // the descender + left-side shadow. An offset of (padX, padY) places the
-  // measured rect at the center of the padded bitmap.
-  textLayer.sublayerTransform =
-      CATransform3DMakeTranslation(padX, padY, 0);
-  // Measured rect offset inside the layer itself (sublayerTransform only
-  // affects *sublayers*; CATextLayer's own glyphs are rendered directly, not
-  // via a sublayer). Use a CALayer wrapper to get the translation.
-  CALayer *wrapper = [CALayer layer];
-  wrapper.bounds = CGRectMake(0, 0, (CGFloat)W, (CGFloat)H);
-  wrapper.anchorPoint = CGPointMake(0, 0);
-  wrapper.position = CGPointMake(0, 0);
-  [wrapper addSublayer:textLayer];
-  // Replace the textLayer's frame so glyphs land inside the pad region.
-  textLayer.frame = CGRectMake(padX, padY, measured.width, measured.height);
-
-  // --- Bitmap + render ----------------------------------------------------
+  // --- Bitmap + CoreText render -------------------------------------------
+  // Draw the glyphs with CoreText straight into the bitmap context instead of
+  // via CATextLayer's -renderInContext:. CATextLayer inherits Core Animation's
+  // *platform-dependent* layer coordinate system — top-left origin on iOS,
+  // bottom-left on macOS (Apple's Core Animation Programming Guide, "the
+  // default coordinate system differs between iOS and macOS"). With the same
+  // bottom-left-origin CGBitmapContext that meant the text rasterized upright
+  // on the macOS test host but upside-down on device/simulator, which is
+  // issue #65. CoreText drawing is governed solely by the CGContext's CTM,
+  // identical on every platform, so the output is uniform and the host XCTest
+  // is authoritative for the shipping iOS path. The image-overlay path was
+  // never affected because it loads CGImages via ImageIO (also platform-
+  // uniform), not via a CALayer.
   CGBitmapInfo bitmapInfo = (CGBitmapInfo)(kCGImageAlphaPremultipliedLast) |
                              kCGBitmapByteOrder32Big;
   CGContextRef ctx =
@@ -319,14 +284,39 @@ CIImage *rasterizeTextOverlay(RNVPTextOverlay *overlay,
     CFRelease(font);
     return nil;
   }
-  // CALayer.renderInContext draws with origin at the top-left of the layer.
-  // The bitmap's byte layout treats row 0 as the "top" too (as viewed when
-  // the CGImage is later drawn into a UIView). When the resulting CGImage is
-  // wrapped as a CIImage, Core Image treats Y=0 as the bottom of the image,
-  // so the text ends up visually "right-side up" in screen terms because the
-  // anchor math in @c initWithOverlays does the Y flip internally — same
-  // convention as the PNG-loaded image overlays.
-  [wrapper renderInContext:ctx];
+
+  if (overlay.hasShadow) {
+    double sr = 0, sg = 0, sb = 0, sa = 1.0;
+    if (overlay.shadowColorString.length > 0) {
+      parseColorString(overlay.shadowColorString, &sr, &sg, &sb, &sa);
+    }
+    const CGFloat shadowComps[4] = {(CGFloat)sr, (CGFloat)sg, (CGFloat)sb,
+                                     (CGFloat)sa};
+    CGColorRef shadowCGColor = CGColorCreate(cs, shadowComps);
+    // The public shadow dy is "positive = downward" (screen convention); the
+    // bitmap context is bottom-left-origin (y up), so negate dy to keep the
+    // shadow falling in the expected direction.
+    CGContextSetShadowWithColor(
+        ctx, CGSizeMake(overlay.shadowDx, -overlay.shadowDy),
+        overlay.shadowBlur, shadowCGColor);
+    CGColorRelease(shadowCGColor);
+  }
+
+  // Lay the measured text into a rect inset by the edge/shadow padding so a
+  // descender or large blur doesn't clip at the bitmap border. CoreText fills
+  // the rect from its top line downward; in the y-up bitmap the cap of the
+  // glyphs lands at high y → low memory rows → the top of the resulting
+  // CGImage, i.e. upright, matching the row order ImageIO hands the image
+  // overlay path. No CTM flip is needed (and adding one would invert it).
+  CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
+  const CGRect textRect =
+      CGRectMake(padX, padY, measured.width, measured.height);
+  CGPathRef textPath = CGPathCreateWithRect(textRect, NULL);
+  CTFrameRef frame =
+      CTFramesetterCreateFrame(framesetter, CFRangeMake(0, 0), textPath, NULL);
+  CTFrameDraw(frame, ctx);
+  CFRelease(frame);
+  CGPathRelease(textPath);
 
   CGImageRef cgImage = CGBitmapContextCreateImage(ctx);
   CGContextRelease(ctx);
