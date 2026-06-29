@@ -14,24 +14,12 @@ name: Android Instrumented Tests
 #     Skia AHardwareBuffer compose path needs __ANDROID_API__ >= 26). A 24-image
 #     emulator can't install a minSdk-26 APK, so 26 is the lowest runnable axis.
 
+# DISABLED in CI: the emulator boot + connectedDebugAndroidTest legs are too
+# slow/expensive to run on every push/PR, so we run this suite locally instead
+# (see the "Android instrumented suite" note in CLAUDE.md). The automatic push /
+# pull_request triggers are intentionally removed; the job only runs on manual
+# dispatch. Re-add the triggers below to turn CI back on.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "packages/react-native-video-pipeline/android/**"
-      - "packages/react-native-video-pipeline/cpp/**"
-      - "packages/react-native-video-pipeline/src/nitro/**"
-      - "apps/bare-example/android/**"
-      - ".github/workflows/android-instrumented.yml"
-      - "yarn.lock"
-  pull_request:
-    paths:
-      - "packages/react-native-video-pipeline/android/**"
-      - "packages/react-native-video-pipeline/cpp/**"
-      - "packages/react-native-video-pipeline/src/nitro/**"
-      - "apps/bare-example/android/**"
-      - ".github/workflows/android-instrumented.yml"
-      - "yarn.lock"
   workflow_dispatch:
 
 concurrency:
