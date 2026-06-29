@@ -45,13 +45,14 @@ yarn nitrogen          # regenerate native bindings from the Nitro spec
 ```
 
 - **Nitro spec.** `packages/react-native-video-pipeline/src/nitro/VideoPipeline.nitro.ts` is the **single source of truth** for every cross-boundary type. Change types there and run `yarn nitrogen` to regenerate. Never hand-edit files under `nitrogen/`.
-- **Derived artifacts** (`nitrogen/`, `packages/react-native-video-pipeline/plugin/build/`) are gitignored. The Expo plugin's `plugin/build/` is shipped to npm via the package's `files` allowlist + a `prepack` script — it never goes through git.
+- **Derived artifacts** (`nitrogen/`, `packages/react-native-video-pipeline/plugin/build/`) are gitignored. The Expo plugin's `plugin/build/` is shipped to npm via the package's `files` allowlist + a `prepack` script — it never goes through git. The allowlist entry **must** be the recursive glob `plugin/build/**`, not a bare `plugin/build`: `npm pack` ships a bare nested-dir entry but `yarn pack` does not (it auto-recurses only single-segment top-level dirs), which is how v0.4.0 shipped the plugin entry without its build output ([#64](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/64)). Run `yarn verify:pack` before any publish to confirm both packers include it.
 
 ### Test suites
 
 | Command | What it runs | Needs |
 | --- | --- | --- |
 | `yarn test` | Jest (JS unit + bootstrap canaries) | — |
+| `yarn verify:pack` | Drives `npm pack` + `yarn pack` (dry-run) and asserts the Expo config plugin (`app.plugin.js` + `plugin/build/index.js`) ships in both. Publish-time gate; ~1–2 min (runs prepack). | — |
 | `yarn test:native` | iOS AVFoundation/CoreVideo XCTests, compiled against `-sdk macosx` and run on the host (~6s) — no simulator | macOS + Xcode |
 | `yarn test:golden` | Cross-platform golden pixel-hash suite (see [`__tests__/golden/README.md`](./__tests__/golden/README.md)). App-free: renders on the Android emulator + iOS host, compares signatures. `--update` regenerates references. | booted Android emulator + macOS/Xcode |
 | `yarn test:e2e:android` / `yarn test:e2e:ios` | Maestro smoke flow (synthesize + trim + stamp) against `bare-example` (see [`.maestro/README.md`](./.maestro/README.md)) | installed app + Metro + Maestro |
