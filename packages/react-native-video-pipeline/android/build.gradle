@@ -14,6 +14,21 @@ def getExtOrDefault(name, defaultValue) {
   return rootProject.ext.has(name) ? rootProject.ext.get(name) : defaultValue
 }
 
+// Honour the `reactNativeArchitectures` Gradle property (set in the consuming
+// app's gradle.properties, or via -P) so this module's native build targets the
+// same ABI set as react-native-nitro-modules and the app. Without this the
+// `com.android.library` module builds all four ABIs regardless — and if a build
+// narrows the ABI set (e.g. emulator-only x86_64 in CI), NitroModules ships only
+// that ABI's libnitromodules.so while this module still tries to link an arm64
+// libNitroVideoPipeline.so against a missing prefab → "undefined symbol:
+// margelo::nitro::JHybridObject". Unset (the default for a plain consumer) keeps
+// the previous all-ABI behaviour.
+def reactNativeArchitectures() {
+  def value = rootProject.findProperty("reactNativeArchitectures")
+  def parsed = value ? value.split(",").collect { it.trim() }.findAll { it } : null
+  return parsed ? parsed : ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]
+}
+
 android {
   namespace "com.nightlybuildgroup.videopipeline"
 
@@ -25,6 +40,10 @@ android {
     minSdkVersion getExtOrDefault("minSdkVersion", 24)
     targetSdkVersion getExtOrDefault("targetSdkVersion", 34)
     testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+    ndk {
+      abiFilters(*reactNativeArchitectures())
+    }
 
     externalNativeBuild {
       cmake {
