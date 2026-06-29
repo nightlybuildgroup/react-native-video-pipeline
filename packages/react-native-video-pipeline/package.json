@@ -33,6 +33,7 @@
     "!**/.*",
     "!android/build",
     "!android/.gradle",
+    "!android/src/androidTest",
     "!ios/build",
     "!**/node_modules"
   ],
