@@ -291,9 +291,11 @@ internal object Mp4MetadataInjector {
       val ty = String(bytes, i + 4, 4, Charsets.ISO_8859_1)
       if (sz <= 0 || i + sz > end) break
       if (ty == "keys") {
-        // [version+flags:4][entry_count:4][key boxes...]
-        var j = i + 12 // skip header (8) + version+flags (4)
-        val entryCount = ByteBuffer.wrap(bytes, i + 8, 4).order(ByteOrder.BIG_ENDIAN).int
+        // keys box: [size:4][type:4][version+flags:4][entry_count:4][key boxes...]
+        // `i` is the box start, so v+f sits at i+8, entry_count at i+12, and the
+        // first key box at i+16 (header 8 + v+f 4 + entry_count 4).
+        var j = i + 16 // skip header (8) + version+flags (4) + entry_count (4)
+        val entryCount = ByteBuffer.wrap(bytes, i + 12, 4).order(ByteOrder.BIG_ENDIAN).int
         repeat(entryCount) {
           if (j + 8 > end) return@repeat
           val keyBoxSize = ByteBuffer.wrap(bytes, j, 4).order(ByteOrder.BIG_ENDIAN).int
