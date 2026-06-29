@@ -4652,6 +4652,122 @@ static void sampleBrightestInCenterWindow(const uint8_t *base,
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 
+/// Issue #65 regression: a text overlay must render right-side-up, not
+/// vertically mirrored. CATextLayer is laid out top-left-origin; rasterizing
+/// it into a bottom-left-origin CGBitmapContext without flipping the CTM
+/// produced upside-down glyphs while the video content stayed upright,
+/// isolating the bug to the text rasterizer. We detect the flip with a
+/// vertically asymmetric glyph: a bold "L" has its heavy horizontal foot at
+/// the BOTTOM, so the inked-pixel centroid sits below the glyph's vertical
+/// midline. A flipped render would push that mass above the midline, inverting
+/// the sign of the test.
+- (void)testTranscodeTextOverlayRendersUprightNotFlipped
+{
+  const NSInteger kWidth = 200;
+  const NSInteger kHeight = 200;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 12;
+
+  NSError *fixtureError = nil;
+  NSString *sourcePath = authorOpaqueGrayFixture(kWidth, kHeight, kFps,
+                                                  kFrameCount, @"text-upright",
+                                                  &fixtureError);
+  XCTAssertNotNil(sourcePath, @"source fixture failed: %@", fixtureError);
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"t035-upright-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+
+  RNVPTranscodeTarget *target =
+      [[RNVPTranscodeTarget alloc] initWithWidth:kWidth
+                                          height:kHeight
+                                             fps:(double)kFps
+                                           codec:RNVPTranscodeCodecH264
+                                         bitrate:0
+                                          rotate:-1
+                                           flipH:NO
+                                           flipV:NO
+                                           cropX:0
+                                           cropY:0
+                                       cropWidth:0
+                                      cropHeight:0];
+
+  // Single bold "L": a tall vertical stem plus a heavy horizontal foot at the
+  // baseline. The foot biases the inked-pixel centroid toward the bottom of
+  // the glyph — the asymmetry this test keys off of.
+  RNVPTextOverlay *overlay = [[RNVPTextOverlay alloc]
+                initWithText:@"L"
+                  fontFamily:nil
+                    fontSize:120.0
+                 colorString:@"#ffffff"
+                  weightBold:YES
+                   alignment:RNVPTextAlignmentCenter
+                   hasShadow:NO
+           shadowColorString:nil
+                  shadowBlur:0.0
+                    shadowDx:0.0
+                    shadowDy:0.0
+                     anchorX:0.5
+                     anchorY:0.5
+                hasTimeRange:NO
+                    startSec:0.0
+                      endSec:0.0];
+
+  NSError *error = nil;
+  const BOOL ok =
+      [RNVPTranscoder transcodeFromURL:[NSURL fileURLWithPath:sourcePath]
+                                 toURL:[NSURL fileURLWithPath:outPath]
+                                target:target
+                              overlays:@[ overlay ]
+                              metadata:nil
+                                 stop:nil
+                                 progress:nil
+                                 error:&error];
+  XCTAssertTrue(ok, @"transcode failed: %@", error);
+
+  __block long long sumY = 0;
+  __block long brightCount = 0;
+  __block NSInteger minY = NSIntegerMax;
+  __block NSInteger maxY = -1;
+  const BOOL decoded = withFirstDecodedFrame(outPath, ^(
+      const uint8_t *base, size_t bytesPerRow, NSInteger w, NSInteger h) {
+    for (NSInteger y = 0; y < h; y++) {
+      const uint8_t *row = base + (size_t)y * bytesPerRow;
+      for (NSInteger x = 0; x < w; x++) {
+        const uint8_t *px = row + (size_t)x * 4;  // BGRA, row 0 = top of frame
+        // White glyph over 0x80 gray: key off the green channel well above
+        // ambient so H.264 ringing near the glyph edges doesn't register.
+        if (px[1] > 0x80 + 60) {
+          sumY += y;
+          brightCount += 1;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+  });
+  XCTAssertTrue(decoded, @"could not decode output");
+  XCTAssertGreaterThan(brightCount, 200,
+                       @"glyph did not rasterize (only %ld bright px)",
+                       brightCount);
+
+  const double centroidY = (double)sumY / (double)brightCount;
+  const double midY = ((double)minY + (double)maxY) / 2.0;
+  // Upright "L": the foot at the bottom pulls the inked centroid below the
+  // glyph midline (a larger y in the top-down decoded frame). The pre-fix
+  // flipped render put the foot at the top, inverting this comparison.
+  XCTAssertGreaterThan(centroidY, midY + 2.0,
+                       @"text overlay appears vertically flipped: inked "
+                       @"centroid y=%.1f is not below glyph midline %.1f "
+                       @"(minY=%ld maxY=%ld)",
+                       centroidY, midY, (long)minY, (long)maxY);
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
 /// T035: a malformed color string must surface as InvalidSpec with no partial
 /// output file — the renderer rejects the text overlay at init time and the
 /// transcoder cancels the writer before any frames are written.
