@@ -290,16 +290,21 @@ internal object Mp4MetadataInjector {
       val sz = ByteBuffer.wrap(bytes, i, 4).order(ByteOrder.BIG_ENDIAN).int
       val ty = String(bytes, i + 4, 4, Charsets.ISO_8859_1)
       if (sz <= 0 || i + sz > end) break
-      if (ty == "keys") {
+      if (ty == "keys" && sz >= 16) {
         // keys box: [size:4][type:4][version+flags:4][entry_count:4][key boxes...]
         // `i` is the box start, so v+f sits at i+8, entry_count at i+12, and the
-        // first key box at i+16 (header 8 + v+f 4 + entry_count 4).
+        // first key box at i+16 (header 8 + v+f 4 + entry_count 4). The `sz >= 16`
+        // guard ensures entry_count fits inside the box before we read it — a
+        // truncated keys box (size 8..15) would otherwise read sibling bytes.
+        // Key boxes are bounded against the keys box end (`i + sz`), not the
+        // parent `end`, so a malformed entry_count can't walk past this box.
+        val keysEnd = i + sz
         var j = i + 16 // skip header (8) + version+flags (4) + entry_count (4)
         val entryCount = ByteBuffer.wrap(bytes, i + 12, 4).order(ByteOrder.BIG_ENDIAN).int
         repeat(entryCount) {
-          if (j + 8 > end) return@repeat
+          if (j + 8 > keysEnd) return@repeat
           val keyBoxSize = ByteBuffer.wrap(bytes, j, 4).order(ByteOrder.BIG_ENDIAN).int
-          if (keyBoxSize < 8 || j + keyBoxSize > end) return@repeat
+          if (keyBoxSize < 8 || j + keyBoxSize > keysEnd) return@repeat
           val keyValue = String(bytes, j + 8, keyBoxSize - 8, Charsets.UTF_8)
           keys.add(keyValue)
           j += keyBoxSize
