@@ -23,6 +23,8 @@ public:
   std::shared_ptr<Promise<VideoInfo>> info(const std::string& uri) override;
   std::shared_ptr<Promise<std::string>> thumbnail(const std::string& uri,
                                                   const ThumbnailOptions& options) override;
+  std::shared_ptr<Promise<std::vector<std::string>>> thumbnails(
+      const std::string& uri, const BatchThumbnailOptions& options) override;
   std::shared_ptr<Promise<EncoderCaps>> capabilities() override;
 
   // Auto-routed render — see prd.md §9.

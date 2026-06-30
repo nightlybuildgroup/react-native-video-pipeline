@@ -11,6 +11,7 @@ export type {
   Anchor,
   AnchorPoint,
   AnchorPreset,
+  BatchThumbnailOptions,
   Clip,
   ClipTransform,
   CropRect,

@@ -10,6 +10,7 @@ For runnable scenarios see [`docs/examples/`](./examples/). For architectural de
 - [`Video`](#video) — top-level operations
   - [`Video.info`](#videoinfo)
   - [`Video.thumbnail`](#videothumbnail)
+  - [`Video.thumbnails`](#videothumbnails)
   - [`Video.capabilities`](#videocapabilities)
   - [`Video.trim`](#videotrim)
   - [`Video.flip`](#videoflip)
@@ -112,6 +113,35 @@ Video.thumbnail(uri: string, options: ThumbnailOptions): Promise<string>
 ```
 
 Extract one JPEG frame at `options.atSec` and write it to `options.outPath`. Resolves to the absolute output path. `options.resizeTo` is optional; provide one of `w` or `h` to scale proportionally.
+
+### `Video.thumbnails`
+
+```ts
+Video.thumbnails(uri: string, options: BatchThumbnailOptions): Promise<string[]>
+```
+
+Extract **N JPEG frames in a single native decode session** — the right primitive for a filmstrip or scrubber strip. `options.atSecs` and `options.outPaths` are parallel arrays (equal, non-zero length): `outPaths[i]` receives the frame nearest `atSecs[i]`. Resolves to one path per requested time, **in `atSecs` order**.
+
+Why this exists instead of looping `Video.thumbnail`: a JS-side loop pays the full per-frame cost every iteration — iOS spins up a fresh `AVAssetImageGenerator` and re-parses the asset; Android re-acquires a `MediaMetadataRetriever` and seeks from scratch — all run strictly serially because each `await` blocks the next. `thumbnails` opens the asset, walks the decoder forward **once** over the (internally sorted) times, and tears it down once. On a long 4K clip this is the dominant cost of opening an analyze/scrubber screen.
+
+- **`options.toleranceSec`** is the big perf lever. A non-zero tolerance lets the native generator snap to the nearest already-decoded keyframe instead of exact-seek decoding every frame. Filmstrips rarely need exact frames, so a small tolerance (e.g. `0.5`) is usually the right call. `0` (or omitted) means exact-frame seeking, matching `Video.thumbnail`. **Platform note:** iOS honors the magnitude (it maps to `requestedTimeTolerance{Before,After}`, so the frame lands within ±`toleranceSec`). Android has no numeric-tolerance API on `MediaMetadataRetriever`, so any value > 0 means "snap to nearest keyframe" (`OPTION_CLOSEST_SYNC`) regardless of magnitude — on a long-GOP clip the chosen keyframe may be further from the request than the same `toleranceSec` would allow on iOS.
+- **Partial success:** a single frame that fails to extract resolves to an **empty string** in its slot rather than rejecting the whole batch — one bad timestamp can't kill the strip. Batch-level failures (missing source, mismatched arrays, no video track) still reject.
+- `options.resizeTo` applies uniformly to every frame (same semantics as `Video.thumbnail`).
+
+```ts
+const dur = (await Video.info(sourceUri)).durationSec;
+const COUNT = 24;
+const atSecs = Array.from({ length: COUNT }, (_, i) => (i / COUNT) * dur);
+const outPaths = atSecs.map((_, i) => `${dir}/strip-${i}.jpg`);
+
+const frames = await Video.thumbnails(sourceUri, {
+  atSecs,
+  outPaths,
+  resizeTo: { w: 100 },
+  toleranceSec: 0.5, // snap to keyframes — cheap, fine for a scrubber strip
+});
+// frames[i] === outPaths[i] for each frame that was written ('' if that one failed)
+```
 
 ### `Video.capabilities`
 
@@ -360,7 +390,7 @@ type SynthesizeOutputSpec = OutputSpec & {
 
 #### Output file semantics
 
-`path` is the on-disk destination for every operation that writes a file (`trim`, `flip`, `stamp`, `render`, `compose`, `synthesize`, `thumbnail`). The contract:
+`path` is the on-disk destination for every operation that writes a file (`trim`, `flip`, `stamp`, `render`, `compose`, `synthesize`, `thumbnail`, `thumbnails`). The contract:
 
 - **Form.** Must be a non-empty filesystem path or a `file://` URI. Other schemes (`http://`, `content://`, `data:`, …) are rejected at the JS boundary. Plain absolute paths and `file:///…` URIs are equivalent.
 - **Overwrite.** If a file already exists at `path`, it is deleted before the new file is written. There is no `overwrite: false` option.
@@ -496,7 +526,20 @@ Discriminated by `mode`, so `replaceUri` is required at compile time when (and o
 type Size = { w: number; h?: number } | { w?: number; h: number };
 ```
 
-Pixel-only. Currently used by `ThumbnailOptions.resizeTo`. At least one of `w` / `h` is required; the other scales proportionally.
+Pixel-only. Used by `ThumbnailOptions.resizeTo` and `BatchThumbnailOptions.resizeTo`. At least one of `w` / `h` is required; the other scales proportionally.
+
+### `BatchThumbnailOptions`
+
+```ts
+interface BatchThumbnailOptions {
+  atSecs: number[];      // capture times; non-empty, each >= 0
+  outPaths: string[];    // one per time, parallel to atSecs
+  resizeTo?: Size;       // applied uniformly to every frame
+  toleranceSec?: number; // seek tolerance; 0 (default) = exact frame
+}
+```
+
+Options for [`Video.thumbnails`](#videothumbnails). `atSecs` and `outPaths` must be parallel arrays of equal, non-zero length. `toleranceSec > 0` trades exactness for speed by snapping to the nearest keyframe — the right tradeoff for filmstrips. A frame that fails to extract resolves to an empty string in its slot.
 
 ### `OverlaySize`
 

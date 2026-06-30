@@ -239,6 +239,154 @@ internal object ProbeRunner {
     }
   }
 
+  // --- thumbnails (batch) ----------------------------------------------
+
+  /// Batch frame extraction from a SINGLE MediaMetadataRetriever — one
+  /// setDataSource, one decoder held open across the whole walk, one release —
+  /// instead of re-acquiring a retriever per frame the way a JS-side loop over
+  /// `thumbnail` would. `atSecs` and `outPaths` are parallel (equal, non-zero
+  /// length); the result is parallel to them. Times are walked in ascending
+  /// order (then mapped back to caller order) so the decoder seeks forward.
+  ///
+  /// `toleranceSec > 0` switches `getFrameAtTime` to OPTION_CLOSEST_SYNC
+  /// (nearest keyframe — cheap, the perf lever for filmstrips); `0` uses
+  /// OPTION_CLOSEST (exact-ish, matches the single-frame API).
+  ///
+  /// Partial-success: a frame that fails to extract lands an empty string in
+  /// its slot rather than failing the batch. `outPaths` are expected
+  /// pre-normalized (file:// stripped) by the caller, matching `thumbnail`.
+  fun thumbnails(
+    uri: String,
+    atSecs: List<Double>,
+    outPaths: List<String>,
+    resizeW: Double,
+    resizeH: Double,
+    toleranceSec: Double,
+  ): List<String> {
+    if (atSecs.isEmpty()) {
+      throw InvalidSpecException("atSecs must be a non-empty array")
+    }
+    if (outPaths.size != atSecs.size) {
+      throw InvalidSpecException("outPaths must have the same length as atSecs")
+    }
+    if (!(toleranceSec >= 0.0)) {
+      throw InvalidSpecException("toleranceSec must be >= 0")
+    }
+    val sourcePath = resolveFilePath(uri)
+    if (!File(sourcePath).exists()) {
+      throw NotFoundException("Source file does not exist: $sourcePath")
+    }
+
+    val retriever = MediaMetadataRetriever()
+    try {
+      retriever.setDataSource(sourcePath)
+
+      // A source with no video track is a batch-level failure, not a strip of
+      // empty slots — mirrors iOS, where Thumbnailer rejects "no video track"
+      // up front rather than silently emitting empty frames.
+      if (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_VIDEO) != "yes") {
+        throw ProbeException("Source has no video track")
+      }
+
+      val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+        ?.toLongOrNull() ?: 0L
+      val durationSec = durationMs / 1000.0
+      val rotationDeg = retriever.extractMetadata(
+        MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION
+      )?.toIntOrNull() ?: 0
+      val metaW = retriever.extractMetadata(
+        MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH
+      )?.toIntOrNull() ?: 0
+      val metaH = retriever.extractMetadata(
+        MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT
+      )?.toIntOrNull() ?: 0
+
+      val option = if (toleranceSec > 0.0) {
+        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+      } else {
+        MediaMetadataRetriever.OPTION_CLOSEST
+      }
+
+      // Walk ascending so the single open decoder seeks forward; write each
+      // frame, then leave results indexed by the ORIGINAL caller order.
+      val results = arrayOfNulls<String>(atSecs.size)
+      for (i in atSecs.indices.sortedBy { atSecs[it] }) {
+        results[i] = try {
+          extractFrameToFile(
+            retriever = retriever,
+            atSec = atSecs[i],
+            durationSec = durationSec,
+            rotationDeg = rotationDeg,
+            metaW = metaW,
+            metaH = metaH,
+            outPath = outPaths[i],
+            resizeW = resizeW,
+            resizeH = resizeH,
+            option = option,
+          )
+          outPaths[i]
+        } catch (_: Throwable) {
+          // Per-frame failure → empty slot; the rest of the strip survives.
+          ""
+        }
+      }
+      return results.map { it ?: "" }
+    } catch (e: NotFoundException) {
+      throw e
+    } catch (e: InvalidSpecException) {
+      throw e
+    } catch (t: Throwable) {
+      throw ProbeException("VideoPipeline.thumbnails failed: ${t.message ?: t::class.java.simpleName}")
+    } finally {
+      try { retriever.release() } catch (_: Throwable) {}
+    }
+  }
+
+  /// Decode one frame from an already-open retriever, bake rotation, resize,
+  /// and write it as a quality-90 JPEG to `outPath`. Shared by the batch walk;
+  /// throws on any failure so the caller can decide batch vs single semantics.
+  private fun extractFrameToFile(
+    retriever: MediaMetadataRetriever,
+    atSec: Double,
+    durationSec: Double,
+    rotationDeg: Int,
+    metaW: Int,
+    metaH: Int,
+    outPath: String,
+    resizeW: Double,
+    resizeH: Double,
+    option: Int,
+  ) {
+    if (outPath.isEmpty()) throw InvalidSpecException("outPath must not be empty")
+    val clamped = when {
+      atSec < 0.0 -> 0.0
+      durationSec > 0.0 && atSec > durationSec -> durationSec
+      else -> atSec
+    }
+    val timeUs = (clamped * 1_000_000.0).roundToLong()
+    val raw = retriever.getFrameAtTime(timeUs, option)
+      ?: throw ProbeException("getFrameAtTime returned null at ${atSec}s")
+    val rotated = applyRotationIfNeeded(raw, rotationDeg, metaW, metaH)
+    val scaled = resizeLongestSide(src = rotated, targetW = resizeW, targetH = resizeH)
+
+    val outFile = File(outPath)
+    outFile.parentFile?.mkdirs()
+    if (outFile.exists()) outFile.delete()
+    try {
+      FileOutputStream(outFile).use { fos ->
+        val ok = scaled.compress(Bitmap.CompressFormat.JPEG, 90, fos)
+        if (!ok) {
+          outFile.delete()
+          throw ProbeException("Bitmap.compress(JPEG) returned false")
+        }
+      }
+    } finally {
+      if (scaled !== rotated) scaled.recycle()
+      if (rotated !== raw) rotated.recycle()
+      raw.recycle()
+    }
+  }
+
   // --- capabilities ----------------------------------------------------
 
   @Volatile

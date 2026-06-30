@@ -375,6 +375,14 @@ typedef NS_ERROR_ENUM(RNVPThumbnailerErrorDomain, RNVPThumbnailerErrorCode) {
                      resizeWidth:(double)resizeWidth
                     resizeHeight:(double)resizeHeight
                            error:(NSError *_Nullable __autoreleasing *)error;
++ (nullable NSArray<NSString *> *)
+    generateThumbnailsFromURL:(NSURL *)sourceURL
+                   toURLs:(NSArray<NSURL *> *)outputURLs
+                   atSecs:(NSArray<NSNumber *> *)atSecs
+             toleranceSec:(double)toleranceSec
+              resizeWidth:(double)resizeWidth
+             resizeHeight:(double)resizeHeight
+                    error:(NSError *_Nullable __autoreleasing *)error;
 @end
 
 // Forward-declare RNVPCapabilities for the same clang-module reason as the
@@ -3114,6 +3122,181 @@ static BOOL readJpegPixelSize(NSString *path, NSInteger *outWidth,
   XCTAssertEqualObjects(error.domain, RNVPThumbnailerErrorDomain);
   XCTAssertEqual(error.code, RNVPThumbnailerErrorCodeNotFound);
   XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:out]);
+}
+
+#pragma mark - Batch thumbnails (#73)
+
+/// Build N output URLs in NSTemporaryDirectory() with a unique tag.
+static NSArray<NSURL *> *batchOutURLs(NSString *tag, NSUInteger count)
+{
+  NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:count];
+  NSString *uuid = NSUUID.UUID.UUIDString;
+  for (NSUInteger i = 0; i < count; i++) {
+    NSString *p = [NSTemporaryDirectory()
+        stringByAppendingPathComponent:
+            [NSString stringWithFormat:@"%@-%@-%lu.jpg", tag, uuid,
+                                       (unsigned long)i]];
+    [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
+    [urls addObject:[NSURL fileURLWithPath:p]];
+  }
+  return urls;
+}
+
+/// #73 acceptance: a batch of N times yields N JPEGs from a single decode
+/// session, the result array is parallel to the requested times, and every
+/// written file is a valid JPEG.
+- (void)testThumbnailsBatchGeneratesAllFrames
+{
+  NSError *fixtureError = nil;
+  NSString *src = authorConcatFixture(160, 120, 30, 30, @"t073", &fixtureError);
+  XCTAssertNotNil(src, @"fixture failed: %@", fixtureError);
+
+  NSArray<NSNumber *> *times = @[ @0.0, @0.25, @0.5, @0.75 ];
+  NSArray<NSURL *> *outs = batchOutURLs(@"t073-batch", times.count);
+
+  NSError *error = nil;
+  NSArray<NSString *> *paths =
+      [RNVPThumbnailer generateThumbnailsFromURL:[NSURL fileURLWithPath:src]
+                                          toURLs:outs
+                                          atSecs:times
+                                    toleranceSec:0.0
+                                     resizeWidth:0.0
+                                    resizeHeight:0.0
+                                           error:&error];
+  XCTAssertNotNil(paths, @"batch failed: %@", error);
+  XCTAssertEqual(paths.count, times.count);
+  for (NSUInteger i = 0; i < times.count; i++) {
+    XCTAssertEqualObjects(paths[i], outs[i].path);
+    XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outs[i].path]);
+    NSData *head = [[NSData dataWithContentsOfFile:outs[i].path]
+        subdataWithRange:NSMakeRange(0, 2)];
+    const uint8_t *bytes = head.bytes;
+    XCTAssertEqual(bytes[0], 0xFF);
+    XCTAssertEqual(bytes[1], 0xD8);
+    NSInteger w = 0, h = 0;
+    XCTAssertTrue(readJpegPixelSize(outs[i].path, &w, &h));
+    XCTAssertEqual(w, 160);
+    XCTAssertEqual(h, 120);
+  }
+
+  [[NSFileManager defaultManager] removeItemAtPath:src error:nil];
+  for (NSURL *u in outs)
+    [[NSFileManager defaultManager] removeItemAtPath:u.path error:nil];
+}
+
+/// #73: caller times may be unsorted; the native side walks the decoder
+/// forward but maps results back to caller order — slot i is the frame for
+/// atSecs[i], written to outPaths[i].
+- (void)testThumbnailsBatchMapsUnsortedTimesToCallerOrder
+{
+  NSError *fixtureError = nil;
+  NSString *src = authorConcatFixture(160, 120, 30, 30, @"t073u", &fixtureError);
+  XCTAssertNotNil(src, @"fixture failed: %@", fixtureError);
+
+  NSArray<NSNumber *> *times = @[ @0.75, @0.0, @0.5, @0.25 ];
+  NSArray<NSURL *> *outs = batchOutURLs(@"t073-unsorted", times.count);
+
+  NSError *error = nil;
+  NSArray<NSString *> *paths =
+      [RNVPThumbnailer generateThumbnailsFromURL:[NSURL fileURLWithPath:src]
+                                          toURLs:outs
+                                          atSecs:times
+                                    toleranceSec:0.0
+                                     resizeWidth:0.0
+                                    resizeHeight:0.0
+                                           error:&error];
+  XCTAssertNotNil(paths, @"batch failed: %@", error);
+  XCTAssertEqual(paths.count, times.count);
+  for (NSUInteger i = 0; i < times.count; i++) {
+    XCTAssertEqualObjects(paths[i], outs[i].path);
+    XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outs[i].path]);
+  }
+
+  [[NSFileManager defaultManager] removeItemAtPath:src error:nil];
+  for (NSURL *u in outs)
+    [[NSFileManager defaultManager] removeItemAtPath:u.path error:nil];
+}
+
+/// #73: a non-zero tolerance still produces a frame for every requested time
+/// (snapping to the nearest keyframe), and the resize box applies to all.
+- (void)testThumbnailsBatchToleranceAndResizeApplyToAll
+{
+  NSError *fixtureError = nil;
+  NSString *src = authorConcatFixture(160, 120, 30, 30, @"t073t", &fixtureError);
+  XCTAssertNotNil(src, @"fixture failed: %@", fixtureError);
+
+  NSArray<NSNumber *> *times = @[ @0.1, @0.4, @0.9 ];
+  NSArray<NSURL *> *outs = batchOutURLs(@"t073-tol", times.count);
+
+  NSError *error = nil;
+  NSArray<NSString *> *paths =
+      [RNVPThumbnailer generateThumbnailsFromURL:[NSURL fileURLWithPath:src]
+                                          toURLs:outs
+                                          atSecs:times
+                                    toleranceSec:0.5
+                                     resizeWidth:80.0
+                                    resizeHeight:0.0
+                                           error:&error];
+  XCTAssertNotNil(paths, @"batch failed: %@", error);
+  XCTAssertEqual(paths.count, times.count);
+  for (NSUInteger i = 0; i < times.count; i++) {
+    XCTAssertGreaterThan(paths[i].length, 0u);
+    NSInteger w = 0, h = 0;
+    XCTAssertTrue(readJpegPixelSize(outs[i].path, &w, &h));
+    XCTAssertEqual(w, 80);
+    XCTAssertEqual(h, 60);
+  }
+
+  [[NSFileManager defaultManager] removeItemAtPath:src error:nil];
+  for (NSURL *u in outs)
+    [[NSFileManager defaultManager] removeItemAtPath:u.path error:nil];
+}
+
+/// #73: mismatched parallel arrays are a batch-level InvalidSpec failure
+/// (returns nil), distinct from per-frame partial failure.
+- (void)testThumbnailsBatchRejectsMismatchedArrays
+{
+  NSError *fixtureError = nil;
+  NSString *src = authorConcatFixture(160, 120, 30, 30, @"t073m", &fixtureError);
+  XCTAssertNotNil(src, @"fixture failed: %@", fixtureError);
+  NSArray<NSURL *> *outs = batchOutURLs(@"t073-mismatch", 1);
+
+  NSError *error = nil;
+  NSArray<NSString *> *paths =
+      [RNVPThumbnailer generateThumbnailsFromURL:[NSURL fileURLWithPath:src]
+                                          toURLs:outs
+                                          atSecs:@[ @0.0, @0.5 ]
+                                    toleranceSec:0.0
+                                     resizeWidth:0.0
+                                    resizeHeight:0.0
+                                           error:&error];
+  XCTAssertNil(paths);
+  XCTAssertEqualObjects(error.domain, RNVPThumbnailerErrorDomain);
+  XCTAssertEqual(error.code, RNVPThumbnailerErrorCodeInvalidSpec);
+
+  [[NSFileManager defaultManager] removeItemAtPath:src error:nil];
+}
+
+/// #73: a missing source is a batch-level NotFound failure.
+- (void)testThumbnailsBatchRejectsMissingFile
+{
+  NSString *ghost = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:@"t073-ghost.mp4"];
+  [[NSFileManager defaultManager] removeItemAtPath:ghost error:nil];
+  NSArray<NSURL *> *outs = batchOutURLs(@"t073-ghost", 2);
+
+  NSError *error = nil;
+  NSArray<NSString *> *paths =
+      [RNVPThumbnailer generateThumbnailsFromURL:[NSURL fileURLWithPath:ghost]
+                                          toURLs:outs
+                                          atSecs:@[ @0.0, @0.5 ]
+                                    toleranceSec:0.0
+                                     resizeWidth:0.0
+                                    resizeHeight:0.0
+                                           error:&error];
+  XCTAssertNil(paths);
+  XCTAssertEqualObjects(error.domain, RNVPThumbnailerErrorDomain);
+  XCTAssertEqual(error.code, RNVPThumbnailerErrorCodeNotFound);
 }
 
 /// T031 acceptance (US9 first bullet): `Video.capabilities()` returns at

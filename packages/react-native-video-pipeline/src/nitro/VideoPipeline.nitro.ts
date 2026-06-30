@@ -483,6 +483,41 @@ export interface ThumbnailOptions {
   resizeTo?: Size;
 }
 
+/**
+ * Batch frame extraction — N frames from a single decode session. The native
+ * side opens the asset, walks the decoder forward once over the (internally
+ * sorted) capture times, and tears it down once, instead of paying a fresh
+ * asset-open + cold-seek + decoder-teardown per frame the way a JS-side loop
+ * over `thumbnail` would. This is the right primitive for filmstrips and
+ * scrubbers. See `Video.thumbnails`.
+ *
+ * `atSecs` and `outPaths` are parallel arrays — `outPaths[i]` receives the
+ * frame captured at `atSecs[i]`. They must have equal, non-zero length.
+ */
+export interface BatchThumbnailOptions {
+  /** Capture times in seconds. Must be non-empty; each entry must be >= 0. */
+  atSecs: number[];
+  /** One output path per capture time, parallel to `atSecs`. */
+  outPaths: string[];
+  resizeTo?: Size;
+  /**
+   * Seek tolerance in seconds. Filmstrips rarely need exact frames; a non-zero
+   * tolerance lets the native generator snap to the nearest already-decoded
+   * keyframe and skip exact-seek decoding — the dominant per-frame cost on a
+   * long clip. `0` (or omitted) means exact-frame seeking, matching
+   * `Video.thumbnail`.
+   *
+   * Platform asymmetry: iOS honors the magnitude (it maps to
+   * `requestedTimeTolerance{Before,After}`, so the returned frame is within
+   * ±toleranceSec of the request). Android has no numeric-tolerance API on
+   * `MediaMetadataRetriever`, so any value > 0 means "snap to the nearest
+   * keyframe" (`OPTION_CLOSEST_SYNC`) regardless of the magnitude — on a
+   * long-GOP source the chosen keyframe may be further away than `toleranceSec`
+   * would imply on iOS.
+   */
+  toleranceSec?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Control surfaces
 // ---------------------------------------------------------------------------
@@ -621,6 +656,13 @@ export interface VideoPipeline extends HybridObject<{ ios: 'c++'; android: 'kotl
   // --- Probe --------------------------------------------------------------
   info(uri: string): Promise<VideoInfo>;
   thumbnail(uri: string, options: ThumbnailOptions): Promise<string>;
+  /**
+   * Batch sibling of `thumbnail` — see {@link BatchThumbnailOptions}. Resolves
+   * to one path per requested time, in the same order as `options.atSecs`. A
+   * frame that fails to extract resolves to an empty string in its slot rather
+   * than rejecting the whole batch, so one bad timestamp can't kill a strip.
+   */
+  thumbnails(uri: string, options: BatchThumbnailOptions): Promise<string[]>;
   capabilities(): Promise<EncoderCaps>;
 
   // --- Remux / transcode / compose (auto-routed) --------------------------

@@ -808,6 +808,61 @@ std::shared_ptr<Promise<std::string>> HybridVideoPipeline::thumbnail(
       });
 }
 
+std::shared_ptr<Promise<std::vector<std::string>>>
+HybridVideoPipeline::thumbnails(const std::string& uri,
+                                const BatchThumbnailOptions& options) {
+  NSURL* sourceURL = urlFromUri(uri);
+
+  // Box the parallel arrays for the Obj-C boundary; keep the original outPath
+  // strings to hand back to JS verbatim (matches single `thumbnail`, which
+  // resolves to the caller's path string, not a re-serialized URL).
+  NSMutableArray<NSNumber*>* atSecs =
+      [NSMutableArray arrayWithCapacity:options.atSecs.size()];
+  for (double s : options.atSecs) [atSecs addObject:@(s)];
+  NSMutableArray<NSURL*>* outputURLs =
+      [NSMutableArray arrayWithCapacity:options.outPaths.size()];
+  for (const auto& p : options.outPaths) [outputURLs addObject:urlFromUri(p)];
+  std::vector<std::string> outPathsCopy = options.outPaths;
+
+  double resizeW = 0.0;
+  double resizeH = 0.0;
+  if (options.resizeTo.has_value()) {
+    const auto& s = *options.resizeTo;
+    if (s.w.has_value()) resizeW = *s.w;
+    if (s.h.has_value()) resizeH = *s.h;
+  }
+  const double toleranceSec = options.toleranceSec.value_or(0.0);
+
+  return Promise<std::vector<std::string>>::async(
+      [sourceURL, outputURLs, atSecs, toleranceSec, resizeW, resizeH,
+       outPathsCopy]() -> std::vector<std::string> {
+        NSError* err = nil;
+        NSArray<NSString*>* written =
+            [RNVPThumbnailer generateThumbnailsFromURL:sourceURL
+                                                toURLs:outputURLs
+                                                atSecs:atSecs
+                                          toleranceSec:toleranceSec
+                                           resizeWidth:resizeW
+                                          resizeHeight:resizeH
+                                                 error:&err];
+        if (written == nil) {
+          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          throw std::runtime_error(
+              std::string("VideoPipeline.thumbnails failed: ") + desc);
+        }
+        // A non-empty slot means that frame was written; hand back the
+        // caller's original path string. An empty slot is a per-frame failure
+        // (partial-success contract).
+        std::vector<std::string> result;
+        result.reserve(outPathsCopy.size());
+        for (NSUInteger i = 0; i < written.count; i++) {
+          result.push_back(written[i].length > 0 ? outPathsCopy[i]
+                                                  : std::string());
+        }
+        return result;
+      });
+}
+
 std::shared_ptr<Promise<EncoderCaps>> HybridVideoPipeline::capabilities() {
   // Hop to Nitro's background pool — the first call runs VTCompressionSession
   // probes (~milliseconds, but enough to merit staying off the JS thread),

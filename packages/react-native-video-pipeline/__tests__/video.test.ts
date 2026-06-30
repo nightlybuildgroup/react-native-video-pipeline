@@ -35,6 +35,7 @@ interface FakeNative {
   flipCalls: unknown[];
   stampCalls: unknown[];
   thumbnailCalls: unknown[];
+  thumbnailsCalls: unknown[];
   infoCalls: string[];
   capabilitiesCalls: number;
 }
@@ -48,6 +49,7 @@ function makeFakeNative(): FakeNative {
     flipCalls: [],
     stampCalls: [],
     thumbnailCalls: [],
+    thumbnailsCalls: [],
     infoCalls: [],
     capabilitiesCalls: 0,
   };
@@ -59,6 +61,7 @@ function makeFakeNative(): FakeNative {
     flipCalls,
     stampCalls,
     thumbnailCalls,
+    thumbnailsCalls,
     infoCalls,
   } = fake;
 
@@ -85,6 +88,10 @@ function makeFakeNative(): FakeNative {
     thumbnail(uri: string, options: unknown): Promise<string> {
       thumbnailCalls.push({ uri, options });
       return Promise.resolve('out.jpg');
+    },
+    thumbnails(uri: string, options: { atSecs: number[]; outPaths: string[] }): Promise<string[]> {
+      thumbnailsCalls.push({ uri, options });
+      return Promise.resolve(options.outPaths);
     },
     capabilities(): Promise<EncoderCaps> {
       fake.capabilitiesCalls += 1;
@@ -176,6 +183,45 @@ describe('Video.info / thumbnail / capabilities', () => {
     expect(() => Video.thumbnail('in.mp4', { atSec: -1, outPath: '/tmp/thumb.jpg' })).toThrow(
       InvalidSpecError,
     );
+  });
+
+  it('forwards thumbnails and resolves to the written paths in order', async () => {
+    const out = await Video.thumbnails('in.mp4', {
+      atSecs: [0, 0.5, 1],
+      outPaths: ['/tmp/a.jpg', '/tmp/b.jpg', '/tmp/c.jpg'],
+      resizeTo: { w: 100 },
+      toleranceSec: 0.1,
+    });
+    expect(fake.thumbnailsCalls).toHaveLength(1);
+    expect(out).toEqual(['/tmp/a.jpg', '/tmp/b.jpg', '/tmp/c.jpg']);
+  });
+
+  it('rejects thumbnails with an empty atSecs array', () => {
+    expect(() => Video.thumbnails('in.mp4', { atSecs: [], outPaths: [] })).toThrow(
+      InvalidSpecError,
+    );
+  });
+
+  it('rejects thumbnails when outPaths length differs from atSecs', () => {
+    expect(() => Video.thumbnails('in.mp4', { atSecs: [0, 1], outPaths: ['/tmp/a.jpg'] })).toThrow(
+      InvalidSpecError,
+    );
+  });
+
+  it('rejects thumbnails with a negative atSecs entry', () => {
+    expect(() =>
+      Video.thumbnails('in.mp4', { atSecs: [0, -1], outPaths: ['/tmp/a.jpg', '/tmp/b.jpg'] }),
+    ).toThrow(InvalidSpecError);
+  });
+
+  it('rejects thumbnails with a negative toleranceSec', () => {
+    expect(() =>
+      Video.thumbnails('in.mp4', {
+        atSecs: [0],
+        outPaths: ['/tmp/a.jpg'],
+        toleranceSec: -0.5,
+      }),
+    ).toThrow(InvalidSpecError);
   });
 
   it('forwards capabilities', async () => {

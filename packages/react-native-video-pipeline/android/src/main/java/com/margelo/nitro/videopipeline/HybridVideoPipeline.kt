@@ -89,6 +89,33 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
       }
     }
 
+  override fun thumbnails(uri: String, options: BatchThumbnailOptions): Promise<Array<String>> =
+    Promise.parallel {
+      val resizeW = options.resizeTo?.w ?: 0.0
+      val resizeH = options.resizeTo?.h ?: 0.0
+      val originalOutPaths = options.outPaths
+      try {
+        val written = ProbeRunner.thumbnails(
+          uri = uri,
+          atSecs = options.atSecs.toList(),
+          outPaths = originalOutPaths.map { outputFilesystemPath(it) },
+          resizeW = resizeW,
+          resizeH = resizeH,
+          toleranceSec = options.toleranceSec ?: 0.0,
+        )
+        // ProbeRunner writes to the normalized filesystem path; hand the
+        // caller back their ORIGINAL path string for each written slot (and ""
+        // for failures), matching iOS and the documented contract.
+        written.mapIndexed { i, w ->
+          if (w.isNotEmpty()) originalOutPaths[i] else ""
+        }.toTypedArray()
+      } catch (e: ProbeRunner.NotFoundException) {
+        throw RuntimeException("VideoPipeline.thumbnails failed: ${e.message}")
+      } catch (e: ProbeRunner.InvalidSpecException) {
+        throw VideoPipelineInvalidSpecException("thumbnails: ${e.message}")
+      }
+    }
+
   override fun capabilities(): Promise<EncoderCaps> = Promise.parallel {
     ProbeRunner.capabilities()
   }
