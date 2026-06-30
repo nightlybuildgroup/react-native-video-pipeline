@@ -19,6 +19,13 @@
  * in lockstep with packages/react-native-video-pipeline/ios/AVMuxer.h.
  */
 
+// Standalone path helpers from RNVPPathUtils.{h,mm}. Forward-declared (rather
+// than #imported) to match this file's convention. Plain C functions over
+// Foundation types; symbols resolve at link time. Keep in lockstep with
+// packages/react-native-video-pipeline/ios/RNVPPathUtils.h.
+extern NSURL *RNVPURLFromUri(NSString *uri);
+extern NSString *RNVPOutputFilesystemPath(NSString *pathOrUri);
+
 extern NSErrorDomain const RNVPAVMuxerErrorDomain;
 
 typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode) {
@@ -7871,6 +7878,103 @@ static NSString *authorSolidColorClip(NSInteger w, NSInteger h, NSInteger fps,
   [[NSFileManager defaultManager] removeItemAtPath:red error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:blue error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:out error:nil];
+}
+
+// ---------------------------------------------------------------------------
+// RNVPPathUtils — output.path scheme normalization (#74). compose/synthesize/
+// render feed output.path straight into the muxer / NSFileManager /
+// fileURLWithPath:, which want a bare POSIX path. A `file://` URI (e.g.
+// expo-file-system's File.uri) must be normalized to its bare path or the
+// export fails with the cryptic -12115/-17913 "Cannot create file".
+// ---------------------------------------------------------------------------
+
+- (void)testOutputFilesystemPathPassesBarePathThrough
+{
+  NSString *bare = @"/private/tmp/rnvp/out.mp4";
+  XCTAssertEqualObjects(RNVPOutputFilesystemPath(bare), bare,
+                        @"a bare POSIX path must pass through unchanged");
+}
+
+- (void)testOutputFilesystemPathStripsFileURIScheme
+{
+  NSString *posix = @"/private/tmp/rnvp/out.mp4";
+  NSString *uri = [NSURL fileURLWithPath:posix].absoluteString;  // file://...
+  XCTAssertTrue([uri hasPrefix:@"file://"], @"sanity: built a file:// URI");
+  XCTAssertEqualObjects(RNVPOutputFilesystemPath(uri), posix,
+                        @"a file:// URI must normalize to its bare POSIX path");
+}
+
+- (void)testOutputFilesystemPathHandlesPercentEncodedFileURI
+{
+  // expo-file-system percent-encodes spaces in File.uri; the bare path must
+  // come back decoded so NSFileManager / the muxer can create it.
+  NSString *posix = @"/private/tmp/rnvp dir/my out.mp4";
+  NSString *uri = [NSURL fileURLWithPath:posix].absoluteString;
+  XCTAssertTrue([uri containsString:@"%20"], @"sanity: spaces are encoded");
+  XCTAssertEqualObjects(RNVPOutputFilesystemPath(uri), posix,
+                        @"percent-encoded file:// URI must decode to bare path");
+}
+
+- (void)testOutputFilesystemPathEmptyInputIsEmpty
+{
+  XCTAssertEqualObjects(RNVPOutputFilesystemPath(@""), @"",
+                        @"empty input must not crash and yields empty path");
+}
+
+// Integration: the normalized bare path actually creates a valid MP4 via the
+// muxer (which does fileURLWithPath: internally) — i.e. the exact #74 failure
+// mode is fixed end-to-end when output.path is a file:// URI.
+- (void)testMuxerCreatesFileFromNormalizedFileURI
+{
+  const NSInteger kW = 32, kH = 32, kFps = 30, kFrames = 3;
+
+  NSString *posix = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"t074-%@.mp4", NSUUID.UUID.UUIDString]];
+  NSString *uri = [NSURL fileURLWithPath:posix].absoluteString;  // file://...
+  [[NSFileManager defaultManager] removeItemAtPath:posix error:nil];
+
+  NSString *normalized = RNVPOutputFilesystemPath(uri);
+  XCTAssertEqualObjects(normalized, posix);
+
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  NSError *error = nil;
+  XCTAssertTrue([muxer openVideoOnlyAtPath:normalized
+                                     width:kW
+                                    height:kH
+                                       fps:kFps
+                                     error:&error],
+                @"muxer open at normalized file:// path failed: %@", error);
+
+  NSDictionary *pbAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+    (id)kCVPixelBufferWidthKey : @(kW),
+    (id)kCVPixelBufferHeightKey : @(kH),
+  };
+  for (NSInteger i = 0; i < kFrames; i++) {
+    CVPixelBufferRef pb = NULL;
+    XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, kW, kH,
+                                       kCVPixelFormatType_32BGRA,
+                                       (__bridge CFDictionaryRef)pbAttrs, &pb),
+                   kCVReturnSuccess);
+    CVPixelBufferLockBaseAddress(pb, 0);
+    memset(CVPixelBufferGetBaseAddress(pb), 0x7F,
+           CVPixelBufferGetBytesPerRow(pb) * kH);
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    CMTime pts = CMTimeMake((int64_t)i, (int32_t)kFps);
+    XCTAssertTrue([muxer appendPixelBuffer:pb presentationTime:pts error:&error],
+                  @"append failed at i=%ld: %@", (long)i, error);
+    CVPixelBufferRelease(pb);
+  }
+  XCTAssertTrue([muxer closeWithError:&error], @"close failed: %@", error);
+
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:posix],
+                @"the MP4 must exist at the bare POSIX path %@", posix);
+  AVURLAsset *asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:posix]];
+  XCTAssertEqual([asset tracksWithMediaType:AVMediaTypeVideo].count, 1u,
+                 @"normalized-path output should be a valid single-video MP4");
+
+  [[NSFileManager defaultManager] removeItemAtPath:posix error:nil];
 }
 
 @end
