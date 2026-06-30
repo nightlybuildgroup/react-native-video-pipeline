@@ -1762,8 +1762,10 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
   NSURL* outputURL = urlFromUri(outPath);
 
   drainZombiesOnce();
-  NSString* stampOutputPath =
-      [NSString stringWithUTF8String:outPath.c_str()] ?: @"";
+  // Bare path so the stamp journal's zombie cleanup (fileExistsAtPath: /
+  // removeItemAtPath:) matches the file urlFromUri(outPath) writes — outPath
+  // may be a file:// URI (#74).
+  NSString* stampOutputPath = outputFilesystemPath(outPath);
 
   // Metadata-only → passthrough remux (T032). Cheaper than a re-encode, and
   // preserves codec/bitrate/HDR/color primaries byte-for-byte.
