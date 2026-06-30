@@ -215,10 +215,11 @@ function tryBlitFromSkiaTexture(surface: SkSurface, ctx: FrameDrawerContext): bo
   // (current). Anything else → CPU fallback. Inlined; see header note.
   let handle: bigint | null = null;
   let raw: unknown;
+  let threw = false;
   try {
     raw = getTex.call(surface);
   } catch {
-    raw = undefined;
+    threw = true;
   }
   if (typeof raw === 'bigint') {
     handle = raw === 0n ? null : raw;
@@ -229,16 +230,21 @@ function tryBlitFromSkiaTexture(surface: SkSurface, ctx: FrameDrawerContext): bo
   }
 
   if (handle === null) {
-    // Inline shape description so a future shape-drift surfaces in the warning.
-    let shape: string;
-    if (raw === null) shape = 'null';
-    else if (raw === undefined) shape = 'undefined (getNativeTextureUnstable threw)';
-    else if (typeof raw !== 'object') shape = typeof raw;
-    // biome-ignore lint/suspicious/noExplicitAny: TextureInfo is untyped — Object.keys is the diagnostic primitive here.
-    else shape = `object{${Object.keys(raw as any).join(',')}}`;
-    const msg =
-      'drawWithSkia: surface.getNativeTextureUnstable returned an unexpected shape; falling back to CPU readback. Got ' +
-      shape;
+    let msg: string;
+    if (threw) {
+      msg = 'drawWithSkia: surface.getNativeTextureUnstable threw; falling back to CPU readback.';
+    } else {
+      // Inline shape description so a future shape-drift surfaces in the warning.
+      let shape: string;
+      if (raw === null) shape = 'null';
+      else if (raw === undefined) shape = 'undefined';
+      else if (typeof raw !== 'object') shape = typeof raw;
+      // biome-ignore lint/suspicious/noExplicitAny: TextureInfo is untyped — Object.keys is the diagnostic primitive here.
+      else shape = `object{${Object.keys(raw as any).join(',')}}`;
+      msg =
+        'drawWithSkia: surface.getNativeTextureUnstable returned an unexpected shape; falling back to CPU readback. Got ' +
+        shape;
+    }
     if (!warnedMessages.has(msg)) {
       warnedMessages.add(msg);
       console.warn(msg);
