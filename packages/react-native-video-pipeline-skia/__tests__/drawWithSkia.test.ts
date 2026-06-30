@@ -273,6 +273,70 @@ describe('drawWithSkia', () => {
     expect(target.writeBytes).not.toHaveBeenCalled();
   });
 
+  it('takes the GPU fast path when getNativeTextureUnstable returns a { mtlTexture } object (current Skia shape)', () => {
+    const texPtr = 0xfeedfacen;
+    const getNativeTextureUnstable = jest.fn(() => ({
+      mtlTexture: texPtr,
+      // GL fields current Skia tacks on and we ignore on iOS.
+      glTarget: 0,
+      glID: 0,
+    }));
+    makeOffscreen.mockImplementationOnce((w: number, h: number) => {
+      const readPixels = jest.fn(() => new Uint8Array(w * h * 4));
+      const snapshot: SkImageMock = { readPixels, dispose: jest.fn() };
+      latestSnapshot = snapshot;
+      const surface: SkSurfaceMock = {
+        getCanvas: jest.fn(() => canvas),
+        flush: jest.fn(),
+        makeImageSnapshot: jest.fn(() => snapshot),
+        getNativeTextureUnstable,
+        dispose: jest.fn(),
+      };
+      latestSurface = surface;
+      return surface;
+    });
+
+    const target = makeTarget('bgra8888', 4, 4);
+    const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
+    drawWithSkia(() => {})(ctx);
+
+    expect(target.unstable_blitFromNativeTexture).toHaveBeenCalledWith(texPtr);
+    expect(target.writeBytes).not.toHaveBeenCalled();
+  });
+
+  it('falls back to CPU path when getNativeTextureUnstable itself throws', () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const getNativeTextureUnstable = jest.fn(() => {
+        throw new Error('texture handle not exposed');
+      });
+      makeOffscreen.mockImplementationOnce((w: number, h: number) => {
+        const readPixels = jest.fn(() => new Uint8Array(w * h * 4));
+        const snapshot: SkImageMock = { readPixels, dispose: jest.fn() };
+        latestSnapshot = snapshot;
+        const surface: SkSurfaceMock = {
+          getCanvas: jest.fn(() => canvas),
+          flush: jest.fn(),
+          makeImageSnapshot: jest.fn(() => snapshot),
+          getNativeTextureUnstable,
+          dispose: jest.fn(),
+        };
+        latestSurface = surface;
+        return surface;
+      });
+
+      const target = makeTarget('bgra8888', 4, 4);
+      const ctx = makeCtx(4, 4, 'bgra8888', undefined, target);
+      // Must not throw out of the worklet — the whole point of #75.
+      expect(() => drawWithSkia(() => {})(ctx)).not.toThrow();
+
+      expect(target.unstable_blitFromNativeTexture).not.toHaveBeenCalled();
+      expect(target.writeBytes).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('falls back to CPU path when getNativeTextureUnstable returns a non-bigint shape', () => {
     const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
     try {
