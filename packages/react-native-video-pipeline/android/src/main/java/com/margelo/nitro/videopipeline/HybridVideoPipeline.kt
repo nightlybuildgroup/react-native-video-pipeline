@@ -78,7 +78,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         ProbeRunner.thumbnail(
           uri = uri,
           atSec = options.atSec,
-          outPath = options.outPath,
+          outPath = outputFilesystemPath(options.outPath),
           resizeW = resizeW,
           resizeH = resizeH,
         )
@@ -194,7 +194,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     val isSynthesized = spec.clips.isNullOrEmpty()
     if (!isSynthesized) {
       val clip = spec.clips!!.first()
-      val outputPath = spec.output.path
+      val outputPath = outputFilesystemPath(spec.output.path)
       val stopToken = RenderTokenRegistry.registerToken(renderToken)
       val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
       val progressSink: SynthesizeRunner.ProgressSink? =
@@ -231,7 +231,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     val widthPx = output.width!!.roundToInt()
     val heightPx = output.height!!.roundToInt()
     val fps = output.fps!!
-    val outputPath = output.path
+    val outputPath = outputFilesystemPath(output.path)
     val durationVariant = spec.duration!!
     val seconds = if (durationVariant is Variant_FixedDuration_OpenDuration.First) {
       durationVariant.value.seconds
@@ -556,6 +556,8 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     // Passthrough remux finishes in milliseconds — journal-only (no
     // foreground-service notification flicker), but still cleaned up on a
     // mid-op kill via the journal.
+    // Accept a bare path or a `file://` URI for outPath (#78).
+    val outPath = outputFilesystemPath(outPath)
     val guard = RenderForegroundGuard.begin(renderToken, outPath, keepAlive = false)
     return Promise.parallel {
       try {
@@ -588,6 +590,8 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     renderToken: String,
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
+    // Accept a bare path or a `file://` URI for outPath (#78).
+    val outPath = outputFilesystemPath(outPath)
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outPath, keepAlive = true)
     return Promise.parallel {
@@ -647,6 +651,8 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         )
       )
     }
+    // Accept a bare path or a `file://` URI for outPath (#78).
+    val outPath = outputFilesystemPath(outPath)
     // Metadata-only stamp stays on the remux path — no re-encode needed.
     // Journal-only (fast), same rationale as trim.
     if (watermark == null) {
@@ -746,7 +752,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     val width = output.width!!.roundToInt()
     val height = output.height!!.roundToInt()
     val fps = output.fps!!
-    val outputPath = output.path
+    val outputPath = outputFilesystemPath(output.path)
     val durationVariant = spec.duration!!
 
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
@@ -812,7 +818,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         outputStart = it.outputStart,
       )
     }
-    val outputPath = spec.output.path
+    val outputPath = outputFilesystemPath(spec.output.path)
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
 
@@ -862,7 +868,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
         )
       )
     }
-    val outputPath = spec.output.path
+    val outputPath = outputFilesystemPath(spec.output.path)
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     return Promise.parallel {
@@ -1026,7 +1032,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     renderToken: String,
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
-    val outputPath = spec.output.path
+    val outputPath = outputFilesystemPath(spec.output.path)
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     return Promise.parallel {
@@ -1358,7 +1364,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     renderToken: String,
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
-    val outputPath = spec.output.path
+    val outputPath = outputFilesystemPath(spec.output.path)
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     return Promise.parallel {
@@ -1517,7 +1523,7 @@ class HybridVideoPipeline : HybridVideoPipelineSpec() {
     renderToken: String,
     onProgress: ((p: Progress) -> Unit)?,
   ): Promise<Unit> {
-    val outputPath = spec.output.path
+    val outputPath = outputFilesystemPath(spec.output.path)
     val stopToken = RenderTokenRegistry.registerToken(renderToken)
     val guard = RenderForegroundGuard.begin(renderToken, outputPath, keepAlive = true)
     return Promise.parallel {
