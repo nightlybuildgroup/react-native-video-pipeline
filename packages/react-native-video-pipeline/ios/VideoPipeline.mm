@@ -958,8 +958,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           !renderToken.empty()
               ? [NSString stringWithUTF8String:renderToken.c_str()]
               : internalJournalToken("render-transcode");
-      NSString* outputPathForJournal =
-          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      // Bare path (not the raw file:// URI) so zombie cleanup's fileExistsAtPath:
+      // / removeItemAtPath: match the file the muxer actually writes (#74).
+      NSString* outputPathForJournal = outputFilesystemPath(spec.output.path);
       RNVPBackgroundTaskGuard* guard =
           [RNVPBackgroundTaskGuard beginWithTokenId:journalToken
                                          outputPath:outputPathForJournal
@@ -1106,8 +1107,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           !renderToken.empty()
               ? [NSString stringWithUTF8String:renderToken.c_str()]
               : internalJournalToken("render-multi-transcode");
-      NSString* outputPathForJournal =
-          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      // Bare path (not the raw file:// URI) so zombie cleanup's fileExistsAtPath:
+      // / removeItemAtPath: match the file the muxer actually writes (#74).
+      NSString* outputPathForJournal = outputFilesystemPath(spec.output.path);
       RNVPBackgroundTaskGuard* guard =
           [RNVPBackgroundTaskGuard beginWithTokenId:journalToken
                                          outputPath:outputPathForJournal
@@ -1455,8 +1457,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           !renderToken.empty()
               ? [NSString stringWithUTF8String:renderToken.c_str()]
               : internalJournalToken("render-transform");
-      NSString* transformOutputPath =
-          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      // Bare path for journal/zombie-cleanup consistency (#74).
+      NSString* transformOutputPath = outputFilesystemPath(spec.output.path);
       RNVPBackgroundTaskGuard* transformGuard =
           [RNVPBackgroundTaskGuard beginWithTokenId:transformJournalToken
                                          outputPath:transformOutputPath
@@ -1493,8 +1495,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           std::make_exception_ptr(makeInvalidSpec(*rejection)));
     }
 
-    NSString* outputPathConcat =
-        [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+    // Bare path for journal/zombie-cleanup consistency (#74).
+    NSString* outputPathConcat = outputFilesystemPath(spec.output.path);
     NSURL* outputURLConcat = urlFromUri(spec.output.path);
 
     NSMutableArray<RNVPRemuxerConcatSource*>* sources =
