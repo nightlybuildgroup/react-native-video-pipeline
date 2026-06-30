@@ -35,6 +35,7 @@
 #import "HybridFrameSource.h"
 #import "HybridFrameTarget.h"
 #import "OverlayRenderer.h"
+#import "RNVPPathUtils.h"
 #import "Remuxer.h"
 #import "Remuxer+Internal.h"
 #import "SynthesizeRunner.h"
@@ -108,13 +109,16 @@ RNVPExportSessionProgress exportSessionProgressFromNitro(
   };
 }
 
+// Thin std::string → NSString bridges over the canonical, host-testable
+// implementations in RNVPPathUtils.{h,mm}. `output.path` may legitimately
+// arrive as either a bare path or a `file://` URI (e.g. expo-file-system's
+// `File.uri`), exactly like the source `uri`/`outPath`; see issue #74.
 NSURL* urlFromUri(const std::string& uri) {
-  NSString* nsUri = [NSString stringWithUTF8String:uri.c_str()] ?: @"";
-  if ([nsUri hasPrefix:@"file://"]) {
-    NSURL* parsed = [NSURL URLWithString:nsUri];
-    if (parsed != nil) return parsed;
-  }
-  return [NSURL fileURLWithPath:nsUri];
+  return RNVPURLFromUri([NSString stringWithUTF8String:uri.c_str()] ?: @"");
+}
+
+NSString* outputFilesystemPath(const std::string& path) {
+  return RNVPOutputFilesystemPath([NSString stringWithUTF8String:path.c_str()] ?: @"");
 }
 
 std::string nsStringToUtf8(NSString* _Nullable s) {
@@ -954,8 +958,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           !renderToken.empty()
               ? [NSString stringWithUTF8String:renderToken.c_str()]
               : internalJournalToken("render-transcode");
-      NSString* outputPathForJournal =
-          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      // Bare path (not the raw file:// URI) so zombie cleanup's fileExistsAtPath:
+      // / removeItemAtPath: match the file the muxer actually writes (#74).
+      NSString* outputPathForJournal = outputFilesystemPath(spec.output.path);
       RNVPBackgroundTaskGuard* guard =
           [RNVPBackgroundTaskGuard beginWithTokenId:journalToken
                                          outputPath:outputPathForJournal
@@ -1102,8 +1107,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           !renderToken.empty()
               ? [NSString stringWithUTF8String:renderToken.c_str()]
               : internalJournalToken("render-multi-transcode");
-      NSString* outputPathForJournal =
-          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      // Bare path (not the raw file:// URI) so zombie cleanup's fileExistsAtPath:
+      // / removeItemAtPath: match the file the muxer actually writes (#74).
+      NSString* outputPathForJournal = outputFilesystemPath(spec.output.path);
       RNVPBackgroundTaskGuard* guard =
           [RNVPBackgroundTaskGuard beginWithTokenId:journalToken
                                          outputPath:outputPathForJournal
@@ -1451,8 +1457,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           !renderToken.empty()
               ? [NSString stringWithUTF8String:renderToken.c_str()]
               : internalJournalToken("render-transform");
-      NSString* transformOutputPath =
-          [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+      // Bare path for journal/zombie-cleanup consistency (#74).
+      NSString* transformOutputPath = outputFilesystemPath(spec.output.path);
       RNVPBackgroundTaskGuard* transformGuard =
           [RNVPBackgroundTaskGuard beginWithTokenId:transformJournalToken
                                          outputPath:transformOutputPath
@@ -1489,8 +1495,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
           std::make_exception_ptr(makeInvalidSpec(*rejection)));
     }
 
-    NSString* outputPathConcat =
-        [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+    // Bare path for journal/zombie-cleanup consistency (#74).
+    NSString* outputPathConcat = outputFilesystemPath(spec.output.path);
     NSURL* outputURLConcat = urlFromUri(spec.output.path);
 
     NSMutableArray<RNVPRemuxerConcatSource*>* sources =
@@ -1553,8 +1559,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
         std::make_exception_ptr(makeInvalidSpec(*rejection)));
   }
 
-  NSString* outputPath =
-      [NSString stringWithUTF8String:spec.output.path.c_str()] ?: @"";
+  // Accept a bare path or a `file://` URI for output.path (issue #74).
+  NSString* outputPath = outputFilesystemPath(spec.output.path);
   const NSInteger width = static_cast<NSInteger>(std::lround(*spec.output.width));
   const NSInteger height = static_cast<NSInteger>(std::lround(*spec.output.height));
   const double fps = *spec.output.fps;
@@ -1756,8 +1762,10 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
   NSURL* outputURL = urlFromUri(outPath);
 
   drainZombiesOnce();
-  NSString* stampOutputPath =
-      [NSString stringWithUTF8String:outPath.c_str()] ?: @"";
+  // Bare path so the stamp journal's zombie cleanup (fileExistsAtPath: /
+  // removeItemAtPath:) matches the file urlFromUri(outPath) writes — outPath
+  // may be a file:// URI (#74).
+  NSString* stampOutputPath = outputFilesystemPath(outPath);
 
   // Metadata-only → passthrough remux (T032). Cheaper than a re-encode, and
   // preserves codec/bitrate/HDR/color primaries byte-for-byte.
@@ -1898,8 +1906,9 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
                                drawFrameCopy, onProgressCopy, stop,
                                tokenCopy, stampMetadata, audioMode,
                                audioReplacementURL]() {
-    NSString* outputPathNS =
-        [NSString stringWithUTF8String:outputPath.c_str()] ?: @"";
+    // Accept a bare path or a `file://` URI for output.path (issue #74); the
+    // muxer / fileExistsAtPath / fileURLWithPath below all want a bare path.
+    NSString* outputPathNS = outputFilesystemPath(outputPath);
     NSFileManager* fm = [NSFileManager defaultManager];
     if ([fm fileExistsAtPath:outputPathNS]) {
       [fm removeItemAtPath:outputPathNS error:NULL];
