@@ -147,6 +147,15 @@ function makeSourceImage(source: any): SkImage | null {
 }
 
 /**
+ * Warn at most once per process for a given message. Per-frame worklet
+ * execution means a shape-drift condition would otherwise spam the console
+ * at the output fps. A plain module-scope `Set` (captured by value into the
+ * worklet closure, like `Skia` itself) — NOT a cross-worklet function call,
+ * which is exactly the thing that breaks below.
+ */
+const warnedMessages: Set<string> = new Set();
+
+/**
  * GPU fast path (T053b). Returns `true` when the blit succeeded and the
  * caller should skip the `readPixels` / `writeBytes` CPU path.
  *
@@ -160,107 +169,94 @@ function makeSourceImage(source: any): SkImage | null {
  *      we don't care about on iOS.
  *
  * We accept either, extract the bigint, and pass it across Nitro. Anything
- * else (function-shape moved again, throw, null) drops to the CPU path
- * with a one-shot warning. The Skia object itself is never sent across
- * Nitro — we extract the primitive on the JS side.
+ * else (function-shape moved again, throw, null) drops to the CPU path with
+ * a one-shot warning. The Skia object itself is never sent across Nitro — we
+ * extract the primitive on the JS side.
  *
  * The `SMOKE_FORCE_CPU_READBACK` env var forces the CPU path even when the
  * GPU path is available — used by the `yarn smoke:ios` harness to compare
- * GPU-vs-CPU output bit-identically (closes one T053b-deferred verification
- * bullet). Read per-call because Jest flips the env across tests and the
- * per-frame cost is a single property lookup.
+ * GPU-vs-CPU output bit-identically. Read per-call because Jest flips the env
+ * across tests and the per-frame cost is a single property lookup.
+ *
+ * **Everything is inlined into this one worklet body — no calls out to other
+ * module-scope helpers.** react-native-worklets-core drops nested
+ * worklet-to-worklet references when this package is consumed pre-built from
+ * `node_modules`: a helper that is itself a `'worklet'` and is called from
+ * inside another worklet resolves to `undefined` on the UI runtime and
+ * throws at frame 0 (issue #75 — `extractMtlTexturePtr is not a function`).
+ * Capturing a value (the `warnedMessages` Set, `Skia`, `console`) is fine;
+ * *calling* a sibling worklet is not. Keep this self-contained.
  */
-function isCpuReadbackForced(): boolean {
+function tryBlitFromSkiaTexture(surface: SkSurface, ctx: FrameDrawerContext): boolean {
   'worklet';
+
+  // SMOKE_FORCE_CPU_READBACK forces the CPU path even when GPU is wired.
+  // Checked first so `getNativeTextureUnstable` is not even invoked.
   try {
     // biome-ignore lint/suspicious/noExplicitAny: globalThis.process is Node-only; any cast keeps the file RN-runtime safe.
     const env = (globalThis as any)?.process?.env;
     const raw = env?.SMOKE_FORCE_CPU_READBACK;
-    if (typeof raw !== 'string') return false;
-    const v = raw.toLowerCase();
-    return v === '1' || v === 'true' || v === 'yes';
+    if (typeof raw === 'string') {
+      const v = raw.toLowerCase();
+      if (v === '1' || v === 'true' || v === 'yes') return false;
+    }
   } catch {
-    return false;
+    // Ignore — absence of process.env just means "not forced".
   }
-}
 
-function tryBlitFromSkiaTexture(surface: SkSurface, ctx: FrameDrawerContext): boolean {
-  'worklet';
-  if (isCpuReadbackForced()) {
-    return false;
-  }
   const getTex = surface.getNativeTextureUnstable;
   const blit = ctx.target.unstable_blitFromNativeTexture;
   if (typeof getTex !== 'function' || typeof blit !== 'function') {
     return false;
   }
+
+  // Extract the iOS `id<MTLTexture>` pointer out of whatever shape Skia hands
+  // back: a raw `bigint` (older Skia) or `{ mtlTexture: bigint, ... }`
+  // (current). Anything else → CPU fallback. Inlined; see header note.
+  let handle: bigint | null = null;
   let raw: unknown;
   try {
     raw = getTex.call(surface);
   } catch {
-    warnOnce('drawWithSkia: surface.getNativeTextureUnstable threw; falling back to CPU readback.');
-    return false;
+    raw = undefined;
   }
-  const handle = extractMtlTexturePtr(raw);
+  if (typeof raw === 'bigint') {
+    handle = raw === 0n ? null : raw;
+  } else if (raw !== null && typeof raw === 'object') {
+    // biome-ignore lint/suspicious/noExplicitAny: Skia's TextureInfo isn't typed in their public d.ts (return is `unknown`); narrow defensively here.
+    const mtl = (raw as any).mtlTexture;
+    if (typeof mtl === 'bigint' && mtl !== 0n) handle = mtl;
+  }
+
   if (handle === null) {
-    warnOnce(
+    // Inline shape description so a future shape-drift surfaces in the warning.
+    let shape: string;
+    if (raw === null) shape = 'null';
+    else if (raw === undefined) shape = 'undefined (getNativeTextureUnstable threw)';
+    else if (typeof raw !== 'object') shape = typeof raw;
+    // biome-ignore lint/suspicious/noExplicitAny: TextureInfo is untyped — Object.keys is the diagnostic primitive here.
+    else shape = `object{${Object.keys(raw as any).join(',')}}`;
+    const msg =
       'drawWithSkia: surface.getNativeTextureUnstable returned an unexpected shape; falling back to CPU readback. Got ' +
-        describeShape(raw),
-    );
+      shape;
+    if (!warnedMessages.has(msg)) {
+      warnedMessages.add(msg);
+      console.warn(msg);
+    }
     return false;
   }
+
   try {
     blit.call(ctx.target, handle);
     return true;
   } catch (err) {
-    warnOnce(
+    const msg =
       'drawWithSkia: FrameTarget.unstable_blitFromNativeTexture threw; falling back to CPU readback. ' +
-        String(err),
-    );
+      String(err);
+    if (!warnedMessages.has(msg)) {
+      warnedMessages.add(msg);
+      console.warn(msg);
+    }
     return false;
   }
-}
-
-/**
- * Pull the iOS `id<MTLTexture>` pointer out of whatever shape Skia hands
- * back. Returns `null` for any shape we don't recognize so the caller
- * drops to the CPU path. The current expected shape is `{ mtlTexture:
- * bigint, ... }`; the older one was just `bigint`.
- */
-function extractMtlTexturePtr(raw: unknown): bigint | null {
-  'worklet';
-  if (typeof raw === 'bigint') {
-    return raw === 0n ? null : raw;
-  }
-  if (raw !== null && typeof raw === 'object') {
-    // biome-ignore lint/suspicious/noExplicitAny: Skia's TextureInfo isn't typed in their public d.ts (return is `unknown`); narrow defensively here.
-    const mtl = (raw as any).mtlTexture;
-    if (typeof mtl === 'bigint' && mtl !== 0n) return mtl;
-  }
-  return null;
-}
-
-function describeShape(raw: unknown): string {
-  'worklet';
-  if (raw === null) return 'null';
-  if (typeof raw !== 'object') return typeof raw;
-  // List the keys so a future shape-drift surfaces in the warning message.
-  // biome-ignore lint/suspicious/noExplicitAny: TextureInfo is untyped — Object.keys is the diagnostic primitive here.
-  return `object{${Object.keys(raw as any).join(',')}}`;
-}
-
-/**
- * Warn at most once per process for a given message. Per-frame worklet
- * execution means a shape-drift condition would otherwise spam the console
- * at the output fps. Lives outside the worklet closure so the dedup set is
- * shared across every frame call.
- */
-const warnedMessages: Set<string> = new Set();
-function warnOnce(message: string): void {
-  'worklet';
-  if (warnedMessages.has(message)) {
-    return;
-  }
-  warnedMessages.add(message);
-  console.warn(message);
 }

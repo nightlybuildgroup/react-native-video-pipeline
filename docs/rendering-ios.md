@@ -94,10 +94,20 @@ wrapped as a second `MTLTexture` via `CVMetalTextureCacheCreateTexture­
 FromImage`.
 
 Code locations:
-- JS feature-detect + dispatch: `packages/react-native-video-pipeline-skia/src/drawWithSkia.ts:tryBlitFromSkiaTexture` (≈ line 179)
-- Texture-info shape extraction: `extractMtlTexturePtr` (≈ line 215). Skia's `getNativeTextureUnstable` now returns a `TextureInfo` object with the Metal pointer at `.mtlTexture`; older versions returned the bigint directly. We accept either.
+- JS feature-detect + dispatch + texture-info extraction: `packages/react-native-video-pipeline-skia/src/drawWithSkia.ts:tryBlitFromSkiaTexture`. Skia's `getNativeTextureUnstable` now returns a `TextureInfo` object with the Metal pointer at `.mtlTexture`; older versions returned the bigint directly. We accept either.
 - The native blit: `packages/react-native-video-pipeline/ios/MetalBlit.mm`
 - Frame-target → blit dispatch: `HybridFrameTarget.mm:unstable_blitFromNativeTexture`
+
+> **Worklet-safety constraint (issue #75).** `tryBlitFromSkiaTexture` is one
+> self-contained `'worklet'` — texture-pointer extraction, shape description,
+> and warn-once dedup are all **inlined** into its body, not factored into
+> sibling helper functions. react-native-worklets-core drops nested
+> worklet-to-worklet *calls* when this package is consumed pre-built from a
+> consumer's `node_modules`: a `'worklet'` helper invoked from inside another
+> worklet resolves to `undefined` on the UI runtime and throws at frame 0
+> (`extractMtlTexturePtr is not a function`). Capturing a *value* (the
+> module-scope `warnedMessages` Set, `Skia`, `console`) is fine; *calling* a
+> sibling worklet is not. Any future edit here must stay inlined.
 
 Per-frame data flow at 1080p:
 
