@@ -1,6 +1,7 @@
 import { CancelledError, InvalidSpecError, normalizeNativeError } from './errors';
 import { getNativeVideoPipeline } from './native';
 import type {
+  BatchThumbnailOptions,
   Clip,
   EncoderCaps,
   FlipAxis,
@@ -690,6 +691,39 @@ export const Video = {
     validateOutputPath('thumbnail', options.outPath);
     return getNativeVideoPipeline()
       .thumbnail(uri, options)
+      .catch((err) => {
+        throw normalizeNativeError(err);
+      });
+  },
+
+  /**
+   * Extract N JPEG frames in a single native decode session — the right
+   * primitive for filmstrips / scrubbers. `options.atSecs` and
+   * `options.outPaths` are parallel arrays; resolves to one path per requested
+   * time, in `atSecs` order. A frame that fails to extract resolves to an
+   * empty string in its slot (the rest of the strip still resolves).
+   */
+  thumbnails(uri: string, options: BatchThumbnailOptions): Promise<string[]> {
+    validateFileUri('thumbnails.uri', uri);
+    const { atSecs, outPaths } = options;
+    if (atSecs.length === 0) {
+      fail('thumbnails.atSecs must be a non-empty array');
+    }
+    if (outPaths.length !== atSecs.length) {
+      fail('thumbnails.outPaths must have the same length as atSecs', {
+        atSecs: atSecs.length,
+        outPaths: outPaths.length,
+      });
+    }
+    for (let i = 0; i < atSecs.length; i++) {
+      requireNonNeg(`thumbnails.atSecs[${i}]`, atSecs[i] as number);
+      validateOutputPath(`thumbnails.outPaths[${i}]`, outPaths[i] as string);
+    }
+    if (options.toleranceSec !== undefined) {
+      requireNonNeg('thumbnails.toleranceSec', options.toleranceSec);
+    }
+    return getNativeVideoPipeline()
+      .thumbnails(uri, options)
       .catch((err) => {
         throw normalizeNativeError(err);
       });

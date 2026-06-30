@@ -49,6 +49,31 @@ typedef NS_ERROR_ENUM(RNVPThumbnailerErrorDomain, RNVPThumbnailerErrorCode){
                     resizeHeight:(double)resizeHeight
                            error:(NSError *_Nullable __autoreleasing *)error;
 
+/// Batch sibling of @c generateThumbnailFromURL — extracts one JPEG per entry
+/// in @p atSecs from a SINGLE @c AVAssetImageGenerator (one asset open, one
+/// forward decode walk, one teardown) rather than re-opening the asset per
+/// frame. @p outputURLs is parallel to @p atSecs (equal, non-zero count);
+/// @c outputURLs[i] receives the frame nearest @c atSecs[i].
+///
+/// @p toleranceSec sets the generator's @c requestedTimeTolerance{Before,After}.
+/// A non-zero tolerance lets AVFoundation snap to the nearest already-decoded
+/// keyframe — the big perf lever for filmstrips. 0 means exact-frame seeking,
+/// matching the single-frame API.
+///
+/// Returns an @c NSArray<NSString *> parallel to @p atSecs: each slot holds
+/// the written output path on success, or the empty string @c \@"" on a
+/// per-frame failure (partial-success contract — one bad timestamp does not
+/// fail the batch). Returns @c nil only on a batch-level fatal error (bad
+/// inputs, source missing, no video track), populating @p error.
++ (nullable NSArray<NSString *> *)
+    generateThumbnailsFromURL:(NSURL *)sourceURL
+                   toURLs:(NSArray<NSURL *> *)outputURLs
+                   atSecs:(NSArray<NSNumber *> *)atSecs
+             toleranceSec:(double)toleranceSec
+              resizeWidth:(double)resizeWidth
+             resizeHeight:(double)resizeHeight
+                    error:(NSError *_Nullable __autoreleasing *)error;
+
 @end
 
 NS_ASSUME_NONNULL_END

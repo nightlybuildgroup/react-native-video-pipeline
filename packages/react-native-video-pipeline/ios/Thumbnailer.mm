@@ -178,3 +178,166 @@ BOOL writeCGImageAsJPEG(CGImageRef image, NSURL *outputURL,
 }
 
 @end
+
+namespace {
+
+// Stable key for a CMTime so the async completion handler can map an emitted
+// frame back to the requested time. We build every requested time at timescale
+// 600, and AVFoundation hands the same boxed value back as `requestedTime`, so
+// "value/timescale" round-trips exactly. Keying this way (rather than by
+// seconds) avoids any float-compare fuzz.
+NSString *keyForCMTime(CMTime t) {
+  return [NSString stringWithFormat:@"%lld/%d", (long long)t.value, t.timescale];
+}
+
+// Write `image` to `outputURL`, creating the parent directory and clobbering
+// any existing file first — the same single-frame contract, factored out for
+// the batch loop.
+BOOL writeFrameToURL(CGImageRef image, NSURL *outputURL) {
+  NSURL *parent = outputURL.URLByDeletingLastPathComponent;
+  if (parent != nil) {
+    [[NSFileManager defaultManager] createDirectoryAtURL:parent
+                             withIntermediateDirectories:YES
+                                              attributes:nil
+                                                   error:nil];
+  }
+  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+  return writeCGImageAsJPEG(image, outputURL, nil);
+}
+
+} // namespace
+
+@implementation RNVPThumbnailer (Batch)
+
++ (nullable NSArray<NSString *> *)
+    generateThumbnailsFromURL:(NSURL *)sourceURL
+                   toURLs:(NSArray<NSURL *> *)outputURLs
+                   atSecs:(NSArray<NSNumber *> *)atSecs
+             toleranceSec:(double)toleranceSec
+              resizeWidth:(double)resizeWidth
+             resizeHeight:(double)resizeHeight
+                    error:(NSError *_Nullable __autoreleasing *)error {
+  if (sourceURL == nil || atSecs.count == 0 ||
+      outputURLs.count != atSecs.count) {
+    if (error) {
+      *error = makeError(RNVPThumbnailerErrorCodeInvalidSpec,
+                         @"atSecs and outputURLs must be non-empty parallel "
+                         @"arrays of equal length.");
+    }
+    return nil;
+  }
+  if (!(toleranceSec >= 0.0)) {
+    if (error) {
+      *error = makeError(RNVPThumbnailerErrorCodeInvalidSpec,
+                         @"toleranceSec must be >= 0.");
+    }
+    return nil;
+  }
+  if (sourceURL.isFileURL &&
+      ![[NSFileManager defaultManager] fileExistsAtPath:sourceURL.path]) {
+    if (error) {
+      *error = makeError(RNVPThumbnailerErrorCodeNotFound,
+                         [NSString stringWithFormat:
+                                       @"Source file does not exist: %@",
+                                       sourceURL.path]);
+    }
+    return nil;
+  }
+
+  AVURLAsset *asset =
+      [AVURLAsset URLAssetWithURL:sourceURL
+                          options:@{AVURLAssetPreferPreciseDurationAndTimingKey
+                                    : @YES}];
+  NSArray<AVAssetTrack *> *videoTracks =
+      [asset tracksWithMediaType:AVMediaTypeVideo];
+  if (videoTracks.count == 0) {
+    if (error) {
+      *error = makeError(RNVPThumbnailerErrorCodeGenerationFailed,
+                         @"Source has no video track.");
+    }
+    return nil;
+  }
+  AVAssetTrack *videoTrack = videoTracks.firstObject;
+  const CGSize naturalSize = videoTrack.naturalSize;
+  const CGSize targetSize = computeTargetSize(
+      naturalSize.width, naturalSize.height,
+      (CGFloat)resizeWidth, (CGFloat)resizeHeight);
+
+  // ONE generator drives the whole batch — single asset open, single forward
+  // decode walk, single teardown. `generateCGImagesAsynchronouslyForTimes:`
+  // sorts internally and reuses the decode session across the requested times.
+  AVAssetImageGenerator *gen =
+      [AVAssetImageGenerator assetImageGeneratorWithAsset:asset];
+  gen.appliesPreferredTrackTransform = YES;
+  const CMTime tol = CMTimeMakeWithSeconds(toleranceSec, 600);
+  gen.requestedTimeToleranceBefore = tol;
+  gen.requestedTimeToleranceAfter = tol;
+  gen.maximumSize = targetSize;
+
+  const Float64 durationSec = CMTimeGetSeconds(asset.duration);
+
+  // Per output slot: the clamped CMTime we want. Dedup to a unique time set for
+  // the generator (duplicate times decode once, then fan back out to slots).
+  NSMutableArray<NSValue *> *slotTimes =
+      [NSMutableArray arrayWithCapacity:atSecs.count];
+  NSMutableArray<NSValue *> *uniqueTimes = [NSMutableArray array];
+  NSMutableSet<NSString *> *seenKeys = [NSMutableSet set];
+  for (NSNumber *n in atSecs) {
+    double clamped = n.doubleValue;
+    if (clamped < 0.0) clamped = 0.0;
+    if (durationSec > 0 && clamped > durationSec) clamped = durationSec;
+    CMTime t = CMTimeMakeWithSeconds(clamped, 600);
+    [slotTimes addObject:[NSValue valueWithCMTime:t]];
+    NSString *key = keyForCMTime(t);
+    if (![seenKeys containsObject:key]) {
+      [seenKeys addObject:key];
+      [uniqueTimes addObject:[NSValue valueWithCMTime:t]];
+    }
+  }
+
+  NSMutableDictionary<NSString *, id> *imagesByKey =
+      [NSMutableDictionary dictionary];
+  dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+  __block NSInteger remaining = (NSInteger)uniqueTimes.count;
+  NSObject *lock = [NSObject new];
+
+  [gen generateCGImagesAsynchronouslyForTimes:uniqueTimes
+                            completionHandler:^(CMTime requestedTime,
+                                                CGImageRef _Nullable image,
+                                                CMTime actualTime,
+                                                AVAssetImageGeneratorResult result,
+                                                NSError *_Nullable genError) {
+    @synchronized(lock) {
+      if (result == AVAssetImageGeneratorSucceeded && image != NULL) {
+        CGImageRetain(image);
+        imagesByKey[keyForCMTime(requestedTime)] = (__bridge id)image;
+      }
+      // AVAssetImageGeneratorFailed / Cancelled → leave the slot empty; the
+      // batch resolves the rest (partial-success contract).
+      remaining -= 1;
+      if (remaining <= 0) dispatch_semaphore_signal(sem);
+    }
+  }];
+  dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
+  NSMutableArray<NSString *> *results =
+      [NSMutableArray arrayWithCapacity:atSecs.count];
+  for (NSUInteger i = 0; i < slotTimes.count; i++) {
+    CMTime t = slotTimes[i].CMTimeValue;
+    id imgVal = imagesByKey[keyForCMTime(t)];
+    if (imgVal == nil) {
+      [results addObject:@""];
+      continue;
+    }
+    CGImageRef img = (__bridge CGImageRef)imgVal;
+    const BOOL wrote = writeFrameToURL(img, outputURLs[i]);
+    [results addObject:wrote ? (outputURLs[i].path ?: @"") : @""];
+  }
+
+  for (id imgVal in imagesByKey.allValues) {
+    CGImageRelease((__bridge CGImageRef)imgVal);
+  }
+  return results;
+}
+
+@end
