@@ -14,6 +14,10 @@ tags predate that and were never published.
 
 ## [Unreleased]
 
+### Fixed
+
+- iOS `Video.compose` over an HDR source (HLG/PQ, bt2020, 10-bit) no longer produces dark, washed-out output: source frames are tone-mapped HDR→SDR (sRGB) when materialized for the worklet, instead of writing the HDR signal into 8-bit BGRA with no conversion (#86).
+
 ## [0.4.1] - 2026-06-30
 
 ### Added

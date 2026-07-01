@@ -150,6 +150,29 @@ Combined with path 3 (GPU output), the entire compose-on-clip flow runs
 without a single full-frame `memcpy` on iOS. The encoder, decoder, and
 Skia all share the same IOSurface-backed `CVPixelBuffer`s end-to-end.
 
+### HDR sources are tone-mapped to SDR (issue #86)
+
+The compose pump is end-to-end 8-bit BGRA — source buffer, worklet target,
+encoder input. When the source clip is **HDR** (HLG or PQ transfer, bt2020
+primaries, 10-bit — e.g. an iPhone slo-mo / Dolby-Vision HEVC, where
+`Video.info` reports `isHDR: true`), the decoded frame is a wide-gamut,
+high-dynamic-range `CIImage`. Materializing it into 8-bit BGRA with
+`colorSpace:nil` writes the HDR signal with **no transfer conversion**, which
+is "dark and washed-out" in two ways at once: shadows/mid-tones crush toward
+black, and highlights blow out to pure white.
+
+`renderCompose` therefore hands CoreImage an explicit **sRGB** output color
+space so it performs the HDR→SDR tone-map when rendering each source frame.
+This is the only viable output here without a 10-bit pixel pipeline (and a
+consumer drawing an SDR Skia overlay into HDR space would look dim anyway).
+SDR (`bt709`) sources are unaffected — sRGB→sRGB is a no-op.
+
+The color contract lives in one place so it can be unit-tested on the host
+(VideoPipeline.mm itself can't be — it pulls in Nitro-generated deps):
+
+- Helper (single source of truth): `packages/react-native-video-pipeline/ios/RNVPComposeColor.{h,mm}` — `RNVPComposeRenderSourceToSDR`
+- Host tests: `packages/react-native-video-pipeline/ios/__tests__/LibraryTests.m` — `testComposeToneMaps*` (build a real 10-bit HLG YUV buffer and assert the sRGB render lifts crushed shadows and rolls off blown highlights vs `colorSpace:nil`)
+
 ---
 
 ## Why iOS is the easy platform

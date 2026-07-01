@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
 #import <AVFoundation/AVFoundation.h>
+#import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <ImageIO/ImageIO.h>
@@ -25,6 +26,14 @@
 // packages/react-native-video-pipeline/ios/RNVPPathUtils.h.
 extern NSURL *RNVPURLFromUri(NSString *uri);
 extern NSString *RNVPOutputFilesystemPath(NSString *pathOrUri);
+
+// Standalone compose color helpers from RNVPComposeColor.{h,mm} (#86).
+// Forward-declared to match this file's convention; symbols resolve at link
+// time. Keep in lockstep with
+// packages/react-native-video-pipeline/ios/RNVPComposeColor.h.
+extern CGColorSpaceRef RNVPComposeSDRColorSpaceCreate(void);
+extern void RNVPComposeRenderSourceToSDR(CIContext *ciContext, CIImage *source,
+                                         CVPixelBufferRef target, CGRect bounds);
 
 extern NSErrorDomain const RNVPAVMuxerErrorDomain;
 
@@ -8158,6 +8167,138 @@ static NSString *authorSolidColorClip(NSInteger w, NSInteger h, NSInteger fps,
                  @"normalized-path output should be a valid single-video MP4");
 
   [[NSFileManager defaultManager] removeItemAtPath:posix error:nil];
+}
+
+// ---------------------------------------------------------------------------
+// RNVPComposeColor — HDR→SDR tone-map on the compose source path (#86).
+// Video.compose materializes each source frame into an 8-bit BGRA buffer for
+// the JS worklet. Rendering an HDR (HLG/PQ, bt2020) CIImage with colorSpace:nil
+// writes the HDR signal verbatim into 8-bit with no transfer conversion, so
+// HDR mid-tones crush to a dark, washed-out frame. RNVPComposeRenderSourceToSDR
+// hands CoreImage an explicit sRGB output color space so it tone-maps.
+// ---------------------------------------------------------------------------
+
+- (void)testComposeSDRColorSpaceIsSRGB
+{
+  CGColorSpaceRef space = RNVPComposeSDRColorSpaceCreate();
+  XCTAssertTrue(space != NULL, @"compose SDR color space must be non-null");
+  XCTAssertEqual(CGColorSpaceGetModel(space), kCGColorSpaceModelRGB,
+                 @"compose SDR output must be an RGB space");
+  CFStringRef name = CGColorSpaceGetName(space);
+  XCTAssertTrue(name != NULL && CFEqual(name, kCGColorSpaceSRGB),
+                @"compose SDR output must be sRGB, got %@", name);
+  CGColorSpaceRelease(space);
+}
+
+// Render a flat HLG frame at 10-bit luma code `y10` two ways — through the
+// helper (sRGB tone-map) and with colorSpace:nil (the pre-#86 behavior) — and
+// return the center-pixel luma of each. The source is a real 10-bit bi-planar
+// YUV buffer (kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange), the format an
+// actual HDR HEVC decodes to; CoreImage only honors the HLG transfer attachment
+// on a genuine HDR YUV buffer (an 8-bit BGRA buffer tagged HLG is treated as
+// plain sRGB and shows no difference — which is why that must not be used).
+static void RNVPRenderHLGBothWays(int y10, uint8_t *outMapped, uint8_t *outNil)
+{
+  const size_t kW = 16, kH = 16;
+  NSDictionary *yuvAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey :
+        @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
+    (id)kCVPixelBufferWidthKey : @(kW), (id)kCVPixelBufferHeightKey : @(kH),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  NSDictionary *bgraAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+    (id)kCVPixelBufferWidthKey : @(kW), (id)kCVPixelBufferHeightKey : @(kH),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+
+  // 10-bit YUV, video range. Samples are stored left-aligned in 16-bit words
+  // (code10 << 6); neutral chroma is 512.
+  CVPixelBufferRef src = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH,
+                      kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                      (__bridge CFDictionaryRef)yuvAttrs, &src);
+  CVPixelBufferLockBaseAddress(src, 0);
+  uint16_t *yPlane = CVPixelBufferGetBaseAddressOfPlane(src, 0);
+  const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(src, 0) / 2;
+  for (size_t r = 0; r < kH; r++)
+    for (size_t c = 0; c < kW; c++)
+      yPlane[r * yStride + c] = (uint16_t)(y10 << 6);
+  uint16_t *cPlane = CVPixelBufferGetBaseAddressOfPlane(src, 1);
+  const size_t cStride = CVPixelBufferGetBytesPerRowOfPlane(src, 1) / 2;
+  for (size_t r = 0; r < kH / 2; r++)
+    for (size_t c = 0; c < kW; c++)
+      cPlane[r * cStride + c] = (uint16_t)(512 << 6);  // Cb,Cr
+  CVPixelBufferUnlockBaseAddress(src, 0);
+  CVBufferSetAttachment(src, kCVImageBufferColorPrimariesKey,
+                        kCVImageBufferColorPrimaries_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(src, kCVImageBufferTransferFunctionKey,
+                        kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(src, kCVImageBufferYCbCrMatrixKey,
+                        kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+
+  CIImage *source = [CIImage imageWithCVPixelBuffer:src];
+  CIContext *ciContext = [CIContext contextWithOptions:nil];
+  const CGRect bounds = CGRectMake(0, 0, kW, kH);
+
+  uint8_t (^centerLuma)(CVPixelBufferRef) = ^uint8_t(CVPixelBufferRef pb) {
+    CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    const uint8_t *base = CVPixelBufferGetBaseAddress(pb);
+    const size_t stride = CVPixelBufferGetBytesPerRow(pb);
+    const uint8_t *px = base + (kH / 2) * stride + (kW / 2) * 4;  // BGRA
+    const uint8_t luma = (uint8_t)((px[0] + px[1] + px[2]) / 3);  // B+G+R
+    CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+    return luma;
+  };
+
+  CVPixelBufferRef mapped = NULL, raw = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH, kCVPixelFormatType_32BGRA,
+                      (__bridge CFDictionaryRef)bgraAttrs, &mapped);
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH, kCVPixelFormatType_32BGRA,
+                      (__bridge CFDictionaryRef)bgraAttrs, &raw);
+  RNVPComposeRenderSourceToSDR(ciContext, source, mapped, bounds);
+  [ciContext render:source toCVPixelBuffer:raw bounds:bounds colorSpace:nil];
+  *outMapped = centerLuma(mapped);
+  *outNil = centerLuma(raw);
+  CVPixelBufferRelease(src);
+  CVPixelBufferRelease(mapped);
+  CVPixelBufferRelease(raw);
+}
+
+// The colorSpace:nil render is "dark and washed-out" in two ways at once, and
+// the sRGB tone-map fixes both:
+//   * shadows/mid-tones CRUSH toward black with nil — the tone-map lifts them;
+//   * highlights BLOW OUT to pure 255 with nil — the tone-map rolls them off.
+// (Measured on the host: Y=356 → sRGB 60 vs nil 24; Y=794 → sRGB 175 vs nil
+// 255.) Testing both regimes guards the whole bug; a mid-gray near the ~Y=600
+// crossover — where the two happen to coincide — would be a false all-clear.
+- (void)testComposeToneMapsCrushedHLGShadowsBrighter
+{
+  uint8_t mapped = 0, raw = 0;
+  RNVPRenderHLGBothWays(356, &mapped, &raw);
+  NSLog(@"[#86] HLG shadow Y=356 → tone-mapped=%u, nil=%u", mapped, raw);
+  XCTAssertGreaterThan(mapped, raw + 20,
+                       @"#86: HDR (HLG) shadows must tone-map meaningfully "
+                       @"brighter than the colorSpace:nil crush (sRGB=%u nil=%u)",
+                       mapped, raw);
+}
+
+- (void)testComposeToneMapsBlownHLGHighlightsRolledOff
+{
+  uint8_t mapped = 0, raw = 0;
+  RNVPRenderHLGBothWays(794, &mapped, &raw);
+  NSLog(@"[#86] HLG highlight Y=794 → tone-mapped=%u, nil=%u", mapped, raw);
+  XCTAssertEqual(raw, 255,
+                 @"sanity: colorSpace:nil blows HLG highlights out to pure "
+                 @"white (got %u)",
+                 raw);
+  XCTAssertLessThan(mapped, 245,
+                    @"#86: HDR (HLG) highlights must roll off below clipping "
+                    @"under the tone-map (got sRGB=%u)",
+                    mapped);
 }
 
 @end
