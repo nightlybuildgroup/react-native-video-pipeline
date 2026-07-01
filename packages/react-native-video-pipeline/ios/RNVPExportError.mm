@@ -28,13 +28,19 @@ NSString* _Nullable RNVPHintForErrorCode(NSInteger code) {
 // found anywhere in the chain.
 static void RNVPAppendErrorChain(NSError* error, NSMutableString* out,
                                  NSString* _Nullable* outHint, int depth) {
-  if (error == nil || depth > 8) return;
+  if (error == nil) return;
   [out appendFormat:@"%@ %ld", error.domain, (long)error.code];
   if (*outHint == nil) {
     *outHint = RNVPHintForErrorCode(error.code);
   }
   NSError* underlying = error.userInfo[NSUnderlyingErrorKey];
   if (underlying != nil) {
+    // Cap the chain depth to guard against a pathological cycle, appending a
+    // clear truncation marker rather than a dangling "; underlying " separator.
+    if (depth >= 8) {
+      [out appendString:@"; underlying (…truncated)"];
+      return;
+    }
     [out appendString:@"; underlying "];
     RNVPAppendErrorChain(underlying, out, outHint, depth + 1);
   }

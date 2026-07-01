@@ -8410,4 +8410,34 @@ static void RNVPRenderHLGBothWays(int y10, uint8_t *outMapped, uint8_t *outNil)
                 @"%@", reason);
 }
 
+// output.path must be a file, not a directory — otherwise the render's
+// pre-write `removeItemAtPath:` would recursively delete it. NSTemporaryDirectory
+// is an existing directory, so it stands in for that footgun.
+- (void)testOutputPathRejectionFlagsExistingDirectory
+{
+  NSString *reason = RNVPOutputPathRejectionReason(NSTemporaryDirectory());
+  XCTAssertNotNil(reason, @"an existing directory target must be rejected");
+  XCTAssertTrue([reason containsString:@"is a directory"], @"%@", reason);
+  // The filesystem root is the worst case; it must never validate.
+  XCTAssertNotNil(RNVPOutputPathRejectionReason(@"/"),
+                  @"the volume root must never be accepted as output.path");
+}
+
+// A chain longer than the depth cap must truncate cleanly, never leaving a
+// dangling "; underlying " separator.
+- (void)testDescribeErrorCapsDeepChainCleanly
+{
+  NSError *err = [NSError errorWithDomain:@"Leaf" code:1 userInfo:nil];
+  for (int i = 0; i < 15; i++) {
+    err = [NSError errorWithDomain:@"Wrap"
+                             code:i
+                         userInfo:@{NSUnderlyingErrorKey : err}];
+  }
+  NSString *s = RNVPDescribeError(err);
+  XCTAssertTrue([s containsString:@"(…truncated)"],
+                @"a deep chain must be truncated with a marker: %@", s);
+  XCTAssertFalse([s hasSuffix:@"underlying "],
+                 @"truncation must not leave a dangling separator: %@", s);
+}
+
 @end
