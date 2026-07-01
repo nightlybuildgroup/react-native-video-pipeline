@@ -26,6 +26,13 @@
 // packages/react-native-video-pipeline/ios/RNVPPathUtils.h.
 extern NSURL *RNVPURLFromUri(NSString *uri);
 extern NSString *RNVPOutputFilesystemPath(NSString *pathOrUri);
+extern NSString *_Nullable RNVPOutputPathRejectionReason(NSString *pathOrUri);
+
+// Standalone diagnosable-error helpers from RNVPExportError.{h,mm} (#85).
+// Keep in lockstep with
+// packages/react-native-video-pipeline/ios/RNVPExportError.h.
+extern NSString *RNVPDescribeError(NSError *_Nullable error);
+extern NSString *_Nullable RNVPHintForErrorCode(NSInteger code);
 
 // Standalone compose color helpers from RNVPComposeColor.{h,mm} (#86).
 // Forward-declared to match this file's convention; symbols resolve at link
@@ -8299,6 +8306,108 @@ static void RNVPRenderHLGBothWays(int y10, uint8_t *outMapped, uint8_t *outNil)
                     @"#86: HDR (HLG) highlights must roll off below clipping "
                     @"under the tone-map (got sRGB=%u)",
                     mapped);
+}
+
+// ---------------------------------------------------------------------------
+// RNVPExportError — diagnosable export/mux error strings (#85). The thrown
+// message must carry the domain/code and the NSUnderlyingError chain (the
+// internal CoreMedia/Fig codes that otherwise only show up in os_log), not just
+// the generic "Cannot create file" localizedDescription.
+// ---------------------------------------------------------------------------
+
+- (void)testDescribeErrorNilIsSentinel
+{
+  XCTAssertEqualObjects(RNVPDescribeError(nil), @"(nil)");
+}
+
+- (void)testDescribeErrorIncludesDomainAndCode
+{
+  NSError *err = [NSError errorWithDomain:@"AVFoundationErrorDomain"
+                                     code:-11820
+                                 userInfo:@{
+                                   NSLocalizedDescriptionKey : @"Cannot create file"
+                                 }];
+  NSString *s = RNVPDescribeError(err);
+  XCTAssertTrue([s hasPrefix:@"Cannot create file"],
+                @"description must lead with the localizedDescription: %@", s);
+  XCTAssertTrue([s containsString:@"AVFoundationErrorDomain -11820"],
+                @"description must include domain + code: %@", s);
+}
+
+- (void)testDescribeErrorUnwindsUnderlyingChain
+{
+  NSError *underlying = [NSError errorWithDomain:@"NSOSStatusErrorDomain"
+                                            code:-17913
+                                        userInfo:nil];
+  NSError *err = [NSError
+      errorWithDomain:@"AVFoundationErrorDomain"
+                 code:-11820
+             userInfo:@{
+               NSLocalizedDescriptionKey : @"Cannot create file",
+               NSUnderlyingErrorKey : underlying
+             }];
+  NSString *s = RNVPDescribeError(err);
+  XCTAssertTrue([s containsString:@"AVFoundationErrorDomain -11820"], @"%@", s);
+  XCTAssertTrue([s containsString:@"underlying NSOSStatusErrorDomain -17913"],
+                @"the underlying CoreMedia code must be surfaced: %@", s);
+  // The known internal code must fold in its human hint.
+  XCTAssertTrue([s containsString:@"hint:"] &&
+                    [s containsString:@"file:// URI"],
+                @"a known MediaToolbox code must add an actionable hint: %@", s);
+}
+
+- (void)testDescribeErrorEmptyDescriptionDoesNotProduceBareParen
+{
+  NSError *err = [NSError errorWithDomain:@"SomeDomain" code:42 userInfo:nil];
+  NSString *s = RNVPDescribeError(err);
+  XCTAssertTrue([s containsString:@"SomeDomain 42"], @"%@", s);
+  XCTAssertFalse([s hasPrefix:@"("],
+                 @"a description-less error must still lead with a token: %@", s);
+}
+
+- (void)testHintForKnownAndUnknownCodes
+{
+  XCTAssertNotNil(RNVPHintForErrorCode(-17913), @"FigFile code must map");
+  XCTAssertNotNil(RNVPHintForErrorCode(-12115), @"Remaker code must map");
+  XCTAssertNil(RNVPHintForErrorCode(-11820),
+               @"a generic AVError code must not be given a bespoke hint");
+  XCTAssertNil(RNVPHintForErrorCode(0));
+}
+
+// ---------------------------------------------------------------------------
+// RNVPOutputPathRejectionReason — early output.path validation (#85). A missing
+// parent directory is the classic source of the opaque "Cannot create file";
+// reject it up front with an actionable reason instead.
+// ---------------------------------------------------------------------------
+
+- (void)testOutputPathRejectionAcceptsWritablePath
+{
+  NSString *ok = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:@"rnvp-ok.mp4"];
+  XCTAssertNil(RNVPOutputPathRejectionReason(ok),
+               @"an existing temp dir must be accepted");
+  // The file:// form of the same path must also be accepted (normalized).
+  NSString *uri = [NSURL fileURLWithPath:ok].absoluteString;
+  XCTAssertNil(RNVPOutputPathRejectionReason(uri),
+               @"a file:// URI over a writable dir must be accepted");
+}
+
+- (void)testOutputPathRejectionFlagsEmpty
+{
+  NSString *reason = RNVPOutputPathRejectionReason(@"");
+  XCTAssertNotNil(reason);
+  XCTAssertTrue([reason containsString:@"empty"], @"%@", reason);
+}
+
+- (void)testOutputPathRejectionFlagsMissingParentDirectory
+{
+  NSString *bad = [[NSTemporaryDirectory()
+      stringByAppendingPathComponent:@"rnvp-does-not-exist-XYZ"]
+      stringByAppendingPathComponent:@"out.mp4"];
+  NSString *reason = RNVPOutputPathRejectionReason(bad);
+  XCTAssertNotNil(reason, @"a path under a missing directory must be rejected");
+  XCTAssertTrue([reason containsString:@"parent directory does not exist"],
+                @"%@", reason);
 }
 
 @end
