@@ -216,6 +216,8 @@ Per-frame worklet drawing on top of source clips. The `options.drawFrame` callba
 
 Mix native overlays (`Overlay.Image`, `Overlay.Text`) freely on `spec.overlays`; they composite under your `drawFrame` output.
 
+**HDR sources.** The compose pump is 8-bit end-to-end (BGRA on iOS, RGBA on Android). An HDR source (HLG/PQ, bt2020, 10-bit) is **tone-mapped down to SDR (sRGB)** as it is materialized for your worklet — this is a deliberate default, not a downgrade bug: writing the HDR signal into an 8-bit buffer with no transfer conversion crushes it to dark output (the bug [#86] fixed). HDR-*preserving* compose (a 10-bit pipeline plus an explicit `output.colorRange: 'sdr' | 'hdr'` opt-in) is designed but not yet implemented — see [`docs/hdr-compose.md`](./hdr-compose.md) and [#90].
+
 ### `Video.synthesize`
 
 ```ts

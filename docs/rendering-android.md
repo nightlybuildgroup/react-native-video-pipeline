@@ -390,3 +390,13 @@ the source-side becoming zero-copy. A real hardware encoder (rather
 than the emulator's software h264) would benefit even more from
 closing the encoder side, since the encoder is no longer the
 bottleneck.
+
+---
+
+## HDR sources
+
+The compose pump is 8-bit (RGBA GL surface + ARGB_8888 bitmaps), so an HDR
+source is tone-mapped to SDR — parity with iOS (see `rendering-ios.md`). An
+HDR-preserving 10-bit path (10-bit EGL config + Media3 `HDR_MODE_KEEP_HDR` +
+HEVC Main10) is designed in [`hdr-compose.md`](./hdr-compose.md) — tracked as
+issue #90, with the Android pipeline in #93.

@@ -27,6 +27,10 @@ tags predate that and were never published.
 
 - iOS `Video.compose` over an HDR source (HLG/PQ, bt2020, 10-bit) no longer produces dark, washed-out output: source frames are tone-mapped HDR→SDR (sRGB) when materialized for the worklet, instead of writing the HDR signal into 8-bit BGRA with no conversion (#86).
 
+### Documentation
+
+- Documented the compose HDR→SDR tone-map as a deliberate default (not a downgrade) in `docs/api.md`, and added `docs/hdr-compose.md` — the design for an opt-in HDR-preserving 10-bit compose pipeline and the `output.colorRange` API. The implementation is split into tracked sub-tasks: iOS 10-bit (#92), Android 10-bit (#93), and the color-range API (#94) (#90).
+
 ## [0.4.1] - 2026-06-30
 
 ### Added

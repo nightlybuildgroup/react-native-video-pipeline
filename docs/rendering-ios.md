@@ -173,6 +173,8 @@ The color contract lives in one place so it can be unit-tested on the host
 - Helper (single source of truth): `packages/react-native-video-pipeline/ios/RNVPComposeColor.{h,mm}` — `RNVPComposeRenderSourceToSDR`
 - Host tests: `packages/react-native-video-pipeline/ios/__tests__/LibraryTests.m` — `testComposeToneMaps*` (build a real 10-bit HLG YUV buffer and assert the sRGB render lifts crushed shadows and rolls off blown highlights vs `colorSpace:nil`)
 
+Tone-mapping to SDR is the correct *default*, not the only reasonable behavior. An HDR-**preserving** 10-bit compose path (opt-in via `output.colorRange: 'hdr'`) is designed in [`hdr-compose.md`](./hdr-compose.md) — tracked as issue #90, with the iOS pipeline in #92.
+
 ---
 
 ## Why iOS is the easy platform
