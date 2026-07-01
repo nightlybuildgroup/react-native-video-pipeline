@@ -26,6 +26,7 @@
 
 #import "ExportSession.h"
 
+#import "RNVPExportError.h"
 #import "Remuxer+Internal.h"
 #import "SynthesizeRunner+Internal.h"
 #import "SynthesizeRunner.h"
@@ -267,7 +268,7 @@ BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
             RNVPExportSessionErrorCodeSourceCorrupted,
             [NSString
                 stringWithFormat:@"could not insert source video track: %@",
-                                 insertError.localizedDescription ?: @"(nil)"]);
+                                 RNVPDescribeError(insertError)]);
       }
       return NO;
     }
@@ -388,7 +389,7 @@ BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
                           @"%@: %@",
                           request.audioMode == RNVPAudioModeMute ? @"mute"
                                                                  : @"replace",
-                          insertError.localizedDescription ?: @"(nil)"]);
+                          RNVPDescribeError(insertError)]);
       }
       return NO;
     }
@@ -484,8 +485,7 @@ BOOL insertAudioForMode(AVMutableComposition *composition, AVAsset *sourceAsset,
         *error = makeError(RNVPExportSessionErrorCodeCancelled,
                            @"export cancelled");
       } else {
-        const NSString *desc =
-            exportSession.error.localizedDescription ?: @"(nil)";
+        const NSString *desc = RNVPDescribeError(exportSession.error);
         *error = makeError(
             RNVPExportSessionErrorCodeExportFailed,
             [NSString stringWithFormat:

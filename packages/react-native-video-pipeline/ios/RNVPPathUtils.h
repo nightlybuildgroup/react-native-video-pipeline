@@ -23,6 +23,15 @@ NSURL* RNVPURLFromUri(NSString* uri);
 /// already route through `RNVPURLFromUri`).
 NSString* RNVPOutputFilesystemPath(NSString* pathOrUri);
 
+/// Return a human reason string if `pathOrUri` is unusable as an output
+/// location — empty, or its parent directory does not exist — else nil. Lets
+/// callers reject a bad `output.path` early with an actionable `InvalidSpec`
+/// instead of the cryptic AVFoundation/MediaToolbox "Cannot create file"
+/// (-17913/-12115) that a missing parent directory otherwise produces (issue
+/// #85). Accepts a bare path or a `file://` URI (normalized via
+/// `RNVPOutputFilesystemPath`).
+NSString* _Nullable RNVPOutputPathRejectionReason(NSString* pathOrUri);
+
 #ifdef __cplusplus
 }
 #endif

@@ -83,6 +83,17 @@ describe('errorForCode + assertNever exhaustiveness', () => {
     expect(out).toBeInstanceOf(InvalidSpecError);
   });
 
+  // #85: the early output.path guard rejects a missing parent directory as
+  // IOError (matching the documented contract), not a deep encoder failure.
+  it('normalizeNativeError maps "VideoPipeline.renderCompose: IOError — ..." → IOError', () => {
+    const out = normalizeNativeError(
+      new Error(
+        'VideoPipeline.renderCompose: IOError — output.path parent directory does not exist: /nope',
+      ),
+    );
+    expect(out).toBeInstanceOf(IOError);
+  });
+
   it('normalizeNativeError maps generic "VideoPipeline.<method> failed: ..." → EncoderFailureError', () => {
     const out = normalizeNativeError(
       new Error('VideoPipeline.trim failed: AVFoundation error -11800'),

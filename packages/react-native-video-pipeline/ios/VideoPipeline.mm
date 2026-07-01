@@ -36,6 +36,7 @@
 #import "HybridFrameTarget.h"
 #import "OverlayRenderer.h"
 #import "RNVPComposeColor.h"
+#import "RNVPExportError.h"
 #import "RNVPPathUtils.h"
 #import "Remuxer.h"
 #import "Remuxer+Internal.h"
@@ -764,8 +765,7 @@ std::shared_ptr<Promise<VideoInfo>> HybridVideoPipeline::info(const std::string&
     RNVPAVDemuxer* demuxer = [[RNVPAVDemuxer alloc] init];
     NSError* openError = nil;
     if (![demuxer openAtURL:url error:&openError]) {
-      const char* desc =
-          openError.localizedDescription.UTF8String ?: "(unknown error)";
+      const std::string desc = nsStringToUtf8(RNVPDescribeError(openError));
       throw std::runtime_error(std::string("VideoPipeline.info failed: ") + desc);
     }
     VideoInfo info = buildVideoInfoFromDemuxer(demuxer, uriCopy);
@@ -801,7 +801,7 @@ std::shared_ptr<Promise<std::string>> HybridVideoPipeline::thumbnail(
                                          resizeHeight:resizeH
                                                 error:&err];
         if (!ok) {
-          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
           throw std::runtime_error(
               std::string("VideoPipeline.thumbnail failed: ") + desc);
         }
@@ -847,7 +847,7 @@ HybridVideoPipeline::thumbnails(const std::string& uri,
                                           resizeHeight:resizeH
                                                  error:&err];
         if (written == nil) {
-          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
           throw std::runtime_error(
               std::string("VideoPipeline.thumbnails failed: ") + desc);
         }
@@ -966,8 +966,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       RNVPAVDemuxer* demuxer = [[RNVPAVDemuxer alloc] init];
       NSError* probeErr = nil;
       if (![demuxer openAtURL:clipURL error:&probeErr]) {
-        const char* desc =
-            probeErr.localizedDescription.UTF8String ?: "(nil)";
+        const std::string desc = nsStringToUtf8(RNVPDescribeError(probeErr));
         return Promise<void>::rejected(std::make_exception_ptr(
             std::runtime_error(std::string("VideoPipeline.render "
                                             "transcode probe failed: ") +
@@ -1044,7 +1043,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
               err.code == RNVPTranscoderErrorCodeCancelled) {
             throw makeCancelled();
           }
-          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
           throw std::runtime_error(std::string("VideoPipeline.render "
                                                 "transcode failed: ") +
                                    desc);
@@ -1216,7 +1215,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
         RNVPAVDemuxer* d0 = [[RNVPAVDemuxer alloc] init];
         if (![d0 openAtURL:clip0URL error:&probeErr]) {
           teardown();
-          const char* desc = probeErr.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(probeErr));
           throw std::runtime_error(
               std::string("VideoPipeline.render multi-transcode probe failed: ") +
               desc);
@@ -1288,7 +1287,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                  &gErr)) {
               teardown();
               if (runnerToken.abortRequested) throw makeCancelled();
-              const char* desc = gErr.localizedDescription.UTF8String ?: "(nil)";
+              const std::string desc = nsStringToUtf8(RNVPDescribeError(gErr));
               throw std::runtime_error(
                   std::string(
                       "VideoPipeline.render multi-transcode gap fill failed: ") +
@@ -1344,7 +1343,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                 tErr.code == RNVPTranscoderErrorCodeCancelled) {
               throw makeCancelled();
             }
-            const char* desc = tErr.localizedDescription.UTF8String ?: "(nil)";
+            const std::string desc = nsStringToUtf8(RNVPDescribeError(tErr));
             throw std::runtime_error(
                 std::string("VideoPipeline.render multi-transcode clip[") +
                 std::to_string(i) + "] failed: " + desc);
@@ -1395,7 +1394,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
               cErr.code == RNVPRemuxerErrorCodeCancelled) {
             throw makeCancelled();
           }
-          const char* desc = cErr.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(cErr));
           throw std::runtime_error(
               std::string(
                   "VideoPipeline.render multi-transcode join failed: ") +
@@ -1434,7 +1433,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                                             error:&ovErr]) {
               teardown();
               if (runnerToken.abortRequested) throw makeCancelled();
-              const char* desc = ovErr.localizedDescription.UTF8String ?: "(nil)";
+              const std::string desc = nsStringToUtf8(RNVPDescribeError(ovErr));
               throw std::runtime_error(
                   std::string("VideoPipeline.render overlay transcode failed: ") +
                   desc);
@@ -1467,7 +1466,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
                 mtErr.code == RNVPRemuxerErrorCodeCancelled) {
               throw makeCancelled();
             }
-            const char* desc = mtErr.localizedDescription.UTF8String ?: "(nil)";
+            const std::string desc = nsStringToUtf8(RNVPDescribeError(mtErr));
             throw std::runtime_error(
                 std::string("VideoPipeline.render overlay composite failed: ") +
                 desc);
@@ -1537,7 +1536,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
         RenderTokenRegistry::unregisterToken(transformTokenCopy);
         [transformGuard end];
         if (!ok) {
-          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
           throw std::runtime_error(std::string("VideoPipeline.render "
                                                 "transform remux failed: ") +
                                    desc);
@@ -1602,7 +1601,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
             err.code == RNVPRemuxerErrorCodeCancelled) {
           throw makeCancelled();
         }
-        const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+        const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
         throw std::runtime_error(std::string("VideoPipeline.render concat "
                                               "failed: ") +
                                  desc);
@@ -1659,7 +1658,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
       RenderTokenRegistry::unregisterToken(fixedTokenCopy);
       [fixedGuard end];
       if (!ok) {
-        const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+        const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
         throw std::runtime_error(std::string("VideoPipeline.render synthesize "
                                               "failed: ") +
                                  desc);
@@ -1716,7 +1715,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::render(
         RenderTokenRegistry::unregisterToken(tokenCopy);
         [openGuard end];
         if (!ok) {
-          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
           throw std::runtime_error(std::string("VideoPipeline.render synthesize "
                                                 "failed: ") +
                                    desc);
@@ -1772,7 +1771,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::trim(
                                           durationSec:durationSec
                                                 error:&err];
         if (!ok) {
-          const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+          const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
           throw std::runtime_error(std::string("VideoPipeline.trim failed: ") +
                                    desc);
         }
@@ -1799,7 +1798,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::flip(
                                              axis:nsAxis
                                             error:&err];
     if (!ok) {
-      const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+      const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
       throw std::runtime_error(std::string("VideoPipeline.flip failed: ") +
                                desc);
     }
@@ -1839,7 +1838,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
                                                error:&err];
       [stampGuard end];
       if (!ok) {
-        const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+        const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
         throw std::runtime_error(std::string("VideoPipeline.stamp failed: ") +
                                  desc);
       }
@@ -1873,7 +1872,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::stamp(
                                                    error:&err];
     [stampTranscodeGuard end];
     if (!ok) {
-      const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+      const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
       throw std::runtime_error(std::string("VideoPipeline.stamp failed: ") +
                                desc);
     }
@@ -1965,6 +1964,16 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
     // Accept a bare path or a `file://` URI for output.path (issue #74); the
     // muxer / fileExistsAtPath / fileURLWithPath below all want a bare path.
     NSString* outputPathNS = outputFilesystemPath(outputPath);
+    // Reject an unwritable output.path up front with an actionable IOError
+    // rather than letting AVFoundation/the muxer fail deep inside with the
+    // opaque "Cannot create file" (-17913/-12115) (issue #85). IOError (not
+    // InvalidSpec) matches the documented contract — a missing parent directory
+    // is a filesystem-state failure ("path missing"), not a malformed spec.
+    if (NSString* reason = RNVPOutputPathRejectionReason(outputPathNS)) {
+      RenderTokenRegistry::unregisterToken(tokenCopy);
+      throw std::runtime_error("VideoPipeline.renderCompose: IOError — " +
+                               nsStringToUtf8(reason));
+    }
     NSFileManager* fm = [NSFileManager defaultManager];
     if ([fm fileExistsAtPath:outputPathNS]) {
       [fm removeItemAtPath:outputPathNS error:NULL];
@@ -2166,7 +2175,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
         if (runnerToken != nil && runnerToken.abortRequested) {
           throw std::runtime_error("VideoPipeline.renderCompose: Cancelled");
         }
-        const char* desc = err.localizedDescription.UTF8String ?: "(nil)";
+        const std::string desc = nsStringToUtf8(RNVPDescribeError(err));
         throw std::runtime_error(
             std::string("VideoPipeline.renderCompose: ") + desc);
       }
@@ -2198,7 +2207,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
                                              error:&openErr];
     if (!opened) {
       RenderTokenRegistry::unregisterToken(tokenCopy);
-      const char* desc = openErr.localizedDescription.UTF8String ?: "(nil)";
+      const std::string desc = nsStringToUtf8(RNVPDescribeError(openErr));
       throw std::runtime_error(
           std::string("VideoPipeline.renderCompose: muxer.open failed: ") +
           desc);
@@ -2316,12 +2325,12 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
     }
     if (failure != nil) {
       [fm removeItemAtPath:outputPathNS error:NULL];
-      const char* desc = failure.localizedDescription.UTF8String ?: "(nil)";
+      const std::string desc = nsStringToUtf8(RNVPDescribeError(failure));
       throw std::runtime_error(std::string("VideoPipeline.renderCompose: ") +
                                desc);
     }
     if (closeErr != nil) {
-      const char* desc = closeErr.localizedDescription.UTF8String ?: "(nil)";
+      const std::string desc = nsStringToUtf8(RNVPDescribeError(closeErr));
       throw std::runtime_error(
           std::string("VideoPipeline.renderCompose: muxer.close failed: ") +
           desc);

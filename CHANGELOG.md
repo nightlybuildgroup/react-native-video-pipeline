@@ -14,6 +14,14 @@ tags predate that and were never published.
 
 ## [Unreleased]
 
+### Changed
+
+- iOS export/mux errors now surface the underlying error domain + code and the full `NSUnderlyingError` chain (including the internal CoreMedia/Fig codes like `-17913`/`-12115`, with a hint for known ones) instead of only the generic `localizedDescription`, turning opaque "Cannot create file" failures into actionable messages (#85).
+
+### Added
+
+- iOS `compose`/`synthesize` validate `output.path` up front and reject a missing parent directory as `IOError` with an actionable message, instead of failing deep inside AVFoundation/MediaToolbox with the opaque "Cannot create file" (#85).
+
 ### Fixed
 
 - iOS `Video.compose` over an HDR source (HLG/PQ, bt2020, 10-bit) no longer produces dark, washed-out output: source frames are tone-mapped HDR→SDR (sRGB) when materialized for the worklet, instead of writing the HDR signal into 8-bit BGRA with no conversion (#86).

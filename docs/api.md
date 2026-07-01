@@ -332,6 +332,16 @@ import {
 
 `assertNever(x: never): never` is exported for exhaustiveness checks in consumer code that switches on a discriminated union from this library.
 
+### Diagnosable native errors
+
+When a render fails inside the AVFoundation/MediaToolbox export or muxer layer on iOS, the thrown `error.message` now carries the underlying **error domain + code** and the full **`NSUnderlyingError` chain**, not just the generic `localizedDescription` (which is the same `"Cannot create file"` string regardless of root cause). For example:
+
+```
+Cannot create file (AVFoundationErrorDomain -11820; underlying NSOSStatusErrorDomain -17913; hint: MediaToolbox could not create the output file — verify the parent directory exists and output.path is a filesystem path, not a file:// URI)
+```
+
+The internal CoreMedia/Fig codes (e.g. `-17913`, `-12115`) are undocumented but invaluable for searching/triaging, so they are always included; a small set of known ones also get a human hint. This turns ~30 minutes of native-`os_log` spelunking into an actionable message.
+
 ---
 
 ## Types
@@ -394,7 +404,7 @@ type SynthesizeOutputSpec = OutputSpec & {
 
 - **Form.** Must be a non-empty filesystem path or a `file://` URI. Other schemes (`http://`, `content://`, `data:`, …) are rejected at the JS boundary. Plain absolute paths and `file:///…` URIs are equivalent.
 - **Overwrite.** If a file already exists at `path`, it is deleted before the new file is written. There is no `overwrite: false` option.
-- **Parent directories.** Are **not** created automatically. The caller is responsible for ensuring the directory exists (e.g. via React Native's `RNFS.mkdir` or `expo-file-system`'s `makeDirectoryAsync`). Writing to a non-existent directory rejects with `IOError`.
+- **Parent directories.** Are **not** created automatically. The caller is responsible for ensuring the directory exists (e.g. via React Native's `RNFS.mkdir` or `expo-file-system`'s `makeDirectoryAsync`). Writing to a non-existent directory rejects with `IOError` — on the iOS `compose`/`synthesize` paths this is validated up front (with an actionable `"parent directory does not exist"` message) rather than surfacing as the opaque MediaToolbox "Cannot create file" deep in the export (#85).
 - **Atomicity.** Writes are **not** atomic. While the operation is in flight, `path` may exist as a partial / not-yet-finalized file. Readers that observe the path mid-render will see incomplete data.
 - **Failure / cancellation.** On rejection (any cause — `InvalidSpec`, `EncoderFailure`, `Cancelled`, …), the partial output at `path` is best-effort deleted by the native side. Don't rely on a partial file being present after a failed render.
 - **Container vs. extension.** The output container is determined by `output.container` if provided, otherwise inferred from the file extension. There is no enforcement that `path`'s extension matches `output.container` — providing `path: 'out.mov'` with `container: 'mp4'` is accepted and produces an MP4 inside a `.mov` filename. Avoid relying on the extension alone for downstream tooling.
