@@ -17,6 +17,7 @@ tags predate that and were never published.
 ### Changed
 
 - iOS export/mux errors now surface the underlying error domain + code and the full `NSUnderlyingError` chain (including the internal CoreMedia/Fig codes like `-17913`/`-12115`, with a hint for known ones) instead of only the generic `localizedDescription`, turning opaque "Cannot create file" failures into actionable messages (#85).
+- Android Media3 export errors now always surface the symbolic `ExportException.errorCodeName` (+ raw `errorCode`) and the `cause` chain — previously the structured code was dropped whenever Media3 supplied a human message — with a hint for common IO / encoder-init / unsupported-format codes (#89, parity with #85).
 
 ### Added
 
