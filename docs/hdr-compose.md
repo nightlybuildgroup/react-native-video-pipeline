@@ -95,13 +95,17 @@ path selected when `colorRange === 'hdr'` and the source is HDR):
    (`'x420'`) for YUV, or 64-bit half-float RGBA
    (`kCVPixelFormatType_64RGBAHalf`) for a linear worklet target.
 2. **CIContext working space.** Render into an extended-range / HDR working
-   space (`kCGColorSpaceExtendedLinearITUR_2020`, or the ITU-R 2100 HLG/PQ
-   space) instead of the sRGB output space `RNVPComposeRenderSourceToSDR` uses.
-   No tone-map — a transfer-correct materialization into 10-bit.
+   space — `kCGColorSpaceExtendedLinearITUR_2020` (the iOS 13-compatible
+   choice). The named HLG/PQ spaces `kCGColorSpaceITUR_2100_HLG` /
+   `kCGColorSpaceITUR_2100_PQ` are iOS 14.0+, so they need an availability
+   guard given the iOS 13+ target — prefer extended-linear bt2020. Either way,
+   no tone-map: a transfer-correct materialization into 10-bit, unlike the sRGB
+   output space `RNVPComposeRenderSourceToSDR` uses today.
 3. **Encoder.** Configure `AVAssetWriter` for **HEVC Main10** with the output
-   track tagged bt2020 primaries + HLG (or PQ) transfer + bt2020 matrix
-   (`AVVideoColorPrimariesKey` / `TransferFunctionKey` / `YCbCrMatrixKey`).
-   `codec` must resolve to `hevc`; reject `h264` + `hdr`.
+   track tagged bt2020 primaries + HLG (or PQ) transfer + bt2020 matrix, via
+   `AVVideoColorPropertiesKey` carrying `AVVideoColorPrimariesKey`,
+   `AVVideoTransferFunctionKey`, and `AVVideoYCbCrMatrixKey`. `codec` must
+   resolve to `hevc`; reject `h264` + `hdr`.
 4. **Worklet/Skia contract.** Decide how a worklet draws into a 10-bit HDR
    target and how an SDR overlay composites onto an HDR base (extended-range
    Skia surface, or restrict the first cut to "HDR base, no worklet draw" /
@@ -120,10 +124,10 @@ Media3 already has first-class HDR support, so the lift is smaller than iOS:
 
 1. **GL/EGL.** A 10-bit compose surface (RGBA1010102 or FP16 pbuffer) and
    matching `ImageReader`/readback instead of `RGBA_8888`.
-2. **Media3.** `Composition.setHdrMode(...)` (e.g.
-   `HDR_MODE_KEEP_HDR`), an HEVC Main10 encoder, bt2020 color info on the
-   output `Format`. Media3 will tone-map itself if the device can't keep HDR —
-   surface that decision rather than hiding it.
+2. **Media3.** `Composition.Builder.setHdrMode(@Composition.HdrMode int)` —
+   e.g. `.setHdrMode(Composition.HDR_MODE_KEEP_HDR)` — an HEVC Main10 encoder,
+   and bt2020 color info on the output `Format`. Media3 will tone-map itself if
+   the device can't keep HDR — surface that decision rather than hiding it.
 3. **Y-flip discipline** preserved at every memory↔GL boundary (see
    `rendering-android.md`).
 4. **Dimensions.** Reconcile with the `Presentation` coded-vs-displayed
