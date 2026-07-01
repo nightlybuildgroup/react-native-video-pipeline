@@ -35,6 +35,7 @@
 #import "HybridFrameSource.h"
 #import "HybridFrameTarget.h"
 #import "OverlayRenderer.h"
+#import "RNVPComposeColor.h"
 #import "RNVPPathUtils.h"
 #import "Remuxer.h"
 #import "Remuxer+Internal.h"
@@ -2037,10 +2038,13 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
                                                    (int)cvSrc]
                            userInfo:nil];
             }
-            [ciContext render:source
-                toCVPixelBuffer:sourcePb
-                         bounds:CGRectMake(0, 0, canvasW, canvasH)
-                     colorSpace:nil];
+            // Tone-map HDR (HLG/PQ, bt2020) sources down to SDR sRGB while
+            // materializing the frame — see RNVPComposeRenderSourceToSDR. A
+            // `colorSpace:nil` render would crush HDR mid-tones to a dark
+            // output (issue #86); SDR sources are unaffected.
+            RNVPComposeRenderSourceToSDR(
+                ciContext, source, sourcePb,
+                CGRectMake(0, 0, canvasW, canvasH));
 
             // Allocate a destination buffer the JS worklet can write to.
             CVPixelBufferRef targetPb = NULL;
