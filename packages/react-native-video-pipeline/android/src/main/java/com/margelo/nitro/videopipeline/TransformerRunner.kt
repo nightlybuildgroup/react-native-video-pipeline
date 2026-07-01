@@ -785,10 +785,73 @@ internal object TransformerRunner {
     val err = exportError.get()
     if (err != null) {
       File(outputPath).delete()
-      throw TransformerException(
-        err.message ?: "Media3 export failed (errorCode=${err.errorCode})"
-      )
+      throw TransformerException(describeExportException(err))
     }
+  }
+
+  /// Build a diagnosable, single-line description of a Media3 [ExportException]
+  /// for the message thrown across the JS boundary. Media3 otherwise surfaces
+  /// only its human `message` (when non-null), which hides the actionable,
+  /// greppable structured signal: the symbolic `errorCodeName` (+ the raw
+  /// `errorCode`) and the `cause` chain that carries the real MediaCodec / IO
+  /// exception. This always surfaces all of it inline — issue #89, parity with
+  /// iOS #85 / `RNVPDescribeError`. e.g.:
+  ///
+  ///   Media3 export failed (Media3 ExportException ERROR_CODE_IO_FILE_NOT_FOUND
+  ///   [2001]; cause: java.io.FileNotFoundException: /bad/dir/out.mp4; hint: …)
+  ///
+  /// Split from the throw site so the offline Kotlin test suite can exercise the
+  /// formatting directly; [hintForExportErrorCode] is likewise exposed so the
+  /// known-code hints are unit-testable in isolation.
+  internal fun describeExportException(err: ExportException): String {
+    val base = err.message?.takeIf { it.isNotEmpty() } ?: "Media3 export failed"
+    val sb = StringBuilder(base)
+    sb.append(" (Media3 ExportException ")
+      .append(err.errorCodeName)
+      .append(" [").append(err.errorCode).append(']')
+    err.cause?.let { cause ->
+      sb.append("; cause: ")
+      appendCauseChain(cause, sb, 0)
+    }
+    hintForExportErrorCode(err.errorCode)?.let { hint ->
+      sb.append("; hint: ").append(hint)
+    }
+    sb.append(')')
+    return sb.toString()
+  }
+
+  /// Append "<class>: <message>" for `t`, then recurse into its `cause`
+  /// (guarded against a pathological cycle and self-reference), mirroring the
+  /// `NSUnderlyingError` walk in iOS `RNVPDescribeError`.
+  private fun appendCauseChain(t: Throwable, sb: StringBuilder, depth: Int) {
+    sb.append(t.javaClass.name)
+    t.message?.takeIf { it.isNotEmpty() }?.let { sb.append(": ").append(it) }
+    val next = t.cause
+    if (next != null && next !== t) {
+      if (depth >= 8) {
+        sb.append("; caused by (…truncated)")
+        return
+      }
+      sb.append("; caused by ")
+      appendCauseChain(next, sb, depth + 1)
+    }
+  }
+
+  /// A human hint for the export `errorCode`s a consumer is most likely to hit
+  /// and can act on (issue #89), or null if the code isn't mapped — parity with
+  /// iOS `RNVPHintForErrorCode`. Exposed for testing; [describeExportException]
+  /// folds it into its output.
+  internal fun hintForExportErrorCode(errorCode: Int): String? = when (errorCode) {
+    ExportException.ERROR_CODE_IO_FILE_NOT_FOUND,
+    ExportException.ERROR_CODE_IO_NO_PERMISSION ->
+      "Media3 could not open the output file — verify the parent directory " +
+        "exists and output.path is a writable filesystem path, not a " +
+        "content:// or asset URI"
+    ExportException.ERROR_CODE_ENCODER_INIT_FAILED,
+    ExportException.ERROR_CODE_ENCODING_FORMAT_UNSUPPORTED ->
+      "the device encoder rejected the requested output format — try H.264 " +
+        "at a lower resolution/bitrate, or a codec this device supports"
+    else -> null
   }
 
   private fun buildMediaItem(spec: Spec): MediaItem {

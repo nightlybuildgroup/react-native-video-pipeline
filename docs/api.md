@@ -342,6 +342,14 @@ Cannot create file (AVFoundationErrorDomain -11820; underlying NSOSStatusErrorDo
 
 The internal CoreMedia/Fig codes (e.g. `-17913`, `-12115`) are undocumented but invaluable for searching/triaging, so they are always included; a small set of known ones also get a human hint. This turns ~30 minutes of native-`os_log` spelunking into an actionable message.
 
+On **Android** the same treatment applies to Media3 export failures: the thrown message now always carries the symbolic **`ExportException.errorCodeName`** (+ the raw `errorCode`) and the full **`cause` chain** — previously the structured code was dropped whenever Media3 supplied a human message (the common case), leaving only the opaque string. For example:
+
+```
+Export error (Media3 ExportException ERROR_CODE_IO_FILE_NOT_FOUND [2001]; cause: java.io.FileNotFoundException: /bad/dir/out.mp4; hint: Media3 could not open the output file — verify the parent directory exists and output.path is a writable filesystem path, not a content:// or asset URI)
+```
+
+The symbolic name (e.g. `ERROR_CODE_ENCODER_INIT_FAILED`, `ERROR_CODE_ENCODING_FORMAT_UNSUPPORTED`) is far more greppable than the raw int, so it is always included; the IO and encoder-init/format codes a consumer is most likely to hit also get a human hint (#89).
+
 ---
 
 ## Types
