@@ -14,6 +14,8 @@ tags predate that and were never published.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-02
+
 ### Changed
 
 - iOS export/mux errors now surface the underlying error domain + code and the full `NSUnderlyingError` chain (including the internal CoreMedia/Fig codes like `-17913`/`-12115`, with a hint for known ones) instead of only the generic `localizedDescription`, turning opaque "Cannot create file" failures into actionable messages (#85).
@@ -76,6 +78,7 @@ First release published to npm for all three packages.
 - Exclude `android/src/androidTest` from the published tarball (#63).
 - Add a manual-dispatch Android instrumented-test workflow (#57).
 
-[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/nightlybuildgroup/react-native-video-pipeline/releases/tag/v0.4.0
