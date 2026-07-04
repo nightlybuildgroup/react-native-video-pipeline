@@ -65,6 +65,13 @@ typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode) {
                      height:(NSInteger)height
                         fps:(NSInteger)fps
                       error:(NSError *_Nullable __autoreleasing *)error;
+- (BOOL)openHDRVideoOnlyAtPath:(NSString *)path
+                         width:(NSInteger)width
+                        height:(NSInteger)height
+                           fps:(NSInteger)fps
+                   pixelFormat:(OSType)pixelFormat
+                      metadata:(NSArray<AVMetadataItem *> *_Nullable)metadata
+                         error:(NSError *_Nullable __autoreleasing *)error;
 - (BOOL)appendPixelBuffer:(CVPixelBufferRef)pixelBuffer
          presentationTime:(CMTime)pts
                     error:(NSError *_Nullable __autoreleasing *)error;
@@ -8422,6 +8429,106 @@ static float RNVPRenderHLGToHDRFloat(int y10)
   XCTAssertGreaterThan(highlight, shadow + 0.2f,
                        @"#92: highlight (%.3f) must exceed shadow (%.3f)",
                        highlight, shadow);
+}
+
+// End-to-end encoder half: author an HEVC Main10 file from half-float (FP16)
+// frames via RNVPAVMuxer's HDR sink, re-open it, and assert the video track is
+// HEVC and carries the bt2020 primaries + HLG transfer + bt2020 matrix tags —
+// the color metadata that makes a downstream player decode it as HDR. This is
+// the arbiter of whether VideoToolbox actually accepts a kCVPixelFormatType_
+// 64RGBAHalf adaptor buffer for Main10; if it doesn't, this test fails loudly
+// (rather than the pipeline silently producing SDR).
+- (void)testAVMuxerHDRWritesHEVCMain10WithBt2020HLGTags
+{
+  const NSInteger kWidth = 64;
+  const NSInteger kHeight = 64;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 8;
+
+  NSString *outputPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"hdr92-%@.mov", NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  NSError *error = nil;
+  XCTAssertTrue([muxer openHDRVideoOnlyAtPath:outputPath
+                                        width:kWidth
+                                       height:kHeight
+                                          fps:kFps
+                                  pixelFormat:kCVPixelFormatType_64RGBAHalf
+                                     metadata:nil
+                                        error:&error],
+                @"HDR open failed: %@", error);
+
+  NSDictionary *pbAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_64RGBAHalf),
+    (id)kCVPixelBufferWidthKey : @(kWidth),
+    (id)kCVPixelBufferHeightKey : @(kHeight),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  for (NSInteger i = 0; i < kFrameCount; i++) {
+    CVPixelBufferRef pb = NULL;
+    CVReturn cv = CVPixelBufferCreate(kCFAllocatorDefault, kWidth, kHeight,
+                                      kCVPixelFormatType_64RGBAHalf,
+                                      (__bridge CFDictionaryRef)pbAttrs, &pb);
+    XCTAssertEqual(cv, kCVReturnSuccess, @"FP16 CVPixelBufferCreate failed");
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    const size_t rowBytes = CVPixelBufferGetBytesPerRow(pb);
+    // Include a genuine HDR highlight (> 1.0) so there is real HDR content.
+    const __fp16 rgba[4] = {(__fp16)0.5f, (__fp16)1.6f, (__fp16)0.5f,
+                            (__fp16)1.0f};
+    for (NSInteger y = 0; y < kHeight; y++) {
+      __fp16 *row = (__fp16 *)(base + (size_t)y * rowBytes);
+      for (NSInteger x = 0; x < kWidth; x++) {
+        row[x * 4 + 0] = rgba[0];
+        row[x * 4 + 1] = rgba[1];
+        row[x * 4 + 2] = rgba[2];
+        row[x * 4 + 3] = rgba[3];
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    CMTime pts = CMTimeMake((int64_t)i, (int32_t)kFps);
+    XCTAssertTrue([muxer appendPixelBuffer:pb presentationTime:pts error:&error],
+                  @"HDR append failed at i=%ld: %@", (long)i, error);
+    CVPixelBufferRelease(pb);
+  }
+  XCTAssertTrue([muxer closeWithError:&error], @"HDR close failed: %@", error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outputPath],
+                @"HDR output file missing at %@", outputPath);
+
+  // Re-open and inspect the encoded track's color metadata.
+  AVURLAsset *asset =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outputPath]];
+  AVAssetTrack *track =
+      [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  XCTAssertNotNil(track, @"HDR output has no video track");
+  NSArray *fds = track.formatDescriptions;
+  XCTAssertGreaterThan(fds.count, 0u, @"HDR track has no format description");
+  CMFormatDescriptionRef fd = (__bridge CMFormatDescriptionRef)fds.firstObject;
+
+  const FourCharCode subType = CMFormatDescriptionGetMediaSubType(fd);
+  XCTAssertEqual(subType, (FourCharCode)kCMVideoCodecType_HEVC,
+                 @"#92: HDR output must be HEVC (got %c%c%c%c)",
+                 (char)(subType >> 24), (char)(subType >> 16),
+                 (char)(subType >> 8), (char)subType);
+
+  CFStringRef primaries = (CFStringRef)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_ColorPrimaries);
+  CFStringRef transfer = (CFStringRef)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_TransferFunction);
+  XCTAssertTrue(primaries != NULL &&
+                    CFEqual(primaries,
+                            kCMFormatDescriptionColorPrimaries_ITU_R_2020),
+                @"#92: HDR output must carry bt2020 primaries, got %@",
+                primaries);
+  XCTAssertTrue(transfer != NULL &&
+                    CFEqual(transfer,
+                            kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG),
+                @"#92: HDR output must carry the HLG transfer, got %@",
+                transfer);
+  [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
 }
 
 // ---------------------------------------------------------------------------

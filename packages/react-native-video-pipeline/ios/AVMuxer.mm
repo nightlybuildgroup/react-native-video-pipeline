@@ -6,6 +6,7 @@
 
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 NSErrorDomain const RNVPAVMuxerErrorDomain = @"RNVPAVMuxerErrorDomain";
 
@@ -53,6 +54,30 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
                       fps:fps
                  withAudio:YES
                   metadata:nil
+                      hdr:NO
+              pixelFormat:kCVPixelFormatType_32BGRA
+                    error:error];
+}
+
+// HDR-preserving compose sink (#92): HEVC Main10, output track tagged
+// bt2020 primaries + HLG transfer + bt2020 matrix, and a wide (half-float or
+// 10-bit) adaptor pixel format. Video-only (compose drives its own audio, and
+// the writer would back-pressure on a dry audio queue).
+- (BOOL)openHDRVideoOnlyAtPath:(NSString *)path
+                         width:(NSInteger)width
+                        height:(NSInteger)height
+                           fps:(NSInteger)fps
+                   pixelFormat:(OSType)pixelFormat
+                      metadata:(NSArray<AVMetadataItem *> *)metadata
+                         error:(NSError *_Nullable __autoreleasing *)error {
+  return [self openAtPath:path
+                    width:width
+                   height:height
+                      fps:fps
+                 withAudio:NO
+                  metadata:metadata
+                      hdr:YES
+              pixelFormat:pixelFormat
                     error:error];
 }
 
@@ -67,6 +92,8 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
                       fps:fps
                  withAudio:NO
                   metadata:nil
+                      hdr:NO
+              pixelFormat:kCVPixelFormatType_32BGRA
                     error:error];
 }
 
@@ -82,6 +109,8 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
                       fps:fps
                  withAudio:NO
                   metadata:metadata
+                      hdr:NO
+              pixelFormat:kCVPixelFormatType_32BGRA
                     error:error];
 }
 
@@ -91,6 +120,8 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
                fps:(NSInteger)fps
          withAudio:(BOOL)withAudio
           metadata:(NSArray<AVMetadataItem *> *)metadata
+               hdr:(BOOL)hdr
+       pixelFormat:(OSType)pixelFormat
              error:(NSError *_Nullable __autoreleasing *)error {
   if (_opened) {
     if (error) {
@@ -121,11 +152,36 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
     return NO;
   }
 
-  NSDictionary<NSString *, id> *videoSettings = @{
-    AVVideoCodecKey : AVVideoCodecTypeH264,
-    AVVideoWidthKey : @(width),
-    AVVideoHeightKey : @(height),
-  };
+  NSDictionary<NSString *, id> *videoSettings;
+  if (hdr) {
+    // HEVC Main10 + bt2020/HLG color tags on the output track. The tags are
+    // what make the file *decode* as HDR downstream; the encoder converts the
+    // wide adaptor buffers into 10-bit YUV under these primaries/transfer.
+    videoSettings = @{
+      AVVideoCodecKey : AVVideoCodecTypeHEVC,
+      AVVideoWidthKey : @(width),
+      AVVideoHeightKey : @(height),
+      AVVideoCompressionPropertiesKey : @{
+        // The HEVC Main10 profile — 10-bit. Use the VideoToolbox constant
+        // directly (bridged): the AVVideoProfileLevelHEVCMain10AutoLevel alias
+        // isn't declared in every SDK, but AVVideoProfileLevelKey accepts the
+        // underlying kVTProfileLevel string value.
+        AVVideoProfileLevelKey :
+            (__bridge NSString *)kVTProfileLevel_HEVC_Main10_AutoLevel,
+      },
+      AVVideoColorPropertiesKey : @{
+        AVVideoColorPrimariesKey : AVVideoColorPrimaries_ITU_R_2020,
+        AVVideoTransferFunctionKey : AVVideoTransferFunction_ITU_R_2100_HLG,
+        AVVideoYCbCrMatrixKey : AVVideoYCbCrMatrix_ITU_R_2020,
+      },
+    };
+  } else {
+    videoSettings = @{
+      AVVideoCodecKey : AVVideoCodecTypeH264,
+      AVVideoWidthKey : @(width),
+      AVVideoHeightKey : @(height),
+    };
+  }
   AVAssetWriterInput *videoInput =
       [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo
                                          outputSettings:videoSettings];
@@ -140,8 +196,7 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
   [writer addInput:videoInput];
 
   NSDictionary<NSString *, id> *pixelBufferAttrs = @{
-    (NSString *)kCVPixelBufferPixelFormatTypeKey :
-        @(kCVPixelFormatType_32BGRA),
+    (NSString *)kCVPixelBufferPixelFormatTypeKey : @(pixelFormat),
     (NSString *)kCVPixelBufferWidthKey : @(width),
     (NSString *)kCVPixelBufferHeightKey : @(height),
     // IOSurface-backed buffers let the adaptor take ownership without a CPU
