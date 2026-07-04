@@ -14,6 +14,7 @@ export type {
   BatchThumbnailOptions,
   Clip,
   ClipTransform,
+  ColorRange,
   CropRect,
   EncoderCaps,
   FlipAxis,

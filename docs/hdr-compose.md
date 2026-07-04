@@ -1,8 +1,9 @@
 # HDR-preserving compose — design
 
-Status: **design / not yet implemented.** Tracking: [#90]. Implementation
-sub-tasks: iOS 10-bit pipeline [#92], Android 10-bit pipeline [#93], the
-`ComposeSpec` color-range API [#94].
+Status: **API landed; platform pipelines not yet implemented.** Tracking:
+[#90]. Sub-tasks: the `output.colorRange` API [#94] — **done** (the knob
+exists and `'hdr'` rejects up front until a platform pipeline lands); iOS
+10-bit pipeline [#92] — open; Android 10-bit pipeline [#93] — open.
 
 This document specifies how `Video.compose` could preserve an HDR source's
 dynamic range end-to-end, and pins the API shape that gates it. It exists
@@ -63,25 +64,30 @@ interface OutputSpec {
   `'sdr'`"), *never* silently produce SDR — silent downgrade is exactly the
   discoverability gap [#90] is about.
 
-**Open design question (the reason this is its own sub-issue).** `OutputSpec`
-is `export type OutputSpec = NativeOutputSpec` — a direct alias of the
-Nitro-spec struct (invariant #6) shared by `RenderSpec`, `ComposeSpec`, and
-`SynthesizeOutputSpec`. Adding `colorRange` to it exposes the field on the
-remux/transcode render paths too, where the semantics differ (a transcode of
-an HDR source is a separate question from compose, which materializes into a
-worklet buffer). Three candidate shapes, to be settled in [#94] before the
-Nitrogen change:
+**Resolved shape ([#94], landed).** `OutputSpec` is
+`export type OutputSpec = NativeOutputSpec` — a direct alias of the Nitro-spec
+struct (invariant #6) shared by `RenderSpec`, `ComposeSpec`, and
+`SynthesizeOutputSpec`. The three candidate shapes were:
 
 1. Add to shared `OutputSpec`; validate/act only on the compose path; reject
-   (or document as ignored) elsewhere. Simplest spec, muddiest semantics.
+   elsewhere. Simplest spec, muddiest semantics.
 2. Split a compose-specific output type so the field only appears where it
    applies. Cleanest semantics, most type churn.
-3. `sdr: boolean` instead of the `colorRange` enum ([#90] floated both). An
-   enum leaves room for a future `'hdr10' | 'hlg' | 'pq'` refinement; a bool
-   does not — prefer the enum.
+3. `sdr: boolean` instead of the `colorRange` enum ([#90] floated both).
 
-Recommendation: enum, shape TBD between (1) and (2) in [#94]. The library is
-pre-1.0, so the shared-vs-split decision is reversible.
+**Decision: (1) + the enum.** `colorRange?: ColorRange` (`'sdr' | 'hdr'`) lives
+on the shared struct; `Video.compose` acts on it, and `Video.render` /
+`Video.synthesize` **reject its presence** with `InvalidSpecError`
+(`validateColorRange` in `src/video.ts`) — those paths do not materialize into
+a worklet buffer, so the muddy semantics option (1) warns about are closed off
+by rejecting rather than silently ignoring. The enum (not a bool) leaves room
+for a future `'hlg' | 'pq' | 'hdr10'` refinement. The library is pre-1.0, so
+splitting a compose-specific output type later stays reversible.
+
+Until a platform 10-bit pipeline lands, `Video.compose` with `'hdr'` also
+rejects with `InvalidSpecError` and an actionable message (this is the JS gate
+[#92]/[#93] each flip for their platform). `'sdr'` and omitted are the SDR
+default and pass through unchanged.
 
 ---
 
