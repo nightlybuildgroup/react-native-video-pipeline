@@ -73,6 +73,17 @@ export function drawWithRGBA(draw: RGBADrawer): FrameDrawer {
   return (ctx: FrameDrawerContext): void => {
     'worklet';
     const { width, height, target } = ctx;
+    if (target.format === 'rgbaFp16') {
+      // `drawWithRGBA` is an 8-bit (Uint8Array) helper; it cannot fill a
+      // half-float HDR target (#99). This only happens under
+      // `output.colorRange: 'hdr'`.
+      throw new Error(
+        "drawWithRGBA is 8-bit-only and cannot target an 'rgbaFp16' (HDR) " +
+          "buffer. For output.colorRange: 'hdr', write half-float pixels via " +
+          'target.writeBytes directly (Float16, width*height*4 channels), or ' +
+          'draw through an F16 Skia surface with drawWithSkia.',
+      );
+    }
     const length = width * height * 4;
     const pixels = new Uint8Array(length);
     draw(pixels, ctx);

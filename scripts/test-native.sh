@@ -47,6 +47,7 @@ OBJCXX_SOURCES=(
   "$PKG/ios/MetalBlit.mm"
   "$PKG/ios/OverlayRenderer.mm"
   "$PKG/ios/RNVPComposeColor.mm"
+  "$PKG/ios/RNVPFrameBytes.mm"
   "$PKG/ios/RNVPExportError.mm"
   "$PKG/ios/RNVPPathUtils.mm"
   "$PKG/ios/Remuxer.mm"

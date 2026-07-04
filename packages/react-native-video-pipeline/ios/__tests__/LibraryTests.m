@@ -45,6 +45,15 @@ extern CGColorSpaceRef RNVPComposeHDRWorkingColorSpaceCreate(void);
 extern void RNVPComposeRenderSourceToHDR(CIContext *ciContext, CIImage *source,
                                          CVPixelBufferRef target, CGRect bounds);
 
+// Nitro-free frame byte-math from RNVPFrameBytes.{h,mm} (#99). Host-tested here
+// because HybridFrameTarget/Source can't compile against the macosx SDK.
+extern size_t RNVPFrameBytesPerPixel(OSType cvPixelFormat);
+extern size_t RNVPFrameExpectedByteLength(CVPixelBufferRef pixelBuffer);
+extern bool RNVPFrameWritePackedBytes(CVPixelBufferRef pixelBuffer,
+                                      const void *src, size_t srcLen);
+extern void *RNVPFrameCopyPackedBytes(CVPixelBufferRef pixelBuffer,
+                                      size_t *outLen);
+
 extern NSErrorDomain const RNVPAVMuxerErrorDomain;
 
 typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode) {
@@ -8556,6 +8565,144 @@ static float RNVPRenderHLGToHDRFloat(int y10)
                  @"got %u — an 8-bit Main profile would be 1)",
                  profileIdc);
   [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+}
+
+// ---------------------------------------------------------------------------
+// RNVPFrameBytes — format-driven FrameTarget/FrameSource byte math (#99). The
+// worklet pixel contract grew a third format, `rgbaFp16` (half-float RGBA, 8
+// bytes/pixel), alongside the 8-bit formats (4 bytes/pixel). writeBytes /
+// readBytes must key off the buffer's actual CoreVideo format, not a hardcoded
+// 4, and strip/repad CoreVideo's per-row stride. HybridFrameTarget/Source
+// delegate here so this logic is host-testable.
+// ---------------------------------------------------------------------------
+
+- (void)testFrameBytesPerPixelByFormat
+{
+  XCTAssertEqual(RNVPFrameBytesPerPixel(kCVPixelFormatType_32BGRA), 4u);
+  XCTAssertEqual(RNVPFrameBytesPerPixel(kCVPixelFormatType_64RGBAHalf), 8u,
+                 @"#99: rgbaFp16 (64RGBAHalf) is 8 bytes/pixel");
+  XCTAssertEqual(
+      RNVPFrameBytesPerPixel(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+      0u, @"an unsupported format must report 0, not a guess");
+}
+
+- (void)testFrameExpectedByteLengthByFormat
+{
+  const size_t kW = 16, kH = 16;
+  CVPixelBufferRef bgra = NULL, fp16 = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH, kCVPixelFormatType_32BGRA,
+                      NULL, &bgra);
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH, kCVPixelFormatType_64RGBAHalf,
+                      NULL, &fp16);
+  XCTAssertEqual(RNVPFrameExpectedByteLength(bgra), kW * kH * 4);
+  XCTAssertEqual(RNVPFrameExpectedByteLength(fp16), kW * kH * 8);
+  XCTAssertEqual(RNVPFrameExpectedByteLength(NULL), 0u);
+  CVPixelBufferRelease(bgra);
+  CVPixelBufferRelease(fp16);
+}
+
+// Round-trip packed bytes through write→read for a given format and width, and
+// assert the bytes survive. A non-16-aligned width forces CoreVideo to pad the
+// row stride, so this also exercises the row-by-row (padded) copy path — a bug
+// there would corrupt every row after the first.
+static void RNVPAssertFrameRoundTrip(XCTestCase *self, OSType fmt, size_t width,
+                                     size_t height)
+{
+  CVPixelBufferRef pb = NULL;
+  CVReturn cv = CVPixelBufferCreate(kCFAllocatorDefault, width, height, fmt,
+                                    NULL, &pb);
+  XCTAssertEqual(cv, kCVReturnSuccess);
+  const size_t expected = RNVPFrameExpectedByteLength(pb);
+  XCTAssertGreaterThan(expected, 0u);
+
+  uint8_t *src = (uint8_t *)malloc(expected);
+  for (size_t i = 0; i < expected; i++) src[i] = (uint8_t)((i * 31 + 7) & 0xFF);
+
+  XCTAssertTrue(RNVPFrameWritePackedBytes(pb, src, expected),
+                @"write must succeed for a correct length");
+
+  size_t outLen = 0;
+  void *packed = RNVPFrameCopyPackedBytes(pb, &outLen);
+  XCTAssertTrue(packed != NULL, @"read must return a buffer");
+  XCTAssertEqual(outLen, expected);
+  XCTAssertEqual(memcmp(packed, src, expected), 0,
+                 @"#99: packed bytes must survive write→read for fmt 0x%08x at "
+                 @"%zux%zu",
+                 (unsigned)fmt, width, height);
+  free(packed);
+  free(src);
+  CVPixelBufferRelease(pb);
+}
+
+- (void)testFrameRoundTrip8bitAlignedAndPadded
+{
+  RNVPAssertFrameRoundTrip(self, kCVPixelFormatType_32BGRA, 16, 16);
+  RNVPAssertFrameRoundTrip(self, kCVPixelFormatType_32BGRA, 3, 5);  // pads stride
+}
+
+- (void)testFrameRoundTripFP16AlignedAndPadded
+{
+  RNVPAssertFrameRoundTrip(self, kCVPixelFormatType_64RGBAHalf, 16, 16);
+  RNVPAssertFrameRoundTrip(self, kCVPixelFormatType_64RGBAHalf, 3, 5);  // pads
+}
+
+// Asymmetric stride check: verify RNVPFrameWritePackedBytes lands each packed
+// row at `row * CVPixelBufferGetBytesPerRow` in the destination — reading the
+// raw buffer directly here (NOT via RNVPFrameCopyPackedBytes) so a symmetric
+// "both sides ignore stride" bug can't false-pass. Uses a width whose packed
+// row (3 px) is smaller than the aligned stride CoreVideo hands back.
+- (void)testFrameWriteRespectsRowStrideIndependently
+{
+  const size_t kW = 3, kH = 4;
+  CVPixelBufferRef pb = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH, kCVPixelFormatType_64RGBAHalf,
+                      NULL, &pb);
+  const size_t bpp = 8;  // FP16 RGBA
+  const size_t packedRow = kW * bpp;
+  const size_t expected = kW * kH * bpp;
+  uint8_t *src = (uint8_t *)malloc(expected);
+  for (size_t i = 0; i < expected; i++) src[i] = (uint8_t)((i + 1) & 0xFF);
+  XCTAssertTrue(RNVPFrameWritePackedBytes(pb, src, expected));
+
+  CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+  const size_t stride = CVPixelBufferGetBytesPerRow(pb);
+  const uint8_t *base = CVPixelBufferGetBaseAddress(pb);
+  // Only meaningful when CoreVideo actually padded; if not, the test still
+  // holds (stride == packedRow) but skips the "gap" intent.
+  for (size_t r = 0; r < kH; r++) {
+    XCTAssertEqual(memcmp(base + r * stride, src + r * packedRow, packedRow), 0,
+                   @"#99: packed row %zu must land at row*bytesPerRow (%zu), "
+                   @"not row*packedRow (%zu)",
+                   r, stride, packedRow);
+  }
+  CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+  free(src);
+  CVPixelBufferRelease(pb);
+}
+
+- (void)testFrameWriteRejectsWrongLengthAndUnsupported
+{
+  CVPixelBufferRef fp16 = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_64RGBAHalf,
+                      NULL, &fp16);
+  uint8_t scratch[8] = {0};
+  // Too short: an 8-bit-sized buffer handed to an FP16 target (w*h*4, not *8).
+  XCTAssertFalse(RNVPFrameWritePackedBytes(fp16, scratch, 16 * 16 * 4),
+                 @"#99: writing 4bpp bytes into an 8bpp FP16 target must fail");
+  XCTAssertFalse(RNVPFrameWritePackedBytes(fp16, scratch, sizeof(scratch)));
+  CVPixelBufferRelease(fp16);
+
+  // Unsupported format reports 0 length and refuses the write.
+  CVPixelBufferRef yuv = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, 16, 16,
+                      kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, NULL,
+                      &yuv);
+  XCTAssertEqual(RNVPFrameExpectedByteLength(yuv), 0u);
+  XCTAssertFalse(RNVPFrameWritePackedBytes(yuv, scratch, sizeof(scratch)));
+  size_t outLen = 99;
+  XCTAssertTrue(RNVPFrameCopyPackedBytes(yuv, &outLen) == NULL);
+  XCTAssertEqual(outLen, 0u, @"unsupported read must zero outLen");
+  CVPixelBufferRelease(yuv);
 }
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,23 @@ import type { HybridObject, UInt64 } from 'react-native-nitro-modules';
 // `FrameDrawer` call; the pump reclaims the buffer as soon as the drawer
 // returns, so consumers must not retain it.
 
-/** In-memory pixel layout of a FrameSource / FrameTarget buffer. */
-export type PixelFormat = 'bgra8888' | 'rgba8888';
+/**
+ * In-memory pixel layout of a FrameSource / FrameTarget buffer.
+ *
+ * - `'bgra8888'` / `'rgba8888'` — 8-bit SDR, 4 bytes/pixel. The default compose
+ *   path; `writeBytes`/`readBytes` operate on `width * height * 4` bytes.
+ * - `'rgbaFp16'` — **HDR (#99).** 16-bit half-float RGBA, 8 bytes/pixel,
+ *   **linear Rec.2020, premultiplied alpha, extended range** (channel values
+ *   may exceed 1.0 for highlights above SDR white). This is the worklet-facing
+ *   target when a consumer opts into `output.colorRange: 'hdr'`; the platform
+ *   pipeline converts it to the codec-native 10-bit format at the encoder sink
+ *   (iOS #92, Android #93). `writeBytes`/`readBytes` operate on
+ *   `width * height * 8` bytes. The 8-bit helper `drawWithRGBA` rejects this
+ *   format; HDR drawing uses raw half-float `writeBytes` or an F16 Skia surface.
+ *   It never appears on the SDR path — an SDR compose is byte-for-byte
+ *   unchanged.
+ */
+export type PixelFormat = 'bgra8888' | 'rgba8888' | 'rgbaFp16';
 
 /**
  * Read-only view onto the current source frame (compose-on-clip path).
@@ -54,10 +69,11 @@ export interface FrameSource extends HybridObject<{ ios: 'c++'; android: 'kotlin
   readonly format: PixelFormat;
   /**
    * Raster fallback for the source path: returns a freshly-allocated
-   * ArrayBuffer with `width * height * 4` bytes of RGBA8888 pixel data,
-   * top-down. Used by `drawWithSkia` on platforms where
-   * `Skia.Image.MakeImageFromNativeBuffer(bufferAddr)` doesn't have a
-   * cheap implementation (Android), so the helper drops to
+   * ArrayBuffer of packed pixel data in this buffer's `format`, top-down —
+   * `width * height * 4` bytes for the 8-bit formats, `width * height * 8`
+   * bytes for `rgbaFp16` (half-float RGBA, #99). Used by `drawWithSkia` on
+   * platforms where `Skia.Image.MakeImageFromNativeBuffer(bufferAddr)` doesn't
+   * have a cheap implementation (Android), so the helper drops to
    * `Skia.Image.MakeImage(info, data, stride)` instead.
    */
   readBytes(): ArrayBuffer;
@@ -101,8 +117,11 @@ export interface FrameTarget extends HybridObject<{ ios: 'c++'; android: 'kotlin
   readonly format: PixelFormat;
   /**
    * Stable CPU path: memcpy `bytes` into the target buffer. Length must match
-   * `width * height * 4`; layout must match `format`. Most consumers reach
-   * this via `drawWithRGBA` rather than calling it directly.
+   * `width * height * bytesPerPixel` — `bytesPerPixel` is 4 for the 8-bit
+   * formats and 8 for `rgbaFp16` (half-float RGBA, #99); layout must match
+   * `format`. Most consumers reach this via `drawWithRGBA` (8-bit only) rather
+   * than calling it directly; an HDR (`rgbaFp16`) worklet writes half-float
+   * pixels here directly or draws through an F16 Skia surface.
    */
   writeBytes(bytes: ArrayBuffer): void;
   /**

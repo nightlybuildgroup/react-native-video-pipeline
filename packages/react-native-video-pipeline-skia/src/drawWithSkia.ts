@@ -45,6 +45,20 @@ export type SkiaDrawCallback = (canvas: SkCanvas, ctx: FrameDrawerContext) => vo
 export function drawWithSkia(draw: SkiaDrawCallback): (ctx: FrameDrawerContext) => void {
   return (ctx: FrameDrawerContext) => {
     'worklet';
+    if (ctx.target.format === 'rgbaFp16') {
+      // HDR (#99): a correct half-float path needs an F16 Rec.2020 SkSurface
+      // (and the F16 Metal-blit texture) — reading an 8-bit N32 offscreen
+      // surface back as F16 would clamp highlights to [0,1] and silently
+      // produce SDR. That surface work lands with the platform pipelines
+      // (#92 iOS / #93 Android); until then drawWithSkia rejects the HDR
+      // target rather than downgrade it silently.
+      throw new Error(
+        "drawWithSkia does not yet support an 'rgbaFp16' (HDR) target — the " +
+          'F16 Skia surface path is not implemented (iOS #92 / Android #93). ' +
+          "Use output.colorRange: 'sdr' (the default), or write half-float " +
+          'pixels via target.writeBytes directly.',
+      );
+    }
     const surface: SkSurface | null = Skia.Surface.MakeOffscreen(ctx.width, ctx.height);
     if (surface === null) {
       throw new Error(
@@ -125,6 +139,13 @@ function makeSourceImage(source: any): SkImage | null {
     // bits as unsigned without changing the underlying pointer value, so
     // this is a no-op for iOS CVPixelBufferRefs that already fit in 63 bits.
     return Skia.Image.MakeImageFromNativeBuffer(BigInt.asUintN(64, source.unstable_bufferAddr));
+  }
+  if (source.format === 'rgbaFp16') {
+    // The raster fallback below builds an 8-bit SkImage (w*4 stride); it can't
+    // represent a half-float HDR source (#99). The zero-copy native-buffer path
+    // above handles FP16 via the CVPixelBuffer wrapper; this fallback (Android)
+    // does not. Skip the source draw rather than build a corrupt 8-bit image.
+    return null;
   }
   if (typeof source.readBytes !== 'function') return null;
   const bytes = source.readBytes();

@@ -261,6 +261,8 @@ drawWithRGBA(draw: RGBADrawer): FrameDrawer
 
 Wraps a plain `(pixels, ctx) => void` callback into a `FrameDrawer`. The helper allocates a `Uint8Array` of length `ctx.width * ctx.height * 4`, calls your drawer, and copies the bytes into the native target. On iOS it swizzles RGBA → BGRA to match `kCVPixelFormatType_32BGRA`; on Android the bytes match the native layout directly.
 
+**8-bit only.** `drawWithRGBA` fills a `Uint8Array` and cannot target an `'rgbaFp16'` HDR buffer ([#99]); it throws on one. That only happens under `output.colorRange: 'hdr'` — an HDR worklet writes half-float pixels via `target.writeBytes` directly, or draws through an F16 Skia surface.
+
 Alpha is **premultiplied** RGBA. On `Video.synthesize` (H.264 output has no alpha channel) you can write `a = 255` and ignore alpha. On `Video.compose` over a clip, alpha is the blend key.
 
 For Skia-based drawing, the sibling package `react-native-video-pipeline-skia` provides `drawWithSkia`, which can reach zero-copy on iOS via `MTLBlitCommandEncoder`.
@@ -624,12 +626,19 @@ The `target` and `source` HybridObjects are **valid only during the enclosing `d
 
 ### `FrameTarget` / `FrameSource`
 
-Pixel-buffer handles backed by `CVPixelBuffer` (iOS) or `AHardwareBuffer` (Android). Both expose `width`, `height`, and `format: 'bgra8888' | 'rgba8888'`.
+Pixel-buffer handles backed by `CVPixelBuffer` (iOS) or `AHardwareBuffer` (Android). Both expose `width`, `height`, and `format: PixelFormat`.
+
+```ts
+type PixelFormat = 'bgra8888' | 'rgba8888' | 'rgbaFp16';
+```
+
+- `'bgra8888'` / `'rgba8888'` — 8-bit SDR, 4 bytes/pixel. `writeBytes`/`readBytes` operate on `width * height * 4` bytes. The default compose path.
+- `'rgbaFp16'` — **HDR ([#99]).** 16-bit half-float RGBA, 8 bytes/pixel, **linear Rec.2020, premultiplied, extended range** (channels may exceed 1.0). Only appears when a consumer opts into `output.colorRange: 'hdr'`; `writeBytes`/`readBytes` operate on `width * height * 8` bytes. It never appears on the SDR path — an SDR compose is byte-for-byte unchanged.
 
 **Most consumers should not touch these directly.** Use one of the high-level helpers instead:
 
-- `drawWithRGBA(draw)` — plain `Uint8Array` pixel writing. Stable, CPU-only, cross-platform.
-- `drawWithSkia(draw)` (from `react-native-video-pipeline-skia`) — Skia drawing with automatic feature detection of the iOS Metal fast path. This is the recommended worklet entry point for anything beyond raw RGBA.
+- `drawWithRGBA(draw)` — plain `Uint8Array` pixel writing. Stable, CPU-only, cross-platform. **8-bit only** — it throws on an `'rgbaFp16'` target; an HDR worklet writes half-float pixels via `target.writeBytes` directly.
+- `drawWithSkia(draw)` (from `react-native-video-pipeline-skia`) — Skia drawing with automatic feature detection of the iOS Metal fast path. This is the recommended worklet entry point for anything beyond raw RGBA. The `'rgbaFp16'` (HDR) target is not yet supported by this helper (the F16 Skia surface path lands with the platform pipelines, [#92]/[#93]) — it throws rather than silently downgrade to SDR.
 
 The remaining members of `FrameTarget` / `FrameSource` are advanced escape hatches:
 
