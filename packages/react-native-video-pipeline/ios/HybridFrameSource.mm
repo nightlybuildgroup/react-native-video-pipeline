@@ -3,7 +3,9 @@
 ///
 
 #import "HybridFrameSource.h"
+#import "RNVPFrameBytes.h"
 
+#include <cstdlib>
 #include <stdexcept>
 
 namespace margelo::nitro::videopipeline {
@@ -54,33 +56,18 @@ std::shared_ptr<ArrayBuffer> HybridFrameSource::readBytes() {
     throw std::runtime_error(
         "VideoPipeline.FrameSource.readBytes: InvalidSpec — null buffer");
   }
-  const size_t width = CVPixelBufferGetWidth(pixelBuffer_);
-  const size_t height = CVPixelBufferGetHeight(pixelBuffer_);
-  const size_t expected = width * height * 4;
-
-  CVReturn cv = CVPixelBufferLockBaseAddress(pixelBuffer_,
-                                              kCVPixelBufferLock_ReadOnly);
-  if (cv != kCVReturnSuccess) {
+  // Format-driven (#99): returns packed bytes in the buffer's own format —
+  // width*height*4 for 8-bit (bgra8888/rgba8888), width*height*8 for the FP16
+  // HDR source (rgbaFp16). RNVPFrameBytes strips CoreVideo row padding.
+  size_t len = 0;
+  void* packed = RNVPFrameCopyPackedBytes(pixelBuffer_, &len);
+  if (packed == nullptr) {
     throw std::runtime_error(
-        "VideoPipeline.FrameSource.readBytes: IOError — "
-        "CVPixelBufferLockBaseAddress failed");
+        "VideoPipeline.FrameSource.readBytes: IOError — unsupported pixel "
+        "format or CVPixelBufferLockBaseAddress failed");
   }
-  const uint8_t* src =
-      static_cast<const uint8_t*>(CVPixelBufferGetBaseAddress(pixelBuffer_));
-  const size_t srcRowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer_);
-  const size_t dstRowBytes = width * 4;
-
-  uint8_t* dst = new uint8_t[expected];
-  if (srcRowBytes == dstRowBytes) {
-    std::memcpy(dst, src, expected);
-  } else {
-    for (size_t y = 0; y < height; ++y) {
-      std::memcpy(dst + y * dstRowBytes, src + y * srcRowBytes, dstRowBytes);
-    }
-  }
-  CVPixelBufferUnlockBaseAddress(pixelBuffer_, kCVPixelBufferLock_ReadOnly);
-
-  return ArrayBuffer::wrap(dst, expected, [dst]() { delete[] dst; });
+  uint8_t* dst = static_cast<uint8_t*>(packed);
+  return ArrayBuffer::wrap(dst, len, [dst]() { std::free(dst); });
 }
 
 }  // namespace margelo::nitro::videopipeline

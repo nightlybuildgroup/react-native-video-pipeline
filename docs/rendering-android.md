@@ -400,3 +400,15 @@ source is tone-mapped to SDR — parity with iOS (see `rendering-ios.md`). An
 HDR-preserving 10-bit path (10-bit EGL config + Media3 `HDR_MODE_KEEP_HDR` +
 HEVC Main10) is designed in [`hdr-compose.md`](./hdr-compose.md) — tracked as
 issue #90, with the Android pipeline in #93.
+
+The worklet pixel contract (#99) adds a third `PixelFormat`, **`'rgbaFp16'`**
+(16-bit half-float RGBA, 8 bytes/pixel, linear Rec.2020, premultiplied,
+extended range) — the worklet-facing target under `output.colorRange: 'hdr'`.
+`HybridFrameTarget.writeBytes` is **format-driven**: bytes-per-pixel comes from
+`bytesPerPixel(PixelFormat)` (`FrameBytes.kt`, an exhaustive `when` so a new
+format can't silently default to 4), matching iOS `RNVPFrameBytes`. On Android
+the worklet renders FP16-linear (`GL_RGBA16F`) and a final GPU pass feeds the
+MediaCodec 10-bit input surface (RGBA1010102 or the codec surface's required
+config) — the encoder sink is *not* the worklet format. That final pass +
+`HDR_MODE_KEEP_HDR` wiring is the #93 pipeline work; the contract here just
+carries >8-bit through the buffer plumbing.

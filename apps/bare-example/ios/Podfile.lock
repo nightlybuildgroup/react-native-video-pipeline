@@ -26,7 +26,7 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
-  - NitroVideoPipeline (0.4.1):
+  - NitroVideoPipeline (0.4.2):
     - hermes-engine
     - NitroModules
     - RCTRequired
@@ -2082,7 +2082,7 @@ SPEC CHECKSUMS:
   FBLazyVector: 26fd21c75314e101f280d401e97f27d54f3f7064
   hermes-engine: f6f01867d3385b3eb8a194f8332bd6dfe02c130c
   NitroModules: 2d92eeea80a5afdebe7b4fd2443b5bd4d7ba1a44
-  NitroVideoPipeline: 4e282096bdadb49162cd32b2f792e4662a482172
+  NitroVideoPipeline: e1cf3c50c965cd9555939b5b66a83926f30b97ad
   RCTDeprecation: c7a2768f905d76ca6d2cfefb26e4349eacbdfca3
   RCTRequired: 5e502c3553cfbed090a991c444448da452fb752e
   RCTSwiftUI: 5ce3ccbdc58b78cc4ebbaace01709ec22d58e131

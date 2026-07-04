@@ -197,3 +197,21 @@ are no flip surprises either.
 The contrast on Android — multiple buffer types, Y-up vs Y-down convention
 mismatch at every memory↔GPU boundary — is documented in
 `rendering-android.md`.
+
+## Pixel formats (SDR + the HDR contract)
+
+All three paths above are 8-bit: the `CVPixelBuffer` is
+`kCVPixelFormatType_32BGRA`, `FrameTarget.format` is `'bgra8888'`, and
+`writeBytes`/`readBytes` move `width * height * 4` bytes.
+
+The worklet pixel contract grew a third `PixelFormat`, **`'rgbaFp16'`** (#99):
+16-bit half-float RGBA (`kCVPixelFormatType_64RGBAHalf`, 8 bytes/pixel), linear
+Rec.2020, premultiplied, extended range — the worklet-facing target when a
+consumer opts into `output.colorRange: 'hdr'`. It never appears on the SDR
+path. `HybridFrameTarget`/`HybridFrameSource` are **format-driven**: bytes-per-
+pixel is read off the buffer's actual CoreVideo format (see
+`RNVPFrameBytes.{h,mm}`, host-tested), so the 8-bit and FP16 buffers share one
+`writeBytes`/`readBytes` path. Producing the FP16 buffers, the F16 Skia surface,
+and the `rgba16Float` Metal-blit variant is the platform-pipeline work in #92 —
+the contract here just makes the buffer plumbing carry >8-bit correctly. See
+[`hdr-compose.md`](./hdr-compose.md).

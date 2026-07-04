@@ -1,9 +1,25 @@
 # HDR-preserving compose — design
 
-Status: **API landed; platform pipelines not yet implemented.** Tracking:
-[#90]. Sub-tasks: the `output.colorRange` API [#94] — **done** (the knob
-exists and `'hdr'` rejects up front until a platform pipeline lands); iOS
-10-bit pipeline [#92] — open; Android 10-bit pipeline [#93] — open.
+Status: **API + worklet pixel contract landed; platform pipelines in
+progress.** Tracking: [#90]. Sub-tasks: the `output.colorRange` API [#94] —
+**done**; the worklet-into-10-bit pixel contract [#99] — **done** (the
+`'rgbaFp16'` `PixelFormat` + format-driven `writeBytes`/`readBytes`); iOS
+10-bit pipeline [#92] — foundation landed (materialization + Main10 sink),
+compose-on-clip routing open; Android 10-bit pipeline [#93] — open.
+
+**Worklet pixel contract ([#99], landed).** The worklet-facing HDR target is
+`PixelFormat` `'rgbaFp16'` — 16-bit half-float RGBA, 8 bytes/pixel, **linear
+Rec.2020, premultiplied, extended range** (values > 1.0 allowed). It is a
+*separate, additive* format; the 8-bit SDR path is byte-for-byte unchanged and
+`'rgbaFp16'` only appears under `output.colorRange: 'hdr'`. `writeBytes`/
+`readBytes` are format-driven (FP16 = `w*h*8`). Architectural rule: the
+**worklet buffer (FP16-linear) is not the encoder sink (platform-native
+10-bit)** — each platform owns a final GPU pass converting FP16-linear → its
+codec-native format (iOS: VideoToolbox converts `64RGBAHalf` → YUV Main10,
+verified; Android: a final pass into the MediaCodec 10-bit input surface). The
+8-bit helpers `drawWithRGBA`/`drawWithSkia` reject `'rgbaFp16'` rather than
+silently downgrade; HDR drawing uses raw half-float `writeBytes` or (later) an
+F16 Skia surface.
 
 This document specifies how `Video.compose` could preserve an HDR source's
 dynamic range end-to-end, and pins the API shape that gates it. It exists

@@ -63,13 +63,17 @@ internal class HybridFrameTarget(
 
   override fun writeBytes(bytes: ArrayBuffer) {
     throwIfInvalid()
-    val expected = widthPx * heightPx * 4
+    // Format-driven byte math (#99): 4 bytes/px for the 8-bit formats, 8 for
+    // the FP16 HDR target (rgbaFp16). Exhaustive `when` so a future format
+    // can't silently fall back to 4.
+    val bpp = bytesPerPixel(pixelFormat)
+    val expected = widthPx * heightPx * bpp
     val src = bytes.getBuffer(false)
     val srcRemaining = src.remaining()
     require(srcRemaining == expected) {
       "VideoPipeline.FrameTarget.writeBytes: InvalidSpec — byte length " +
-        "$srcRemaining does not match width*height*4 = $widthPx*$heightPx*4 " +
-        "= $expected"
+        "$srcRemaining does not match width*height*$bpp = " +
+        "$widthPx*$heightPx*$bpp = $expected"
     }
     backing.position(0)
     backing.put(src)

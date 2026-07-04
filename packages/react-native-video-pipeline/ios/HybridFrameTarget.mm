@@ -4,6 +4,7 @@
 
 #import "HybridFrameTarget.h"
 #import "MetalBlit.h"
+#import "RNVPFrameBytes.h"
 
 #import <Foundation/Foundation.h>
 
@@ -65,45 +66,35 @@ void HybridFrameTarget::writeBytes(const std::shared_ptr<ArrayBuffer>& bytes) {
         "VideoPipeline.FrameTarget.writeBytes: InvalidSpec — null bytes");
   }
 
+  // Format-driven byte math (#99): 4 bytes/px for 8-bit (bgra8888/rgba8888),
+  // 8 bytes/px for the FP16 HDR target (rgbaFp16). RNVPFrameBytes reads the
+  // stride/length off the buffer's actual CoreVideo format so both share one
+  // path; see RNVPFrameBytes.{h,mm} (also exercised directly by test:native).
   const size_t width = CVPixelBufferGetWidth(pixelBuffer_);
   const size_t height = CVPixelBufferGetHeight(pixelBuffer_);
-  const size_t expected = width * height * 4;
+  const size_t expected = RNVPFrameExpectedByteLength(pixelBuffer_);
+  if (expected == 0) {
+    throw std::runtime_error(
+        "VideoPipeline.FrameTarget.writeBytes: InvalidSpec — unsupported pixel "
+        "format");
+  }
+  const size_t bpp = expected / (width * height);
   const size_t provided = bytes->size();
   if (provided != expected) {
     char msg[256];
     std::snprintf(
         msg, sizeof(msg),
         "VideoPipeline.FrameTarget.writeBytes: InvalidSpec — byte length "
-        "%zu does not match width*height*4 = %zu*%zu*4 = %zu",
-        provided, width, height, expected);
+        "%zu does not match width*height*%zu = %zu*%zu*%zu = %zu",
+        provided, bpp, width, height, bpp, expected);
     throw std::runtime_error(msg);
   }
 
-  CVReturn cv = CVPixelBufferLockBaseAddress(pixelBuffer_, 0);
-  if (cv != kCVReturnSuccess) {
+  if (!RNVPFrameWritePackedBytes(pixelBuffer_, bytes->data(), provided)) {
     throw std::runtime_error(
         "VideoPipeline.FrameTarget.writeBytes: IOError — "
         "CVPixelBufferLockBaseAddress failed");
   }
-
-  uint8_t* dst = static_cast<uint8_t*>(CVPixelBufferGetBaseAddress(pixelBuffer_));
-  const size_t dstRowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer_);
-  const size_t srcRowBytes = width * 4;
-  const uint8_t* src = bytes->data();
-
-  if (dstRowBytes == srcRowBytes) {
-    // Happy path: packed source matches packed destination. One memcpy.
-    std::memcpy(dst, src, expected);
-  } else {
-    // CoreVideo added row padding; copy row-by-row so we don't scribble
-    // over the inter-row gaps (a single memcpy would land the second row's
-    // data at the wrong offset for all subsequent rows).
-    for (size_t y = 0; y < height; ++y) {
-      std::memcpy(dst + y * dstRowBytes, src + y * srcRowBytes, srcRowBytes);
-    }
-  }
-
-  CVPixelBufferUnlockBaseAddress(pixelBuffer_, 0);
 }
 
 void HybridFrameTarget::unstable_blitFromNativeTexture(uint64_t mtlTexturePtr) {

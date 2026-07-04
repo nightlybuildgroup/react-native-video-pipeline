@@ -21,6 +21,7 @@ import type {
   FrameDrawerContext,
   FrameSource,
   FrameTarget,
+  PixelFormat,
 } from '../../react-native-video-pipeline/src/nitro/VideoPipeline.nitro';
 
 type SkImageMock = {
@@ -90,7 +91,7 @@ jest.mock(
 import { drawWithSkia } from '../src/drawWithSkia';
 
 function makeTarget(
-  format: 'bgra8888' | 'rgba8888',
+  format: PixelFormat,
   w: number,
   h: number,
   blitImpl?: (mtlTexturePtr: bigint) => void,
@@ -108,7 +109,7 @@ function makeTarget(
 function makeCtx(
   width: number,
   height: number,
-  format: 'bgra8888' | 'rgba8888',
+  format: PixelFormat,
   source?: FrameSource,
   target?: FrameTarget,
 ): FrameDrawerContext {
@@ -149,6 +150,14 @@ describe('drawWithSkia', () => {
     const arg = write.mock.calls[0]?.[0];
     expect(arg).toBeInstanceOf(ArrayBuffer);
     expect((arg as ArrayBuffer).byteLength).toBe(16 * 8 * 4);
+  });
+
+  it("rejects an 'rgbaFp16' (HDR) target rather than silently downgrading to SDR (#99)", () => {
+    const ctx = makeCtx(4, 4, 'rgbaFp16');
+    expect(() => drawWithSkia(() => {})(ctx)).toThrow(/rgbaFp16.*HDR|F16 Skia surface/);
+    // Must fail before touching the surface / target — no silent 8-bit write.
+    expect(makeOffscreen).not.toHaveBeenCalled();
+    expect(ctx.target.writeBytes as unknown as jest.Mock).not.toHaveBeenCalled();
   });
 
   it('selects BGRA color type on iOS-format targets and RGBA on Android-format targets', () => {
