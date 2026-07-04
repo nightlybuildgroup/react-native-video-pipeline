@@ -41,6 +41,9 @@ extern NSString *_Nullable RNVPHintForErrorCode(NSInteger code);
 extern CGColorSpaceRef RNVPComposeSDRColorSpaceCreate(void);
 extern void RNVPComposeRenderSourceToSDR(CIContext *ciContext, CIImage *source,
                                          CVPixelBufferRef target, CGRect bounds);
+extern CGColorSpaceRef RNVPComposeHDRWorkingColorSpaceCreate(void);
+extern void RNVPComposeRenderSourceToHDR(CIContext *ciContext, CIImage *source,
+                                         CVPixelBufferRef target, CGRect bounds);
 
 extern NSErrorDomain const RNVPAVMuxerErrorDomain;
 
@@ -8306,6 +8309,119 @@ static void RNVPRenderHLGBothWays(int y10, uint8_t *outMapped, uint8_t *outNil)
                     @"#86: HDR (HLG) highlights must roll off below clipping "
                     @"under the tone-map (got sRGB=%u)",
                     mapped);
+}
+
+// ---------------------------------------------------------------------------
+// RNVPComposeColor — HDR-PRESERVING compose (#92). The counterpart to the #86
+// tone-map: render the same 10-bit HLG source into a half-float (FP16) buffer
+// via the extended-linear bt2020 working space and assert the HDR range
+// SURVIVES — a highlight that clips to 255 under the SDR tone-map lands above
+// 1.0 here, which no 8-bit buffer could hold. This is the pixel-level proof
+// that colorRange:'hdr' preserves dynamic range rather than discarding it.
+// ---------------------------------------------------------------------------
+
+// Render the flat HLG frame at 10-bit luma code `y10` into an FP16
+// (kCVPixelFormatType_64RGBAHalf) buffer via RNVPComposeRenderSourceToHDR and
+// return the center-pixel green-channel value as a float. Green ≈ luma for a
+// neutral (grey) source, and is the middle FP16 lane. Source construction
+// mirrors RNVPRenderHLGBothWays — a genuine 10-bit YUV HLG buffer (CoreImage
+// only honors the HLG transfer on a real wide buffer, not an 8-bit tag).
+static float RNVPRenderHLGToHDRFloat(int y10)
+{
+  const size_t kW = 16, kH = 16;
+  NSDictionary *yuvAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey :
+        @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
+    (id)kCVPixelBufferWidthKey : @(kW), (id)kCVPixelBufferHeightKey : @(kH),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  CVPixelBufferRef src = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH,
+                      kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                      (__bridge CFDictionaryRef)yuvAttrs, &src);
+  CVPixelBufferLockBaseAddress(src, 0);
+  uint16_t *yPlane = CVPixelBufferGetBaseAddressOfPlane(src, 0);
+  const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(src, 0) / 2;
+  for (size_t r = 0; r < kH; r++)
+    for (size_t c = 0; c < kW; c++)
+      yPlane[r * yStride + c] = (uint16_t)(y10 << 6);
+  uint16_t *cPlane = CVPixelBufferGetBaseAddressOfPlane(src, 1);
+  const size_t cStride = CVPixelBufferGetBytesPerRowOfPlane(src, 1) / 2;
+  for (size_t r = 0; r < kH / 2; r++)
+    for (size_t c = 0; c < kW; c++)
+      cPlane[r * cStride + c] = (uint16_t)(512 << 6);
+  CVPixelBufferUnlockBaseAddress(src, 0);
+  CVBufferSetAttachment(src, kCVImageBufferColorPrimariesKey,
+                        kCVImageBufferColorPrimaries_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(src, kCVImageBufferTransferFunctionKey,
+                        kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(src, kCVImageBufferYCbCrMatrixKey,
+                        kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+
+  CIImage *source = [CIImage imageWithCVPixelBuffer:src];
+  CIContext *ciContext = [CIContext contextWithOptions:nil];
+  const CGRect bounds = CGRectMake(0, 0, kW, kH);
+
+  NSDictionary *fp16Attrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_64RGBAHalf),
+    (id)kCVPixelBufferWidthKey : @(kW), (id)kCVPixelBufferHeightKey : @(kH),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  CVPixelBufferRef dst = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH,
+                      kCVPixelFormatType_64RGBAHalf,
+                      (__bridge CFDictionaryRef)fp16Attrs, &dst);
+  RNVPComposeRenderSourceToHDR(ciContext, source, dst, bounds);
+
+  CVPixelBufferLockBaseAddress(dst, kCVPixelBufferLock_ReadOnly);
+  const uint8_t *base = CVPixelBufferGetBaseAddress(dst);
+  const size_t stride = CVPixelBufferGetBytesPerRow(dst);
+  // 64RGBAHalf: four 16-bit half-floats per pixel (R,G,B,A), 8 bytes.
+  const __fp16 *px =
+      (const __fp16 *)(base + (kH / 2) * stride + (kW / 2) * 8);
+  const float green = (float)px[1];
+  CVPixelBufferUnlockBaseAddress(dst, kCVPixelBufferLock_ReadOnly);
+  CVPixelBufferRelease(src);
+  CVPixelBufferRelease(dst);
+  return green;
+}
+
+- (void)testComposeHDRWorkingSpaceIsExtendedBt2020
+{
+  CGColorSpaceRef space = RNVPComposeHDRWorkingColorSpaceCreate();
+  XCTAssertTrue(space != NULL, @"compose HDR working space must be non-null");
+  XCTAssertEqual(CGColorSpaceGetModel(space), kCGColorSpaceModelRGB,
+                 @"compose HDR working space must be an RGB space");
+  // Extended-range space so highlights can exceed 1.0. (iOS 13-safe: the named
+  // ITUR_2100 HLG/PQ spaces are 14.0+; we deliberately do NOT use them here.)
+  XCTAssertTrue(CGColorSpaceIsWideGamutRGB(space),
+                @"compose HDR working space must be wide-gamut (bt2020)");
+  CGColorSpaceRelease(space);
+}
+
+- (void)testComposeHDRPreservesHighlightAboveSDRWhite
+{
+  const float highlight = RNVPRenderHLGToHDRFloat(794);
+  const float shadow = RNVPRenderHLGToHDRFloat(356);
+  NSLog(@"[#92] HLG → FP16 extended-linear bt2020: highlight(Y=794)=%.3f, "
+        @"shadow(Y=356)=%.3f",
+        highlight, shadow);
+  // The whole point of colorRange:'hdr': an HLG highlight that clips to 8-bit
+  // 255 under the SDR tone-map survives here as a linear value ABOVE 1.0 — a
+  // range no 8-bit buffer can represent. If this ever regresses to <= 1.0 the
+  // pipeline has silently collapsed back to SDR.
+  XCTAssertGreaterThan(highlight, 1.0f,
+                       @"#92: HDR (HLG) highlight must survive above SDR white "
+                       @"(1.0) in the FP16 target, got %.3f",
+                       highlight);
+  // Ordering sanity: the highlight is meaningfully brighter than the shadow —
+  // guards against a degenerate all-clipped or all-zero render.
+  XCTAssertGreaterThan(highlight, shadow + 0.2f,
+                       @"#92: highlight (%.3f) must exceed shadow (%.3f)",
+                       highlight, shadow);
 }
 
 // ---------------------------------------------------------------------------
