@@ -24,17 +24,12 @@ void RNVPComposeRenderSourceToSDR(CIContext* ciContext,
 }
 
 CGColorSpaceRef RNVPComposeHDRWorkingColorSpaceCreate(void) {
-  // Extended-range LINEAR bt2020 — iOS 13-safe (the named ITUR_2100 HLG/PQ
-  // spaces are iOS 14.0+). Extended range so HDR highlights survive as > 1.0.
-  CGColorSpaceRef space =
-      CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
-  if (space == NULL) {
-    // Defensive fallback: plain (non-extended) linear bt2020 still keeps the
-    // wide gamut, just without headroom above 1.0. Should not happen on any
-    // supported OS, but never hand CoreImage a NULL space.
-    space = CGColorSpaceCreateWithName(kCGColorSpaceLinearITUR_2020);
-  }
-  return space;
+  // Extended-range LINEAR bt2020 — iOS 12.3+ (the named ITUR_2100 HLG/PQ spaces
+  // are iOS 14.0+, and kCGColorSpaceLinearITUR_2020 is iOS 15+, so neither is
+  // usable at the iOS 13 floor). Extended range so HDR highlights survive as
+  // > 1.0. This name is available on every OS the library supports, so there is
+  // no fallback: a NULL here would be a platform bug, not a supported path.
+  return CGColorSpaceCreateWithName(kCGColorSpaceExtendedLinearITUR_2020);
 }
 
 void RNVPComposeRenderSourceToHDR(CIContext* ciContext,
@@ -47,4 +42,22 @@ void RNVPComposeRenderSourceToHDR(CIContext* ciContext,
                bounds:bounds
            colorSpace:hdr];
   CGColorSpaceRelease(hdr);
+
+  // Self-describe the result so downstream code (and the encoder) can see what
+  // the buffer actually holds: bt2020 primaries, a LINEAR transfer, bt2020
+  // matrix. This is deliberately NOT the encoder's HLG transfer — reconciling
+  // the linear working space with the encoder's HLG/PQ output tag (either a
+  // linear→HLG conversion before append, or letting VideoToolbox convert on the
+  // strength of these attachments) is the open correctness question for the
+  // end-to-end wiring (#92 part 2), and needs real HDR-device luminance
+  // verification. Tagging honestly here is the first step toward that.
+  CVBufferSetAttachment(target, kCVImageBufferColorPrimariesKey,
+                        kCVImageBufferColorPrimaries_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(target, kCVImageBufferTransferFunctionKey,
+                        kCVImageBufferTransferFunction_Linear,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(target, kCVImageBufferYCbCrMatrixKey,
+                        kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
 }

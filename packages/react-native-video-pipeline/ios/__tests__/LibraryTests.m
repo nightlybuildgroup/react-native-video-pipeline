@@ -8431,13 +8431,16 @@ static float RNVPRenderHLGToHDRFloat(int y10)
                        highlight, shadow);
 }
 
-// End-to-end encoder half: author an HEVC Main10 file from half-float (FP16)
-// frames via RNVPAVMuxer's HDR sink, re-open it, and assert the video track is
-// HEVC and carries the bt2020 primaries + HLG transfer + bt2020 matrix tags —
-// the color metadata that makes a downstream player decode it as HDR. This is
-// the arbiter of whether VideoToolbox actually accepts a kCVPixelFormatType_
-// 64RGBAHalf adaptor buffer for Main10; if it doesn't, this test fails loudly
-// (rather than the pipeline silently producing SDR).
+// Encoder half: author an HEVC file from half-float (FP16) frames via
+// RNVPAVMuxer's HDR sink, re-open it, and assert (a) VideoToolbox accepted the
+// kCVPixelFormatType_64RGBAHalf adaptor buffer at all, (b) the output is
+// genuinely 10-bit (Main10 — decodes to a 10-bit pixel format, not 8-bit HEVC),
+// and (c) it carries the bt2020 primaries + HLG transfer + bt2020 matrix tags.
+// This proves the *encoder configuration + format acceptance*, NOT that the
+// linear-materialize → HLG-encode transfer is perceptually correct (that is the
+// #92 part-2 question — see RNVPComposeColor.h — and needs an HDR-capable
+// device to verify decoded luminance). Here the frames are hand-authored FP16,
+// so no materialization transfer is under test.
 - (void)testAVMuxerHDRWritesHEVCMain10WithBt2020HLGTags
 {
   const NSInteger kWidth = 64;
@@ -8518,6 +8521,8 @@ static float RNVPRenderHLGToHDRFloat(int y10)
       fd, kCMFormatDescriptionExtension_ColorPrimaries);
   CFStringRef transfer = (CFStringRef)CMFormatDescriptionGetExtension(
       fd, kCMFormatDescriptionExtension_TransferFunction);
+  CFStringRef matrix = (CFStringRef)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_YCbCrMatrix);
   XCTAssertTrue(primaries != NULL &&
                     CFEqual(primaries,
                             kCMFormatDescriptionColorPrimaries_ITU_R_2020),
@@ -8528,6 +8533,28 @@ static float RNVPRenderHLGToHDRFloat(int y10)
                             kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG),
                 @"#92: HDR output must carry the HLG transfer, got %@",
                 transfer);
+  XCTAssertTrue(matrix != NULL &&
+                    CFEqual(matrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_2020),
+                @"#92: HDR output must carry the bt2020 matrix, got %@", matrix);
+
+  // Prove it is genuinely 10-bit (Main10), not 8-bit HEVC wearing HDR tags:
+  // parse the hvcC configuration atom and read general_profile_idc. Per
+  // ISO/IEC 14496-15, hvcC byte 1 is
+  // general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5);
+  // profile_idc == 2 is "Main 10". This is definitive and non-circular (unlike
+  // requesting a 10-bit reader output, which would just convert regardless).
+  NSDictionary *atoms = (NSDictionary *)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
+  NSData *hvcC = atoms[@"hvcC"];
+  XCTAssertNotNil(hvcC, @"HEVC track has no hvcC configuration atom");
+  XCTAssertGreaterThanOrEqual(hvcC.length, 2u, @"hvcC atom too short");
+  const uint8_t profileIdc = ((const uint8_t *)hvcC.bytes)[1] & 0x1F;
+  NSLog(@"[#92] HDR output hvcC general_profile_idc = %u (2 = Main10)",
+        profileIdc);
+  XCTAssertEqual(profileIdc, (uint8_t)2,
+                 @"#92: HDR output must be HEVC Main10 (general_profile_idc==2, "
+                 @"got %u — an 8-bit Main profile would be 1)",
+                 profileIdc);
   [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
 }
 

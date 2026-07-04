@@ -155,8 +155,10 @@ NSError *makeError(RNVPAVMuxerErrorCode code, NSString *message) {
   NSDictionary<NSString *, id> *videoSettings;
   if (hdr) {
     // HEVC Main10 + bt2020/HLG color tags on the output track. The tags are
-    // what make the file *decode* as HDR downstream; the encoder converts the
-    // wide adaptor buffers into 10-bit YUV under these primaries/transfer.
+    // what make the file *decode* as HDR downstream; the encoder encodes the
+    // wide adaptor buffers as 10-bit YUV and tags them with these primaries /
+    // transfer / matrix. (Whether it also applies a transfer *conversion* to
+    // match a differently-tagged input buffer is the open #92 part-2 question.)
     videoSettings = @{
       AVVideoCodecKey : AVVideoCodecTypeHEVC,
       AVVideoWidthKey : @(width),

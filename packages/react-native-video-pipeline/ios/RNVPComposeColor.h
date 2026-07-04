@@ -49,9 +49,17 @@ void RNVPComposeRenderSourceToSDR(CIContext* ciContext,
 ///
 /// Deliberately the extended-linear space rather than the named HLG/PQ spaces
 /// (`kCGColorSpaceITUR_2100_HLG` / `...PQ`): those are iOS 14.0+, and the
-/// library targets iOS 13+. Extended-linear bt2020 is iOS 13-safe and lossless
-/// for the materialize step — the HLG/PQ transfer is (re)applied by the encoder
-/// via its `AVVideoColorPropertiesKey` tags, not baked into the pixel buffer.
+/// library targets iOS 13+. Extended-linear bt2020 is iOS 12.3-safe and
+/// lossless for the materialize step.
+///
+/// **Open question for the end-to-end wiring (#92 part 2):** the materialized
+/// buffer holds *linear-light* bt2020 (tagged as such by
+/// `RNVPComposeRenderSourceToHDR`), whereas the Main10 encoder is tagged HLG.
+/// Whether VideoToolbox converts linear→HLG on the strength of the buffer's
+/// transfer attachment, or whether the pipeline must apply the HLG OOTF before
+/// append, is a transfer-correctness question that needs real HDR-device
+/// luminance verification — the host tests here prove the range *survives* and
+/// the encoder *accepts* the format, not that the end-to-end transfer is right.
 ///
 /// Returns a retained color space — the caller owns it and must
 /// `CGColorSpaceRelease` it.
