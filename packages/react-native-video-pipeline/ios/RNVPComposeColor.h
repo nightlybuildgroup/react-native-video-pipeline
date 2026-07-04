@@ -35,6 +35,51 @@ void RNVPComposeRenderSourceToSDR(CIContext* ciContext,
                                   CVPixelBufferRef target,
                                   CGRect bounds);
 
+// ---------------------------------------------------------------------------
+// HDR-preserving compose (#92). The counterpart to the SDR path above: instead
+// of tone-mapping an HDR (HLG/PQ, bt2020) source down to 8-bit sRGB, it renders
+// the source into a 10-bit-capable buffer in an extended-range bt2020 working
+// space, preserving luminance above SDR white. Selected when the caller opts
+// into `output.colorRange: 'hdr'` (#94) AND the encoder can carry HDR.
+// ---------------------------------------------------------------------------
+
+/// Create the HDR working/output color space compose materializes HDR source
+/// frames into: `kCGColorSpaceExtendedLinearITUR_2020` — the bt2020 primaries
+/// in a *linear*, extended range (values may exceed 1.0 for HDR highlights).
+///
+/// Deliberately the extended-linear space rather than the named HLG/PQ spaces
+/// (`kCGColorSpaceITUR_2100_HLG` / `...PQ`): those are iOS 14.0+, and the
+/// library targets iOS 13+. Extended-linear bt2020 is iOS 12.3-safe and
+/// lossless for the materialize step.
+///
+/// **Open question for the end-to-end wiring (#92 part 2):** the materialized
+/// buffer holds *linear-light* bt2020 (tagged as such by
+/// `RNVPComposeRenderSourceToHDR`), whereas the Main10 encoder is tagged HLG.
+/// Whether VideoToolbox converts linear→HLG on the strength of the buffer's
+/// transfer attachment, or whether the pipeline must apply the HLG OOTF before
+/// append, is a transfer-correctness question that needs real HDR-device
+/// luminance verification — the host tests here prove the range *survives* and
+/// the encoder *accepts* the format, not that the end-to-end transfer is right.
+///
+/// Returns a retained color space — the caller owns it and must
+/// `CGColorSpaceRelease` it.
+CGColorSpaceRef RNVPComposeHDRWorkingColorSpaceCreate(void)
+    CF_RETURNS_RETAINED;
+
+/// Render a source `CIImage` into a 10-bit / half-float `target` pixel buffer
+/// over `bounds` in the extended-linear bt2020 working space — **no** tone-map,
+/// unlike `RNVPComposeRenderSourceToSDR`. An HDR highlight that clips to 255 in
+/// 8-bit sRGB survives here as a channel value above 1.0 (representable in a
+/// `kCVPixelFormatType_64RGBAHalf` target), so the worklet — and ultimately the
+/// Main10 encoder — see the full dynamic range.
+///
+/// `target` must be a wide buffer (half-float RGBA or 10-bit YUV); handing this
+/// an 8-bit buffer would clamp the very range it exists to preserve.
+void RNVPComposeRenderSourceToHDR(CIContext* ciContext,
+                                  CIImage* source,
+                                  CVPixelBufferRef target,
+                                  CGRect bounds);
+
 #ifdef __cplusplus
 }
 #endif

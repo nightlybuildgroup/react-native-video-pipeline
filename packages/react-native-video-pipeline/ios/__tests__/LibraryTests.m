@@ -41,6 +41,9 @@ extern NSString *_Nullable RNVPHintForErrorCode(NSInteger code);
 extern CGColorSpaceRef RNVPComposeSDRColorSpaceCreate(void);
 extern void RNVPComposeRenderSourceToSDR(CIContext *ciContext, CIImage *source,
                                          CVPixelBufferRef target, CGRect bounds);
+extern CGColorSpaceRef RNVPComposeHDRWorkingColorSpaceCreate(void);
+extern void RNVPComposeRenderSourceToHDR(CIContext *ciContext, CIImage *source,
+                                         CVPixelBufferRef target, CGRect bounds);
 
 extern NSErrorDomain const RNVPAVMuxerErrorDomain;
 
@@ -62,6 +65,13 @@ typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode) {
                      height:(NSInteger)height
                         fps:(NSInteger)fps
                       error:(NSError *_Nullable __autoreleasing *)error;
+- (BOOL)openHDRVideoOnlyAtPath:(NSString *)path
+                         width:(NSInteger)width
+                        height:(NSInteger)height
+                           fps:(NSInteger)fps
+                   pixelFormat:(OSType)pixelFormat
+                      metadata:(NSArray<AVMetadataItem *> *_Nullable)metadata
+                         error:(NSError *_Nullable __autoreleasing *)error;
 - (BOOL)appendPixelBuffer:(CVPixelBufferRef)pixelBuffer
          presentationTime:(CMTime)pts
                     error:(NSError *_Nullable __autoreleasing *)error;
@@ -8306,6 +8316,246 @@ static void RNVPRenderHLGBothWays(int y10, uint8_t *outMapped, uint8_t *outNil)
                     @"#86: HDR (HLG) highlights must roll off below clipping "
                     @"under the tone-map (got sRGB=%u)",
                     mapped);
+}
+
+// ---------------------------------------------------------------------------
+// RNVPComposeColor — HDR-PRESERVING compose (#92). The counterpart to the #86
+// tone-map: render the same 10-bit HLG source into a half-float (FP16) buffer
+// via the extended-linear bt2020 working space and assert the HDR range
+// SURVIVES — a highlight that clips to 255 under the SDR tone-map lands above
+// 1.0 here, which no 8-bit buffer could hold. This is the pixel-level proof
+// that colorRange:'hdr' preserves dynamic range rather than discarding it.
+// ---------------------------------------------------------------------------
+
+// Render the flat HLG frame at 10-bit luma code `y10` into an FP16
+// (kCVPixelFormatType_64RGBAHalf) buffer via RNVPComposeRenderSourceToHDR and
+// return the center-pixel green-channel value as a float. Green ≈ luma for a
+// neutral (grey) source, and is the middle FP16 lane. Source construction
+// mirrors RNVPRenderHLGBothWays — a genuine 10-bit YUV HLG buffer (CoreImage
+// only honors the HLG transfer on a real wide buffer, not an 8-bit tag).
+static float RNVPRenderHLGToHDRFloat(int y10)
+{
+  const size_t kW = 16, kH = 16;
+  NSDictionary *yuvAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey :
+        @(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange),
+    (id)kCVPixelBufferWidthKey : @(kW), (id)kCVPixelBufferHeightKey : @(kH),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  CVPixelBufferRef src = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH,
+                      kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                      (__bridge CFDictionaryRef)yuvAttrs, &src);
+  CVPixelBufferLockBaseAddress(src, 0);
+  uint16_t *yPlane = CVPixelBufferGetBaseAddressOfPlane(src, 0);
+  const size_t yStride = CVPixelBufferGetBytesPerRowOfPlane(src, 0) / 2;
+  for (size_t r = 0; r < kH; r++)
+    for (size_t c = 0; c < kW; c++)
+      yPlane[r * yStride + c] = (uint16_t)(y10 << 6);
+  uint16_t *cPlane = CVPixelBufferGetBaseAddressOfPlane(src, 1);
+  const size_t cStride = CVPixelBufferGetBytesPerRowOfPlane(src, 1) / 2;
+  for (size_t r = 0; r < kH / 2; r++)
+    for (size_t c = 0; c < kW; c++)
+      cPlane[r * cStride + c] = (uint16_t)(512 << 6);
+  CVPixelBufferUnlockBaseAddress(src, 0);
+  CVBufferSetAttachment(src, kCVImageBufferColorPrimariesKey,
+                        kCVImageBufferColorPrimaries_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(src, kCVImageBufferTransferFunctionKey,
+                        kCVImageBufferTransferFunction_ITU_R_2100_HLG,
+                        kCVAttachmentMode_ShouldPropagate);
+  CVBufferSetAttachment(src, kCVImageBufferYCbCrMatrixKey,
+                        kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                        kCVAttachmentMode_ShouldPropagate);
+
+  CIImage *source = [CIImage imageWithCVPixelBuffer:src];
+  CIContext *ciContext = [CIContext contextWithOptions:nil];
+  const CGRect bounds = CGRectMake(0, 0, kW, kH);
+
+  NSDictionary *fp16Attrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_64RGBAHalf),
+    (id)kCVPixelBufferWidthKey : @(kW), (id)kCVPixelBufferHeightKey : @(kH),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  CVPixelBufferRef dst = NULL;
+  CVPixelBufferCreate(kCFAllocatorDefault, kW, kH,
+                      kCVPixelFormatType_64RGBAHalf,
+                      (__bridge CFDictionaryRef)fp16Attrs, &dst);
+  RNVPComposeRenderSourceToHDR(ciContext, source, dst, bounds);
+
+  CVPixelBufferLockBaseAddress(dst, kCVPixelBufferLock_ReadOnly);
+  const uint8_t *base = CVPixelBufferGetBaseAddress(dst);
+  const size_t stride = CVPixelBufferGetBytesPerRow(dst);
+  // 64RGBAHalf: four 16-bit half-floats per pixel (R,G,B,A), 8 bytes.
+  const __fp16 *px =
+      (const __fp16 *)(base + (kH / 2) * stride + (kW / 2) * 8);
+  const float green = (float)px[1];
+  CVPixelBufferUnlockBaseAddress(dst, kCVPixelBufferLock_ReadOnly);
+  CVPixelBufferRelease(src);
+  CVPixelBufferRelease(dst);
+  return green;
+}
+
+- (void)testComposeHDRWorkingSpaceIsExtendedBt2020
+{
+  CGColorSpaceRef space = RNVPComposeHDRWorkingColorSpaceCreate();
+  XCTAssertTrue(space != NULL, @"compose HDR working space must be non-null");
+  XCTAssertEqual(CGColorSpaceGetModel(space), kCGColorSpaceModelRGB,
+                 @"compose HDR working space must be an RGB space");
+  // Extended-range space so highlights can exceed 1.0. (iOS 13-safe: the named
+  // ITUR_2100 HLG/PQ spaces are 14.0+; we deliberately do NOT use them here.)
+  XCTAssertTrue(CGColorSpaceIsWideGamutRGB(space),
+                @"compose HDR working space must be wide-gamut (bt2020)");
+  CGColorSpaceRelease(space);
+}
+
+- (void)testComposeHDRPreservesHighlightAboveSDRWhite
+{
+  const float highlight = RNVPRenderHLGToHDRFloat(794);
+  const float shadow = RNVPRenderHLGToHDRFloat(356);
+  NSLog(@"[#92] HLG → FP16 extended-linear bt2020: highlight(Y=794)=%.3f, "
+        @"shadow(Y=356)=%.3f",
+        highlight, shadow);
+  // The whole point of colorRange:'hdr': an HLG highlight that clips to 8-bit
+  // 255 under the SDR tone-map survives here as a linear value ABOVE 1.0 — a
+  // range no 8-bit buffer can represent. If this ever regresses to <= 1.0 the
+  // pipeline has silently collapsed back to SDR.
+  XCTAssertGreaterThan(highlight, 1.0f,
+                       @"#92: HDR (HLG) highlight must survive above SDR white "
+                       @"(1.0) in the FP16 target, got %.3f",
+                       highlight);
+  // Ordering sanity: the highlight is meaningfully brighter than the shadow —
+  // guards against a degenerate all-clipped or all-zero render.
+  XCTAssertGreaterThan(highlight, shadow + 0.2f,
+                       @"#92: highlight (%.3f) must exceed shadow (%.3f)",
+                       highlight, shadow);
+}
+
+// Encoder half: author an HEVC file from half-float (FP16) frames via
+// RNVPAVMuxer's HDR sink, re-open it, and assert (a) VideoToolbox accepted the
+// kCVPixelFormatType_64RGBAHalf adaptor buffer at all, (b) the output is
+// genuinely 10-bit (Main10 — decodes to a 10-bit pixel format, not 8-bit HEVC),
+// and (c) it carries the bt2020 primaries + HLG transfer + bt2020 matrix tags.
+// This proves the *encoder configuration + format acceptance*, NOT that the
+// linear-materialize → HLG-encode transfer is perceptually correct (that is the
+// #92 part-2 question — see RNVPComposeColor.h — and needs an HDR-capable
+// device to verify decoded luminance). Here the frames are hand-authored FP16,
+// so no materialization transfer is under test.
+- (void)testAVMuxerHDRWritesHEVCMain10WithBt2020HLGTags
+{
+  const NSInteger kWidth = 64;
+  const NSInteger kHeight = 64;
+  const NSInteger kFps = 30;
+  const NSInteger kFrameCount = 8;
+
+  NSString *outputPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"hdr92-%@.mov", NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
+
+  RNVPAVMuxer *muxer = [[RNVPAVMuxer alloc] init];
+  NSError *error = nil;
+  XCTAssertTrue([muxer openHDRVideoOnlyAtPath:outputPath
+                                        width:kWidth
+                                       height:kHeight
+                                          fps:kFps
+                                  pixelFormat:kCVPixelFormatType_64RGBAHalf
+                                     metadata:nil
+                                        error:&error],
+                @"HDR open failed: %@", error);
+
+  NSDictionary *pbAttrs = @{
+    (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_64RGBAHalf),
+    (id)kCVPixelBufferWidthKey : @(kWidth),
+    (id)kCVPixelBufferHeightKey : @(kHeight),
+    (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+  };
+  for (NSInteger i = 0; i < kFrameCount; i++) {
+    CVPixelBufferRef pb = NULL;
+    CVReturn cv = CVPixelBufferCreate(kCFAllocatorDefault, kWidth, kHeight,
+                                      kCVPixelFormatType_64RGBAHalf,
+                                      (__bridge CFDictionaryRef)pbAttrs, &pb);
+    XCTAssertEqual(cv, kCVReturnSuccess, @"FP16 CVPixelBufferCreate failed");
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    const size_t rowBytes = CVPixelBufferGetBytesPerRow(pb);
+    // Include a genuine HDR highlight (> 1.0) so there is real HDR content.
+    const __fp16 rgba[4] = {(__fp16)0.5f, (__fp16)1.6f, (__fp16)0.5f,
+                            (__fp16)1.0f};
+    for (NSInteger y = 0; y < kHeight; y++) {
+      __fp16 *row = (__fp16 *)(base + (size_t)y * rowBytes);
+      for (NSInteger x = 0; x < kWidth; x++) {
+        row[x * 4 + 0] = rgba[0];
+        row[x * 4 + 1] = rgba[1];
+        row[x * 4 + 2] = rgba[2];
+        row[x * 4 + 3] = rgba[3];
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    CMTime pts = CMTimeMake((int64_t)i, (int32_t)kFps);
+    XCTAssertTrue([muxer appendPixelBuffer:pb presentationTime:pts error:&error],
+                  @"HDR append failed at i=%ld: %@", (long)i, error);
+    CVPixelBufferRelease(pb);
+  }
+  XCTAssertTrue([muxer closeWithError:&error], @"HDR close failed: %@", error);
+  XCTAssertTrue([[NSFileManager defaultManager] fileExistsAtPath:outputPath],
+                @"HDR output file missing at %@", outputPath);
+
+  // Re-open and inspect the encoded track's color metadata.
+  AVURLAsset *asset =
+      [AVURLAsset assetWithURL:[NSURL fileURLWithPath:outputPath]];
+  AVAssetTrack *track =
+      [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+  XCTAssertNotNil(track, @"HDR output has no video track");
+  NSArray *fds = track.formatDescriptions;
+  XCTAssertGreaterThan(fds.count, 0u, @"HDR track has no format description");
+  CMFormatDescriptionRef fd = (__bridge CMFormatDescriptionRef)fds.firstObject;
+
+  const FourCharCode subType = CMFormatDescriptionGetMediaSubType(fd);
+  XCTAssertEqual(subType, (FourCharCode)kCMVideoCodecType_HEVC,
+                 @"#92: HDR output must be HEVC (got %c%c%c%c)",
+                 (char)(subType >> 24), (char)(subType >> 16),
+                 (char)(subType >> 8), (char)subType);
+
+  CFStringRef primaries = (CFStringRef)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_ColorPrimaries);
+  CFStringRef transfer = (CFStringRef)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_TransferFunction);
+  CFStringRef matrix = (CFStringRef)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_YCbCrMatrix);
+  XCTAssertTrue(primaries != NULL &&
+                    CFEqual(primaries,
+                            kCMFormatDescriptionColorPrimaries_ITU_R_2020),
+                @"#92: HDR output must carry bt2020 primaries, got %@",
+                primaries);
+  XCTAssertTrue(transfer != NULL &&
+                    CFEqual(transfer,
+                            kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG),
+                @"#92: HDR output must carry the HLG transfer, got %@",
+                transfer);
+  XCTAssertTrue(matrix != NULL &&
+                    CFEqual(matrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_2020),
+                @"#92: HDR output must carry the bt2020 matrix, got %@", matrix);
+
+  // Prove it is genuinely 10-bit (Main10), not 8-bit HEVC wearing HDR tags:
+  // parse the hvcC configuration atom and read general_profile_idc. Per
+  // ISO/IEC 14496-15, hvcC byte 1 is
+  // general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5);
+  // profile_idc == 2 is "Main 10". This is definitive and non-circular (unlike
+  // requesting a 10-bit reader output, which would just convert regardless).
+  NSDictionary *atoms = (NSDictionary *)CMFormatDescriptionGetExtension(
+      fd, kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms);
+  NSData *hvcC = atoms[@"hvcC"];
+  XCTAssertNotNil(hvcC, @"HEVC track has no hvcC configuration atom");
+  XCTAssertGreaterThanOrEqual(hvcC.length, 2u, @"hvcC atom too short");
+  const uint8_t profileIdc = ((const uint8_t *)hvcC.bytes)[1] & 0x1F;
+  NSLog(@"[#92] HDR output hvcC general_profile_idc = %u (2 = Main10)",
+        profileIdc);
+  XCTAssertEqual(profileIdc, (uint8_t)2,
+                 @"#92: HDR output must be HEVC Main10 (general_profile_idc==2, "
+                 @"got %u — an 8-bit Main profile would be 1)",
+                 profileIdc);
+  [[NSFileManager defaultManager] removeItemAtPath:outputPath error:nil];
 }
 
 // ---------------------------------------------------------------------------

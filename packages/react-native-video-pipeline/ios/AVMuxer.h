@@ -74,6 +74,21 @@ typedef NS_ERROR_ENUM(RNVPAVMuxerErrorDomain, RNVPAVMuxerErrorCode){
                    metadata:(NSArray<AVMetadataItem *> *_Nullable)metadata
                       error:(NSError *_Nullable __autoreleasing *)error;
 
+/// HDR-preserving compose sink (#92). Like @c openVideoOnlyAtPath: but targets
+/// **HEVC Main10** and tags the output track bt2020 primaries + HLG transfer +
+/// bt2020 matrix (@c AVVideoColorPropertiesKey), so an HDR source materialized
+/// into a wide worklet buffer round-trips as HDR instead of being tone-mapped
+/// to SDR. @c pixelFormat is the adaptor's source format — a half-float
+/// (@c kCVPixelFormatType_64RGBAHalf) or 10-bit YUV buffer, never an 8-bit one.
+/// Selected by @c output.colorRange: 'hdr' (#94).
+- (BOOL)openHDRVideoOnlyAtPath:(NSString *)path
+                         width:(NSInteger)width
+                        height:(NSInteger)height
+                           fps:(NSInteger)fps
+                   pixelFormat:(OSType)pixelFormat
+                      metadata:(NSArray<AVMetadataItem *> *_Nullable)metadata
+                         error:(NSError *_Nullable __autoreleasing *)error;
+
 /// Append a single pre-rendered pixel buffer at the given presentation time.
 /// Callers must ensure PTS is monotonically non-decreasing across calls. The
 /// pixel buffer must be in a format compatible with the adaptor (32BGRA).
