@@ -172,10 +172,30 @@ export interface OutputSpec {
   /** default: `'h264'`. */
   codec?: VideoCodec;
   container?: VideoContainer;
+  /**
+   * Output dynamic range for the **compose** path (`Video.compose`). Ignored —
+   * and rejected up front — on the remux/transcode render and synthesize
+   * paths, which do not materialize into a worklet pixel buffer. See #90/#94.
+   *
+   * - `'sdr'` (default): tone-map an HDR (HLG/PQ, bt2020) source down to SDR
+   *   sRGB — today's behavior (#86). No regression.
+   * - `'hdr'`: preserve the source's dynamic range end-to-end via the 10-bit
+   *   pixel pipeline. Requires the platform HDR-compose pipeline (iOS #92 /
+   *   Android #93); until it lands on the current platform, `'hdr'` rejects
+   *   with `InvalidSpecError` rather than silently producing SDR.
+   */
+  colorRange?: ColorRange;
 }
 
 export type VideoCodec = 'h264' | 'hevc';
 export type VideoContainer = 'mp4' | 'mov';
+
+/**
+ * Output dynamic range for the compose path. An enum (not a `boolean`) so a
+ * future refinement (`'hlg' | 'pq' | 'hdr10'`) can extend it without a
+ * breaking rename. See `OutputSpec.colorRange`.
+ */
+export type ColorRange = 'sdr' | 'hdr';
 
 export interface Clip {
   uri: string;

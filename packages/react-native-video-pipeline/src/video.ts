@@ -115,6 +115,66 @@ function validateOutputForSynthesis(output: OutputSpec): void {
 }
 
 /**
+ * `output.colorRange` (#90/#94) is a **compose-only** knob: it selects whether
+ * an HDR source is tone-mapped down to SDR (the default) or preserved through
+ * the 10-bit pixel pipeline. The field rides the shared Nitro `OutputSpec`
+ * struct (invariant #6), so it is structurally visible on the render and
+ * synthesize paths too — this validator is what enforces that it is only
+ * meaningful on `Video.compose`.
+ *
+ * - `render` / `synthesize`: reject its presence outright — those paths do not
+ *   materialize into a worklet pixel buffer, so there is no HDR range to keep.
+ * - `compose`: `'sdr'` (or omitted) is today's tone-map-to-SDR default;
+ *   `'hdr'` requires the platform 10-bit pipeline (iOS #92 / Android #93).
+ *   Until that lands, `'hdr'` rejects up front with an actionable message
+ *   rather than silently producing SDR — the discoverability gap #90 is about.
+ *
+ * Called at the public entry points **before** any native work (clip probing
+ * in `normalizeClips`, the pump itself) so an invalid `colorRange` fails fast
+ * with this `InvalidSpecError` instead of a probe/source error — "reject up
+ * front" is the contract. `throws` on failure; see `colorRangeGuard`.
+ */
+function validateColorRange(output: OutputSpec, path: 'render' | 'compose' | 'synthesize'): void {
+  const colorRange = output.colorRange;
+  if (colorRange === undefined) return;
+  if (colorRange !== 'sdr' && colorRange !== 'hdr') {
+    fail("output.colorRange must be 'sdr' or 'hdr'", { colorRange });
+  }
+  if (path !== 'compose') {
+    fail(`output.colorRange is only supported on Video.compose (got it on Video.${path})`, {
+      colorRange,
+    });
+  }
+  if (colorRange === 'hdr') {
+    fail(
+      "HDR-preserving compose (output.colorRange: 'hdr') is not yet implemented — omit " +
+        "output.colorRange or set it to 'sdr'. Tracking: " +
+        'https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/90',
+      { colorRange },
+    );
+  }
+}
+
+/**
+ * Entry-point wrapper for {@link validateColorRange}. Returns a rejected
+ * `Promise` when `colorRange` is invalid so the public `Video.*` methods can
+ * fail **before** `normalizeClips` probes the source — without adopting the
+ * synchronous-throw contract (callers keep using `.catch` / `await`). Returns
+ * `undefined` when the spec is fine, so the caller proceeds normally.
+ */
+function colorRangeGuard(
+  output: OutputSpec,
+  path: 'render' | 'compose' | 'synthesize',
+): Promise<void> | undefined {
+  try {
+    validateColorRange(output, path);
+    return undefined;
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
+/**
  * Convert concat-style `ClipInput[]` into the Nitro boundary `Clip[]`
  * shape (cumulative `outputStart`, default `sourceStart = 0`). Returns a
  * `Clip[]` synchronously when every input supplies `durationSec`;
@@ -792,6 +852,8 @@ export const Video = {
 
   /** Single source of truth for native remux / transcode — auto-routed natively. */
   render(spec: RenderSpec, options?: RenderOptions): Promise<void> {
+    const badColorRange = colorRangeGuard(spec.output, 'render');
+    if (badColorRange !== undefined) return badColorRange;
     const clips = normalizeClips(spec.clips);
     if (clips instanceof Promise) {
       return clips.then((c) => runRender(buildNativeSpecFromClipped(spec, c), options));
@@ -808,6 +870,8 @@ export const Video = {
     if (typeof options.drawFrame !== 'function') {
       fail('compose: drawFrame is required and must be a function');
     }
+    const badColorRange = colorRangeGuard(spec.output, 'compose');
+    if (badColorRange !== undefined) return badColorRange;
     const composeOpts = pickRenderOptions(options);
     const clipIds = spec.clips.map((c) => c.id);
     const clips = normalizeClips(spec.clips);
@@ -833,6 +897,8 @@ export const Video = {
     if (typeof options.drawFrame !== 'function') {
       fail('synthesize: drawFrame is required and must be a function');
     }
+    const badColorRange = colorRangeGuard(options.output, 'synthesize');
+    if (badColorRange !== undefined) return badColorRange;
     const spec: NativeVideoSpec = {
       output: options.output,
       duration: options.duration,

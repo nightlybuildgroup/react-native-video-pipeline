@@ -816,6 +816,112 @@ describe('Video.compose', () => {
   });
 });
 
+describe('output.colorRange (#90/#94)', () => {
+  const drawFrame = () => undefined;
+
+  it('compose: omitted colorRange is the SDR default and forwards', async () => {
+    const promise = Video.compose(baseClipSpec, { drawFrame });
+    expect(fake.renderCalls).toHaveLength(1);
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it("compose: colorRange 'sdr' passes through", async () => {
+    const promise = Video.compose(
+      { ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'sdr' } },
+      { drawFrame },
+    );
+    expect(fake.renderCalls).toHaveLength(1);
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it("compose: colorRange 'hdr' rejects with an actionable InvalidSpec (no pipeline yet)", async () => {
+    await expect(
+      Video.compose(
+        { ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'hdr' } },
+        { drawFrame },
+      ),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+    // Nothing reached the native pump.
+    expect(fake.renderCalls).toHaveLength(0);
+  });
+
+  it("compose: colorRange 'hdr' rejection message is actionable", async () => {
+    await expect(
+      Video.compose(
+        { ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'hdr' } },
+        { drawFrame },
+      ),
+    ).rejects.toThrow(/not yet implemented|set it to 'sdr'/);
+  });
+
+  it('compose: rejects an invalid colorRange value', async () => {
+    await expect(
+      Video.compose(
+        // @ts-expect-error — colorRange must be 'sdr' | 'hdr'
+        { ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'bt2020' } },
+        { drawFrame },
+      ),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it('render: rejects colorRange presence entirely', async () => {
+    await expect(
+      Video.render({ ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'sdr' } }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+    await expect(
+      Video.render({ ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'hdr' } }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it('synthesize: rejects colorRange presence entirely (hdr and sdr)', async () => {
+    await expect(
+      Video.synthesize({
+        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30, colorRange: 'hdr' },
+        duration: { mode: 'fixed', seconds: 1 },
+        drawFrame,
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+    await expect(
+      Video.synthesize({
+        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30, colorRange: 'sdr' },
+        duration: { mode: 'fixed', seconds: 1 },
+        drawFrame,
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+  });
+
+  it("compose: colorRange 'hdr' rejects up front, before probing the source", async () => {
+    // A clip WITHOUT durationSec forces `normalizeClips` down its native
+    // `Video.info` probe path. The colorRange guard must reject before that
+    // probe runs — otherwise a bad source would surface a probe error instead
+    // of the actionable InvalidSpec, and "reject up front" would be a lie.
+    await expect(
+      Video.compose(
+        {
+          output: { path: '/tmp/out.mp4', colorRange: 'hdr' },
+          clips: [{ uri: 'in.mp4' }], // no durationSec → would trigger info() probe
+        },
+        { drawFrame },
+      ),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+    expect(fake.infoCalls).toHaveLength(0);
+    expect(fake.renderCalls).toHaveLength(0);
+  });
+
+  it('render: colorRange rejects up front, before probing the source', async () => {
+    await expect(
+      Video.render({
+        output: { path: '/tmp/out.mp4', colorRange: 'sdr' },
+        clips: [{ uri: 'in.mp4' }], // no durationSec → would trigger info() probe
+      }),
+    ).rejects.toBeInstanceOf(InvalidSpecError);
+    expect(fake.infoCalls).toHaveLength(0);
+    expect(fake.renderCalls).toHaveLength(0);
+  });
+});
+
 describe('Video.synthesize', () => {
   it('builds a valid synthesize spec and forwards', async () => {
     const drawFrame = () => undefined;

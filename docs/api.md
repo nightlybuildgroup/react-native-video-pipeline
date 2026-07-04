@@ -216,7 +216,7 @@ Per-frame worklet drawing on top of source clips. The `options.drawFrame` callba
 
 Mix native overlays (`Overlay.Image`, `Overlay.Text`) freely on `spec.overlays`; they composite under your `drawFrame` output.
 
-**HDR sources.** The compose pump is 8-bit end-to-end (BGRA on iOS, RGBA on Android). An HDR source (HLG/PQ, bt2020, 10-bit) is **tone-mapped down to SDR (sRGB)** as it is materialized for your worklet — this is a deliberate default, not a downgrade bug: writing the HDR signal into an 8-bit buffer with no transfer conversion crushes it to dark output (the bug [#86] fixed). HDR-*preserving* compose (a 10-bit pipeline plus an explicit `output.colorRange: 'sdr' | 'hdr'` opt-in) is designed but not yet implemented — see [`docs/hdr-compose.md`](./hdr-compose.md) and [#90].
+**HDR sources.** The compose pump is 8-bit end-to-end (BGRA on iOS, RGBA on Android). An HDR source (HLG/PQ, bt2020, 10-bit) is **tone-mapped down to SDR (sRGB)** as it is materialized for your worklet — this is a deliberate default (`output.colorRange: 'sdr'`), not a downgrade bug: writing the HDR signal into an 8-bit buffer with no transfer conversion crushes it to dark output (the bug [#86] fixed). The opt-in for HDR-*preserving* compose is the `output.colorRange: 'hdr'` knob ([above](#outputspec-and-synthesizeoutputspec)); the 10-bit pipeline it selects is not yet implemented, so `'hdr'` currently **rejects with `InvalidSpecError`** rather than silently downgrading — see [`docs/hdr-compose.md`](./hdr-compose.md) and [#90].
 
 ### `Video.synthesize`
 
@@ -395,7 +395,10 @@ interface OutputSpec {
   bitrate?: number;           // bits per second
   codec?: VideoCodec;         // 'h264' | 'hevc'; default 'h264'
   container?: VideoContainer; // 'mp4' | 'mov'
+  colorRange?: ColorRange;    // 'sdr' | 'hdr'; compose-only; default 'sdr'
 }
+
+type ColorRange = 'sdr' | 'hdr';
 
 type SynthesizeOutputSpec = OutputSpec & {
   width: number;
@@ -405,6 +408,13 @@ type SynthesizeOutputSpec = OutputSpec & {
 ```
 
 `Video.synthesize` requires `SynthesizeOutputSpec`; the three required fields are enforced at compile time.
+
+**`output.colorRange` (compose-only).** Selects how an HDR source's dynamic range is treated on the [`Video.compose`](#videocompose) path:
+
+- `'sdr'` (default, or omitted): tone-map an HDR (HLG/PQ, bt2020) source down to SDR sRGB — see [HDR sources](#videocompose). No behavior change.
+- `'hdr'`: preserve the source's dynamic range through a 10-bit pixel pipeline. This requires the platform HDR-compose implementation (iOS [#92] / Android [#93]); **until it lands on the current platform, `'hdr'` rejects up front with `InvalidSpecError`** rather than silently producing SDR.
+
+The field rides the shared `OutputSpec` struct, but it is **only** meaningful on `Video.compose`. Setting it on `Video.render` or `Video.synthesize` is rejected with `InvalidSpecError` — those paths do not materialize frames into a worklet pixel buffer, so there is no HDR range to preserve. See [`docs/hdr-compose.md`](./hdr-compose.md) and [#90].
 
 **Frame rate (`output.fps`) on `Video.render`.** Setting `fps` re-times the output. iOS resamples in both directions (PTS becomes `outputIndex / fps`, so it can both drop and duplicate frames). Android runs on Media3, which can only **drop** frames (no interpolation): a target **below** the source rate is applied via `FrameDropEffect`; a target **equal to** the source is a no-op; a target **above** the source rate is **rejected** with `InvalidSpec` rather than silently keeping the source rate. The Android frame-drop strategy approximates the target from the real frame timestamps, so the resulting rate is close to — but not an exact `outputIndex / fps` resampling of — the requested value. (`Video.synthesize` always produces an exact `output.fps` on both platforms, since it authors every frame.)
 
