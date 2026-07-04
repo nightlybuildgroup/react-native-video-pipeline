@@ -1,5 +1,6 @@
 export * from './bootstrap-pattern';
 export * from './controller';
+export * from './drawWithFloat16';
 export * from './drawWithRGBA';
 export * from './errors';
 // Re-export the shared Nitro types that don't need a public facade.

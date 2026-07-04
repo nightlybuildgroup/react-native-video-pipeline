@@ -19,7 +19,8 @@ For runnable scenarios see [`docs/examples/`](./examples/). For architectural de
   - [`Video.compose`](#videocompose)
   - [`Video.synthesize`](#videosynthesize)
 - [`Overlay`](#overlay) — overlay builders
-- [`drawWithRGBA`](#drawwithrgba) — plain-pixel worklet helper
+- [`drawWithRGBA`](#drawwithrgba) — plain-pixel (8-bit) worklet helper
+- [`drawWithFloat16`](#drawwithfloat16) — half-float (HDR `rgbaFp16`) worklet helper
 - [`VideoRenderController`](#videorendercontroller) — graceful end-of-stream
 - [Errors](#errors) — `VideoPipelineError` and subclasses
 - [Types](#types) — specs, options, frame contexts
@@ -261,11 +262,40 @@ drawWithRGBA(draw: RGBADrawer): FrameDrawer
 
 Wraps a plain `(pixels, ctx) => void` callback into a `FrameDrawer`. The helper allocates a `Uint8Array` of length `ctx.width * ctx.height * 4`, calls your drawer, and copies the bytes into the native target. On iOS it swizzles RGBA → BGRA to match `kCVPixelFormatType_32BGRA`; on Android the bytes match the native layout directly.
 
-**8-bit only.** `drawWithRGBA` fills a `Uint8Array` and cannot target an `'rgbaFp16'` HDR buffer ([#99]); it throws on one. That only happens under `output.colorRange: 'hdr'` — an HDR worklet writes half-float pixels via `target.writeBytes` directly, or draws through an F16 Skia surface.
+**8-bit only.** `drawWithRGBA` fills a `Uint8Array` and cannot target an `'rgbaFp16'` HDR buffer ([#99]); it throws on one. That only happens under `output.colorRange: 'hdr'` — use [`drawWithFloat16`](#drawwithfloat16) for HDR targets (or write half-float pixels via `target.writeBytes` directly, or draw through an F16 Skia surface).
 
 Alpha is **premultiplied** RGBA. On `Video.synthesize` (H.264 output has no alpha channel) you can write `a = 255` and ignore alpha. On `Video.compose` over a clip, alpha is the blend key.
 
 For Skia-based drawing, the sibling package `react-native-video-pipeline-skia` provides `drawWithSkia`, which can reach zero-copy on iOS via `MTLBlitCommandEncoder`.
+
+---
+
+## `drawWithFloat16`
+
+```ts
+import { drawWithFloat16, type Float16Drawer } from 'react-native-video-pipeline';
+
+drawWithFloat16(draw: Float16Drawer): FrameDrawer
+```
+
+The half-float (`rgbaFp16`) counterpart to `drawWithRGBA` — the ergonomic CPU worklet path for **HDR compose** (`output.colorRange: 'hdr'`, [#99]). Your drawer fills a `Float32Array` of length `ctx.width * ctx.height * 4` with RGBA channels; the helper converts each to an IEEE half-float (round-to-nearest-even) and copies the `width * height * 8`-byte buffer into the target.
+
+```ts
+drawFrame: drawWithFloat16((pixels, ctx) => {
+  'worklet';
+  const i = (y * ctx.width + x) * 4;
+  pixels[i]     = 2.5; // R — an HDR highlight above SDR white (1.0)
+  pixels[i + 1] = 1.0; // G
+  pixels[i + 2] = 1.0; // B
+  pixels[i + 3] = 1.0; // A (premultiplied)
+})
+```
+
+- **Color contract:** **linear Rec.2020, premultiplied, extended range** — channel values may exceed `1.0` for highlights (that headroom is the point of HDR). The helper transports bytes only; producing correct linear Rec.2020 values is the caller's job.
+- **Channel order:** `R, G, B, A` — no BGRA swizzle (`rgbaFp16` is RGBA-ordered on both platforms).
+- **Requires an `rgbaFp16` target** and throws on an 8-bit one — the inverse of `drawWithRGBA`. An `rgbaFp16` target only appears under `output.colorRange: 'hdr'`.
+
+> **Availability:** the `'hdr'` color range is not reachable end-to-end until the platform 10-bit pipelines land ([#92]/[#93]); until then `output.colorRange: 'hdr'` rejects up front, so no `rgbaFp16` target reaches this helper. The float32→float16 conversion itself is complete and tested.
 
 ---
 
@@ -637,7 +667,8 @@ type PixelFormat = 'bgra8888' | 'rgba8888' | 'rgbaFp16';
 
 **Most consumers should not touch these directly.** Use one of the high-level helpers instead:
 
-- `drawWithRGBA(draw)` — plain `Uint8Array` pixel writing. Stable, CPU-only, cross-platform. **8-bit only** — it throws on an `'rgbaFp16'` target; an HDR worklet writes half-float pixels via `target.writeBytes` directly.
+- `drawWithRGBA(draw)` — plain `Uint8Array` pixel writing. Stable, CPU-only, cross-platform. **8-bit only** — it throws on an `'rgbaFp16'` target.
+- `drawWithFloat16(draw)` — the half-float (`rgbaFp16`) HDR counterpart: fills a `Float32Array` (linear Rec.2020, premultiplied, extended range) that the helper converts to half-floats. Requires an `'rgbaFp16'` target (`output.colorRange: 'hdr'`).
 - `drawWithSkia(draw)` (from `react-native-video-pipeline-skia`) — Skia drawing with automatic feature detection of the iOS Metal fast path. This is the recommended worklet entry point for anything beyond raw RGBA. The `'rgbaFp16'` (HDR) target is not yet supported by this helper (the F16 Skia surface path lands with the platform pipelines, [#92]/[#93]) — it throws rather than silently downgrade to SDR.
 
 The remaining members of `FrameTarget` / `FrameSource` are advanced escape hatches:

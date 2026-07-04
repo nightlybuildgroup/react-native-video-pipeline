@@ -18,8 +18,9 @@ Rec.2020, premultiplied, extended range** (values > 1.0 allowed). It is a
 codec-native format (iOS: VideoToolbox converts `64RGBAHalf` → YUV Main10,
 verified; Android: a final pass into the MediaCodec 10-bit input surface). The
 8-bit helpers `drawWithRGBA`/`drawWithSkia` reject `'rgbaFp16'` rather than
-silently downgrade; HDR drawing uses raw half-float `writeBytes` or (later) an
-F16 Skia surface.
+silently downgrade; HDR drawing uses `drawWithFloat16` (the half-float CPU
+counterpart — fills a `Float32Array`, converts to halves) or (later) an F16
+Skia surface.
 
 This document specifies how `Video.compose` could preserve an HDR source's
 dynamic range end-to-end, and pins the API shape that gates it. It exists
