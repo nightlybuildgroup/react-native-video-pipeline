@@ -84,66 +84,6 @@ BOOL insertAudioIntoComposition(AVMutableComposition *composition,
   return YES;
 }
 
-// Pump every remaining sample from `output` into `input`. Samples are written
-// with their original source-time PTS; the writer session was started at the
-// source start time so no rebasing is needed (AVAssetWriter emits an edit
-// list that makes playback start at 0 in the resulting container).
-BOOL pumpPassthroughSamples(AVAssetReaderTrackOutput *output,
-                            AVAssetWriterInput *input,
-                            AVAssetReader *reader, AVAssetWriter *writer,
-                            NSError *_Nullable __autoreleasing *error) {
-  // Wait for the writer input to accept more data, then append. No wall-clock
-  // deadline (issue #32): the readiness wait ends on a real signal only —
-  // the input becoming ready, or the writer entering the Failed state (which
-  // pins readiness at NO forever, e.g. an async disk-full failure between
-  // appends). `-requestMediaDataWhenReadyOnQueue:` would be the busy-wait-free
-  // pull API, but it offers no failure callback: if the writer fails while the
-  // input is full, AVFoundation never re-invokes the block and the pump would
-  // hang. So we poll readiness and escape on writer.status == Failed, matching
-  // the Transcoder pumps. The durable fix is retiring this manual pump in
-  // favour of AVAssetExportSession (#19/#14), not an interim API swap.
-  while (YES) {
-    while (!input.readyForMoreMediaData) {
-      if (writer.status == AVAssetWriterStatusFailed) break;
-      [NSThread sleepForTimeInterval:0.001];
-    }
-    if (!input.readyForMoreMediaData) {
-      if (error) {
-        *error = writer.error
-                     ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                  @"Writer input never became ready (writer "
-                                  @"entered the Failed state).");
-      }
-      return NO;
-    }
-    CMSampleBufferRef sample = [output copyNextSampleBuffer];
-    if (sample == NULL) {
-      AVAssetReaderStatus status = reader.status;
-      if (status == AVAssetReaderStatusFailed ||
-          status == AVAssetReaderStatusUnknown) {
-        if (error) {
-          *error = reader.error
-                       ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                    @"AVAssetReader entered the Failed "
-                                    @"state.");
-        }
-        return NO;
-      }
-      return YES;
-    }
-    BOOL ok = [input appendSampleBuffer:sample];
-    CFRelease(sample);
-    if (!ok) {
-      if (error) {
-        *error = writer.error
-                     ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                  @"Writer rejected passthrough sample.");
-      }
-      return NO;
-    }
-  }
-}
-
 } // namespace
 
 namespace {
@@ -313,10 +253,9 @@ CGAffineTransform composeDisplayTransform(CGAffineTransform preferred,
   // wedged on real-device slo-mo HEVC (1080p @ 240fps @ ~50Mbps); see commit
   // cb7c972 for the same wedge / same fix on the stamp path.
   //
-  // remuxFlip, the transform-remux, and concat now also run through this
-  // driver (via initWithComposedAsset:). The metadata-only stamp
-  // (remuxStampFromURL) is the last remaining manual-pump user — left as-is
-  // for now since it carries its own merged-metadata writer.
+  // remuxFlip, the transform-remux, concat, and the metadata-only stamp
+  // (remuxStampFromURL) now all run through this driver — there are no
+  // hand-rolled AVAssetReader/AVAssetWriter pumps left.
   RNVPExportRequest *request =
       [[RNVPExportRequest alloc] initWithSource:sourceURL
                                          output:outputURL
@@ -1618,163 +1557,43 @@ NSArray<AVMetadataItem *> *buildMergedMetadata(
     }
     return NO;
   }
-  AVAssetTrack *videoTrack = videoTracks.firstObject;
+  // Metadata-only stamp is a full-duration compressed passthrough whose only
+  // job is to rewrite the container metadata. Route it through the shared
+  // AVAssetExportSession driver (the same one remuxTrim / remuxFlip / concat
+  // use) rather than a hand-rolled AVAssetReader -> AVAssetWriter pump.
+  //
+  // The old manual pump drained the two tracks sequentially (all video, then
+  // all audio). AVAssetWriter with both a video and an audio input refuses
+  // unbounded data on one input while the other sits empty — it back-pressures
+  // `readyForMoreMediaData` to force interleaving. So on any source carrying
+  // both tracks that is long / high-bitrate enough to fill the writer's buffer
+  // before the video track drained (real-device slo-mo, 1080p @ 240fps), the
+  // video pump wedged forever waiting for audio the sequential loop never fed.
+  // AVAssetExportSession owns the interleaving, so it can't wedge. Same wedge /
+  // same fix as the trim path (commit cb7c972). The passthrough preset copies
+  // the compressed samples verbatim, preserving codec / bitrate / HDR / color
+  // primaries byte-for-byte.
+  const CMTimeRange fullRange = CMTimeRangeMake(kCMTimeZero, asset.duration);
+  NSArray<AVMetadataItem *> *mergedMetadata =
+      buildMergedMetadata(asset.metadata, metadata);
 
-  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-
-  NSError *writerError = nil;
-  AVAssetWriter *writer =
-      [[AVAssetWriter alloc] initWithURL:outputURL
-                                fileType:fileTypeForOutputURL(outputURL)
-                                   error:&writerError];
-  if (writer == nil) {
+  RNVPExportRequest *request =
+      [[RNVPExportRequest alloc] initWithSource:sourceURL
+                                         output:outputURL
+                                      timeRange:fullRange
+                                       metadata:mergedMetadata
+                                       composer:nil
+                                      audioMode:audioMode
+                            audioReplacementURL:audioReplacementURL
+                                           stop:nil
+                                       progress:nil];
+  NSError *exportError = nil;
+  if (![RNVPExportSession runRequest:request error:&exportError]) {
     if (error) {
-      *error = writerError
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter init failed.");
+      NSString *desc = exportError.localizedDescription
+                           ?: @"AVAssetExportSession metadata-only stamp failed.";
+      *error = makeError(RNVPRemuxerErrorCodeWriterFailed, desc);
     }
-    return NO;
-  }
-
-  writer.metadata = buildMergedMetadata(asset.metadata, metadata);
-
-  NSError *readerError = nil;
-  AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset
-                                                         error:&readerError];
-  if (reader == nil) {
-    if (error) {
-      *error = readerError
-                   ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                @"AVAssetReader init failed.");
-    }
-    return NO;
-  }
-
-  // --- Video: reader output + writer input (compressed passthrough) --------
-  AVAssetReaderTrackOutput *videoOutput =
-      [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack
-                                       outputSettings:nil];
-  if (![reader canAddOutput:videoOutput]) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                         @"AVAssetReader refused passthrough video output.");
-    }
-    return NO;
-  }
-  [reader addOutput:videoOutput];
-
-  CMFormatDescriptionRef videoFormat = NULL;
-  if (videoTrack.formatDescriptions.count > 0) {
-    videoFormat = (__bridge CMFormatDescriptionRef)
-        videoTrack.formatDescriptions.firstObject;
-  }
-  AVAssetWriterInput *videoInput =
-      [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo
-                                         outputSettings:nil
-                                       sourceFormatHint:videoFormat];
-  videoInput.expectsMediaDataInRealTime = NO;
-  videoInput.transform = videoTrack.preferredTransform;
-  if (![writer canAddInput:videoInput]) {
-    if (error) {
-      *error = makeError(RNVPRemuxerErrorCodeWriterFailed,
-                         @"AVAssetWriter refused passthrough video input.");
-    }
-    return NO;
-  }
-  [writer addInput:videoInput];
-
-  // --- Optional audio (compressed passthrough) -----------------------------
-  // Passthrough copies the source audio; Mute drops it (skip the input
-  // entirely). Replace on this metadata-stamp pump needs a second reader on the
-  // replacement file — not wired here yet (#29 follow-up); it is unreachable
-  // while the JS layer rejects 'replace', so it conservatively drops audio.
-  AVAssetReaderTrackOutput *audioOutput = nil;
-  AVAssetWriterInput *audioInput = nil;
-  NSArray<AVAssetTrack *> *audioTracks =
-      [asset tracksWithMediaType:AVMediaTypeAudio];
-  if (audioMode == RNVPAudioModePassthrough && audioTracks.count > 0) {
-    AVAssetTrack *audioTrack = audioTracks.firstObject;
-    AVAssetReaderTrackOutput *candidateOutput =
-        [[AVAssetReaderTrackOutput alloc] initWithTrack:audioTrack
-                                         outputSettings:nil];
-    if ([reader canAddOutput:candidateOutput]) {
-      [reader addOutput:candidateOutput];
-      CMFormatDescriptionRef audioFormat = NULL;
-      if (audioTrack.formatDescriptions.count > 0) {
-        audioFormat = (__bridge CMFormatDescriptionRef)
-            audioTrack.formatDescriptions.firstObject;
-      }
-      AVAssetWriterInput *candidateInput =
-          [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
-                                             outputSettings:nil
-                                           sourceFormatHint:audioFormat];
-      candidateInput.expectsMediaDataInRealTime = NO;
-      if ([writer canAddInput:candidateInput]) {
-        [writer addInput:candidateInput];
-        audioOutput = candidateOutput;
-        audioInput = candidateInput;
-      }
-    }
-  }
-
-  if (![writer startWriting]) {
-    if (error) {
-      *error = writer.error
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter startWriting failed.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-  [writer startSessionAtSourceTime:kCMTimeZero];
-
-  if (![reader startReading]) {
-    if (error) {
-      *error = reader.error
-                   ?: makeError(RNVPRemuxerErrorCodeSourceCorrupted,
-                                @"AVAssetReader startReading failed.");
-    }
-    [writer cancelWriting];
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    return NO;
-  }
-
-  NSError *pumpError = nil;
-  BOOL videoOK = pumpPassthroughSamples(videoOutput, videoInput, reader,
-                                        writer, &pumpError);
-  BOOL audioOK = YES;
-  if (videoOK && audioInput != nil) {
-    audioOK = pumpPassthroughSamples(audioOutput, audioInput, reader, writer,
-                                     &pumpError);
-  }
-
-  [videoInput markAsFinished];
-  if (audioInput != nil) [audioInput markAsFinished];
-
-  if (!videoOK || !audioOK) {
-    [writer cancelWriting];
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
-    if (error) *error = pumpError;
-    return NO;
-  }
-
-  [writer endSessionAtSourceTime:asset.duration];
-
-  dispatch_semaphore_t done = dispatch_semaphore_create(0);
-  [writer finishWritingWithCompletionHandler:^{
-    dispatch_semaphore_signal(done);
-  }];
-  // Wait unconditionally — the completion handler always fires (issue #32).
-  // The Completed-status check below distinguishes success from failure.
-  dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
-  if (writer.status != AVAssetWriterStatusCompleted) {
-    if (error) {
-      *error = writer.error
-                   ?: makeError(RNVPRemuxerErrorCodeWriterFailed,
-                                @"AVAssetWriter did not reach the Completed "
-                                @"status.");
-    }
-    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
     return NO;
   }
   return YES;
