@@ -4307,41 +4307,16 @@ static NSString *authorSteppedAudioFixture(NSInteger width, NSInteger height,
   }
   [writer startSessionAtSourceTime:kCMTimeZero];
 
-  // --- Video: per-frame R-ramp, identical to authorMotionFixture. ----------
-  const int step = 4;
-  for (NSInteger i = 0; i < frameCount; i++) {
-    while (!videoInput.isReadyForMoreMediaData) {
-      [NSThread sleepForTimeInterval:0.001];
-    }
-    CVPixelBufferRef pb = NULL;
-    CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                        kCVPixelFormatType_32BGRA,
-                        (__bridge CFDictionaryRef) @{
-                          (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
-                        },
-                        &pb);
-    CVPixelBufferLockBaseAddress(pb, 0);
-    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
-    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
-    const uint8_t r = (uint8_t)((i * step) & 0xFF);
-    for (NSInteger y = 0; y < height; y++) {
-      uint8_t *row = base + (size_t)y * bpr;
-      for (NSInteger x = 0; x < width; x++) {
-        uint8_t *px = row + (size_t)x * 4;
-        px[0] = 0x80;
-        px[1] = 0x80;
-        px[2] = r;
-        px[3] = 0xFF;
-      }
-    }
-    CVPixelBufferUnlockBaseAddress(pb, 0);
-    [adaptor appendPixelBuffer:pb
-          withPresentationTime:CMTimeMake((int64_t)i, (int32_t)fps)];
-    CVPixelBufferRelease(pb);
-  }
-  [videoInput markAsFinished];
-
-  // --- Audio: silence for [0, half), 1 kHz sine for [half, end). -----------
+  // --- Audio FIRST: silence for [0, half), 1 kHz sine for [half, end). ------
+  // Order is deliberate and load-bearing. AVAssetWriter only stalls an input
+  // (readyForMoreMediaData pinned NO) when it runs *ahead* of the session's
+  // other inputs. The old order — drain the whole video track, then append
+  // audio — is exactly the two-input wedge this suite exists to catch: the
+  // video input races ahead of the empty audio input and stalls forever on a
+  // long fixture. Writing the entire audio track up front and finishing it
+  // means the video loop below is always at-or-behind audio, so it can never
+  // stall. Sample content and PTS are identical to before — only the order
+  // changed.
   const double totalSec = (double)frameCount / (double)fps;
   const UInt32 totalSamples = (UInt32)llround(totalSec * kSampleRate);
   const UInt32 halfSample = totalSamples / 2;
@@ -4383,6 +4358,9 @@ static NSString *authorSteppedAudioFixture(NSInteger width, NSInteger height,
                        audioFormat, (CMItemCount)totalSamples, 1, &timing, 0,
                        NULL, &audioSample);
   while (!audioInput.isReadyForMoreMediaData) {
+    // Escape on writer failure so a hard encoder error can't hang the wait
+    // forever (a failed writer pins readyForMoreMediaData at NO).
+    if (writer.status == AVAssetWriterStatusFailed) break;
     [NSThread sleepForTimeInterval:0.001];
   }
   const BOOL audioOk = [audioInput appendSampleBuffer:audioSample];
@@ -4394,6 +4372,42 @@ static NSString *authorSteppedAudioFixture(NSInteger width, NSInteger height,
     if (outError) *outError = writer.error;
     return nil;
   }
+
+  // --- Video: per-frame R-ramp, identical to authorMotionFixture. ----------
+  const int step = 4;
+  for (NSInteger i = 0; i < frameCount; i++) {
+    while (!videoInput.isReadyForMoreMediaData) {
+      // Escape on writer failure — see the audio wait above.
+      if (writer.status == AVAssetWriterStatusFailed) break;
+      [NSThread sleepForTimeInterval:0.001];
+    }
+    CVPixelBufferRef pb = NULL;
+    CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                        kCVPixelFormatType_32BGRA,
+                        (__bridge CFDictionaryRef) @{
+                          (id)kCVPixelBufferIOSurfacePropertiesKey : @{}
+                        },
+                        &pb);
+    CVPixelBufferLockBaseAddress(pb, 0);
+    uint8_t *base = (uint8_t *)CVPixelBufferGetBaseAddress(pb);
+    size_t bpr = CVPixelBufferGetBytesPerRow(pb);
+    const uint8_t r = (uint8_t)((i * step) & 0xFF);
+    for (NSInteger y = 0; y < height; y++) {
+      uint8_t *row = base + (size_t)y * bpr;
+      for (NSInteger x = 0; x < width; x++) {
+        uint8_t *px = row + (size_t)x * 4;
+        px[0] = 0x80;
+        px[1] = 0x80;
+        px[2] = r;
+        px[3] = 0xFF;
+      }
+    }
+    CVPixelBufferUnlockBaseAddress(pb, 0);
+    [adaptor appendPixelBuffer:pb
+          withPresentationTime:CMTimeMake((int64_t)i, (int32_t)fps)];
+    CVPixelBufferRelease(pb);
+  }
+  [videoInput markAsFinished];
 
   dispatch_semaphore_t done = dispatch_semaphore_create(0);
   [writer finishWritingWithCompletionHandler:^{
@@ -7323,6 +7337,108 @@ static NSUInteger audioTrackCount(NSString *path) {
   [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:mutePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:replPath error:nil];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+}
+
+// Regression (wedge): a metadata-only stamp of a source carrying BOTH a video
+// and an audio track must COMPLETE — it used to hang forever. The old
+// hand-rolled pump drained the entire video track first and only then the
+// audio track, so AVAssetWriter back-pressured the video input
+// (`readyForMoreMediaData` pinned to NO) waiting to interleave audio the
+// sequential loop had not started feeding, and wedged on any clip long enough
+// to exceed the writer's look-ahead. That is the "save without watermark spins
+// forever" bug: the no-watermark save routes through this metadata-only stamp.
+// The path now delegates to the shared AVAssetExportSession driver, which owns
+// interleaving and cannot wedge. The stamp runs on a background queue under a
+// bounded wait so a re-introduced wedge fails deterministically instead of
+// hanging the whole suite.
+- (void)testStampMetadataOnlyWithAudioDoesNotWedge {
+  // A substantial 4 s @ 720p60 clip — comfortably past AVAssetWriter's video
+  // look-ahead. Kept deliberately heavy: the wedge only bites when the video
+  // track races far enough ahead of the (empty) audio input to trigger
+  // back-pressure, so a small/short fixture would produce a false green. This
+  // reproduces the real-device slo-mo condition closely enough to be a real
+  // regression guard.
+  const NSInteger kWidth = 1280;
+  const NSInteger kHeight = 720;
+  const NSInteger kFps = 60;
+  const NSInteger kFrames = 240;
+
+  // Author the fixture synchronously on the test thread. Deliberate:
+  // authorSteppedAudioFixture drives its own two-input writer by *encoding*
+  // each frame, so it is encoder-paced — the writer never bursts far enough
+  // ahead of the audio input to back-pressure, and it carries its own bounded
+  // finish guard. Only the metadata-only *stamp* below does a burst passthrough
+  // copy of already-compressed samples; that is the operation that wedged, and
+  // it is the one placed under the bounded wait.
+  NSError *srcError = nil;
+  NSString *sourcePath = authorSteppedAudioFixture(kWidth, kHeight, kFps,
+                                                   kFrames, @"stamp-wedge",
+                                                   &srcError);
+  XCTAssertNotNil(sourcePath, @"fixture authoring failed: %@", srcError);
+  NSURL *sourceURL = [NSURL fileURLWithPath:sourcePath];
+
+  // The bug only reproduces when the source really has both tracks.
+  AVURLAsset *srcAsset = [AVURLAsset assetWithURL:sourceURL];
+  XCTAssertEqual([srcAsset tracksWithMediaType:AVMediaTypeVideo].count, 1u,
+                 @"fixture must have a video track");
+  XCTAssertEqual([srcAsset tracksWithMediaType:AVMediaTypeAudio].count, 1u,
+                 @"fixture must have an audio track (else the test is vacuous)");
+
+  NSString *outPath = [NSTemporaryDirectory()
+      stringByAppendingPathComponent:
+          [NSString stringWithFormat:@"stamp-wedge-out-%@.mp4",
+                                     NSUUID.UUID.UUIDString]];
+  [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
+  NSURL *outURL = [NSURL fileURLWithPath:outPath];
+
+  RNVPStampMetadata *metadata =
+      [[RNVPStampMetadata alloc] initWithGps:NO
+                                    latitude:0
+                                   longitude:0
+                              hasGpsAltitude:NO
+                                    altitude:0
+                                    software:@"unbogify.com"
+                                creationDate:nil
+                          contentDescription:@"stamp-wedge-marker"
+                                      custom:nil];
+
+  // Run the stamp on a background queue and bound the wait: if it wedged (the
+  // bug), a plain synchronous call would hang the whole suite; the timeout
+  // turns that into a deterministic failure.
+  XCTestExpectation *returned =
+      [self expectationWithDescription:@"remuxStampFromURL returns"];
+  __block BOOL ok = NO;
+  __block NSError *stampError = nil;
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    ok = [RNVPRemuxer remuxStampFromURL:sourceURL
+                                 toURL:outURL
+                              metadata:metadata
+                                 error:&stampError];
+    [returned fulfill];
+  });
+  [self waitForExpectations:@[ returned ] timeout:60.0];
+  XCTAssertTrue(ok, @"metadata-only stamp failed: %@", stampError);
+
+  // Passthrough must preserve both tracks and the source geometry, and stamp
+  // the metadata onto the container.
+  RNVPAVDemuxer *demuxer = [[RNVPAVDemuxer alloc] init];
+  NSError *openError = nil;
+  XCTAssertTrue([demuxer openAtURL:outURL error:&openError],
+                @"output demux failed: %@", openError);
+  XCTAssertTrue(demuxer.hasAudio, @"audio track must survive the stamp");
+  XCTAssertEqual(demuxer.width, kWidth, @"width must be preserved");
+  XCTAssertEqual(demuxer.height, kHeight, @"height must be preserved");
+  XCTAssertEqualWithAccuracy(demuxer.durationSec,
+                             (double)kFrames / (double)kFps, 0.25,
+                             @"duration must be preserved");
+  XCTAssertEqualObjects(demuxer.contentDescription, @"stamp-wedge-marker",
+                        @"description metadata must round-trip");
+  XCTAssertEqualObjects(demuxer.customMetadata[AVMetadataCommonKeySoftware],
+                        @"unbogify.com", @"software metadata must round-trip");
+  [demuxer closeWithError:nil];
+
+  [[NSFileManager defaultManager] removeItemAtPath:sourcePath error:nil];
   [[NSFileManager defaultManager] removeItemAtPath:outPath error:nil];
 }
 

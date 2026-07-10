@@ -14,6 +14,12 @@ tags predate that and were never published.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-10
+
+### Fixed
+
+- **Metadata-only `Video.stamp` no longer hangs on sources that carry an audio track.** A stamp with only `metadata` (no watermark) routed through a hand-rolled `AVAssetReader → AVAssetWriter` passthrough pump that drained the entire video track and only then the audio track. With both tracks present, `AVAssetWriter` back-pressures the video input (`readyForMoreMediaData` pins to `NO`) waiting to interleave audio the sequential loop had not started feeding, so on any clip long enough to exceed the writer's look-ahead the call wedged forever — observed as a "save without watermark" spinner that never completes on real-device slo-mo recordings. The metadata-only path now delegates to the shared `AVAssetExportSession` passthrough driver (the same one trim / flip / concat use), which owns track interleaving and preserves codec / bitrate / HDR / color primaries byte-for-byte. Guarded by an iOS unit test that stamps a video-plus-audio fixture under a bounded wait so a re-introduced wedge fails deterministically instead of hanging CI.
+
 ## [0.5.0] - 2026-07-10
 
 ### Added
@@ -96,7 +102,8 @@ First release published to npm for all three packages.
 - Exclude `android/src/androidTest` from the published tarball (#63).
 - Add a manual-dispatch Android instrumented-test workflow (#57).
 
-[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.0...v0.4.1
