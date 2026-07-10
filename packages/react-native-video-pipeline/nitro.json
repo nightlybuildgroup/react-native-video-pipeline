@@ -10,7 +10,7 @@
   },
   "autolinking": {
     "VideoPipeline": {
-      "kotlin": "HybridVideoPipeline"
+      "android": { "language": "kotlin", "implementationClassName": "HybridVideoPipeline" }
     }
   },
   "ignorePaths": ["node_modules", "lib", "plugin/build"]
