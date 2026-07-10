@@ -45,6 +45,17 @@ extern CGColorSpaceRef RNVPComposeHDRWorkingColorSpaceCreate(void);
 extern void RNVPComposeRenderSourceToHDR(CIContext *ciContext, CIImage *source,
                                          CVPixelBufferRef target, CGRect bounds);
 
+// Null-input compose sink/pixel-format selection from RNVPComposeColor.{h,mm}
+// (#92). Extracted from VideoPipeline.mm (which the host harness excludes) so
+// the branch-selection contract is host-testable.
+typedef struct {
+  BOOL valid;
+  BOOL hdr;
+  OSType pixelFormat;
+} RNVPComposeSynthesizePlan;
+extern RNVPComposeSynthesizePlan RNVPComposeSynthesizePlanFor(BOOL hdrRequested,
+                                                              BOOL codecIsH264);
+
 // Nitro-free frame byte-math from RNVPFrameBytes.{h,mm} (#99). Host-tested here
 // because HybridFrameTarget/Source can't compile against the macosx SDK.
 extern size_t RNVPFrameBytesPerPixel(OSType cvPixelFormat);
@@ -8403,6 +8414,34 @@ static float RNVPRenderHLGToHDRFloat(int y10)
   CVPixelBufferRelease(src);
   CVPixelBufferRelease(dst);
   return green;
+}
+
+- (void)testComposeSynthesizePlanSelectsSinkAndPixelFormat
+{
+  // SDR (no HDR request): 8-bit BGRA into the H.264 sink — today's behavior.
+  RNVPComposeSynthesizePlan sdr = RNVPComposeSynthesizePlanFor(NO, NO);
+  XCTAssertTrue(sdr.valid, @"SDR plan is always valid");
+  XCTAssertFalse(sdr.hdr, @"SDR must not route to the HDR sink");
+  XCTAssertEqual(sdr.pixelFormat, (OSType)kCVPixelFormatType_32BGRA,
+                 @"SDR worklet target must be 8-bit 32BGRA");
+
+  // HDR: half-float rgbaFp16 worklet target into the Main10 HLG sink (#92/#99).
+  RNVPComposeSynthesizePlan hdr = RNVPComposeSynthesizePlanFor(YES, NO);
+  XCTAssertTrue(hdr.valid, @"HDR (no explicit h264) plan is valid");
+  XCTAssertTrue(hdr.hdr, @"HDR must route to the Main10 HLG sink");
+  XCTAssertEqual(hdr.pixelFormat, (OSType)kCVPixelFormatType_64RGBAHalf,
+                 @"HDR worklet target must be 64RGBAHalf (rgbaFp16)");
+
+  // HDR + explicit H.264 is a genuine conflict — the caller must reject it,
+  // never silently downgrade to SDR or override the codec.
+  RNVPComposeSynthesizePlan conflict = RNVPComposeSynthesizePlanFor(YES, YES);
+  XCTAssertFalse(conflict.valid,
+                 @"HDR + explicit h264 must be flagged invalid, not coerced");
+
+  // SDR + explicit H.264 is fine (h264 is the SDR default codec).
+  RNVPComposeSynthesizePlan sdrH264 = RNVPComposeSynthesizePlanFor(NO, YES);
+  XCTAssertTrue(sdrH264.valid, @"SDR + h264 is a valid, ordinary request");
+  XCTAssertFalse(sdrH264.hdr, @"SDR + h264 stays on the SDR sink");
 }
 
 - (void)testComposeHDRWorkingSpaceIsExtendedBt2020

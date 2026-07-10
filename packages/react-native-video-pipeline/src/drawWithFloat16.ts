@@ -27,19 +27,20 @@ export type Float16Drawer = (pixels: Float32Array, ctx: FrameDrawerContext) => v
  * ```ts
  * import { Video, drawWithFloat16 } from 'react-native-video-pipeline';
  *
- * await Video.compose(
- *   { output: { path, colorRange: 'hdr' }, clips: [{ uri }] },
- *   {
- *     drawFrame: drawWithFloat16((pixels, ctx) => {
- *       'worklet';
- *       const i = (y * ctx.width + x) * 4;
- *       pixels[i]     = 2.5; // R — an HDR highlight above SDR white (1.0)
- *       pixels[i + 1] = 1.0; // G
- *       pixels[i + 2] = 1.0; // B
- *       pixels[i + 3] = 1.0; // A (premultiplied)
- *     }),
- *   },
- * );
+ * // iOS worklet-generated HDR (v0.5.0). Source-clip Video.compose HDR and all
+ * // of Android are not yet supported — see output.colorRange.
+ * await Video.synthesize({
+ *   output: { path, width, height, fps, colorRange: 'hdr' },
+ *   duration: { mode: 'fixed', seconds: 1 },
+ *   drawFrame: drawWithFloat16((pixels, ctx) => {
+ *     'worklet';
+ *     const i = (y * ctx.width + x) * 4;
+ *     pixels[i]     = 2.5; // R — an HDR highlight above SDR white (1.0)
+ *     pixels[i + 1] = 1.0; // G
+ *     pixels[i + 2] = 1.0; // B
+ *     pixels[i + 3] = 1.0; // A (premultiplied)
+ *   }),
+ * });
  * ```
  *
  * It **requires an `rgbaFp16` target** and throws on an 8-bit one — the inverse
@@ -62,7 +63,7 @@ export function drawWithFloat16(draw: Float16Drawer): FrameDrawer {
       throw new Error(
         `drawWithFloat16 requires an 'rgbaFp16' (HDR) target, but this frame's ` +
           `target is '${target.format}'. Use drawWithRGBA for 8-bit targets, or ` +
-          "set output.colorRange: 'hdr' on Video.compose to get an FP16 target.",
+          "set output.colorRange: 'hdr' on Video.synthesize to get an FP16 target.",
       );
     }
     const count = width * height * 4;

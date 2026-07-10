@@ -427,7 +427,7 @@ interface OutputSpec {
   bitrate?: number;           // bits per second
   codec?: VideoCodec;         // 'h264' | 'hevc'; default 'h264'
   container?: VideoContainer; // 'mp4' | 'mov'
-  colorRange?: ColorRange;    // 'sdr' | 'hdr'; compose-only; default 'sdr'
+  colorRange?: ColorRange;    // 'sdr' | 'hdr'; worklet paths only; default 'sdr'
 }
 
 type ColorRange = 'sdr' | 'hdr';
@@ -441,12 +441,22 @@ type SynthesizeOutputSpec = OutputSpec & {
 
 `Video.synthesize` requires `SynthesizeOutputSpec`; the three required fields are enforced at compile time.
 
-**`output.colorRange` (compose-only).** Selects how an HDR source's dynamic range is treated on the [`Video.compose`](#videocompose) path:
+**`output.colorRange`.** Selects how HDR dynamic range is treated on the worklet-drawing paths:
 
-- `'sdr'` (default, or omitted): tone-map an HDR (HLG/PQ, bt2020) source down to SDR sRGB — see [HDR sources](#videocompose). No behavior change.
-- `'hdr'`: preserve the source's dynamic range through a 10-bit pixel pipeline. This requires the platform HDR-compose implementation (iOS [#92] / Android [#93]); **until it lands on the current platform, `'hdr'` rejects up front with `InvalidSpecError`** rather than silently producing SDR.
+- `'sdr'` (default, or omitted): the 8-bit path. On [`Video.compose`](#videocompose), an HDR (HLG/PQ, bt2020) *source* is tone-mapped down to SDR sRGB — see [HDR sources](#videocompose). No behavior change.
+- `'hdr'`: preserve the full dynamic range through a 10-bit pixel pipeline — the worklet draws into an [`rgbaFp16`](#pixelformat) half-float target (via [`drawWithFloat16`](#drawwithfloat16)) that is encoded to **HEVC Main10 HLG**.
 
-The field rides the shared `OutputSpec` struct, but it is **only** meaningful on `Video.compose`. Setting it on `Video.render` or `Video.synthesize` is rejected with `InvalidSpecError` — those paths do not materialize frames into a worklet pixel buffer, so there is no HDR range to preserve. See [`docs/hdr-compose.md`](./hdr-compose.md) and [#90].
+Support, by path and platform:
+
+| Path | `'hdr'` behavior |
+| --- | --- |
+| [`Video.synthesize`](#videosynthesize) (worklet-generated, no source clip) | **iOS: supported** ([#92]). Android: rejects with `InvalidSpecError` pending the 10-bit pipeline ([#93]). |
+| [`Video.compose`](#videocompose) (with a source clip) | Rejects with `InvalidSpecError` on both platforms — HDR *passthrough of a source clip* is not yet implemented (iOS source-clip compose runs through `AVAssetExportSession`, which cannot emit Main10). The error steers you to `Video.synthesize`. |
+| [`Video.render`](#videorender) | Rejects with `InvalidSpecError` — the transcode/remux path has no per-frame worklet buffer, so there is no HDR range to preserve. |
+
+`'hdr'` **never silently produces SDR**: every unsupported combination rejects up front with an actionable `InvalidSpecError`. HDR + an explicit `output.codec: 'h264'` is likewise rejected (HDR requires HEVC/Main10). See [`docs/hdr-compose.md`](./hdr-compose.md) and [#90].
+
+> **HDR transfer correctness (iOS).** The `rgbaFp16` worklet target is linear-light extended-range bt2020; the encoder is tagged HLG. The library preserves the full range end-to-end and produces valid Main10 HLG output, but the exact linear→HLG transfer photometry has not yet been validated against a reference HDR display — treat iOS HDR synthesize as **preview-grade** for this release.
 
 **Frame rate (`output.fps`) on `Video.render`.** Setting `fps` re-times the output. iOS resamples in both directions (PTS becomes `outputIndex / fps`, so it can both drop and duplicate frames). Android runs on Media3, which can only **drop** frames (no interpolation): a target **below** the source rate is applied via `FrameDropEffect`; a target **equal to** the source is a no-op; a target **above** the source rate is **rejected** with `InvalidSpec` rather than silently keeping the source rate. The Android frame-drop strategy approximates the target from the real frame timestamps, so the resulting rate is close to — but not an exact `outputIndex / fps` resampling of — the requested value. (`Video.synthesize` always produces an exact `output.fps` on both platforms, since it authors every frame.)
 

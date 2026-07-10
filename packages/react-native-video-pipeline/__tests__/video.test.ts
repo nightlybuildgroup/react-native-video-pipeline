@@ -8,6 +8,7 @@ import type {
   VideoPipeline,
 } from '../src/nitro/VideoPipeline.nitro';
 import { Overlay } from '../src/overlay';
+import { __setPlatformOSForTesting } from '../src/platform';
 import type { RenderSpec } from '../src/types';
 import { Video } from '../src/video';
 
@@ -160,6 +161,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __setNativeVideoPipelineForTesting(undefined);
+  __setPlatformOSForTesting(undefined);
 });
 
 const baseClipSpec: RenderSpec = {
@@ -836,7 +838,7 @@ describe('output.colorRange (#90/#94)', () => {
     await promise;
   });
 
-  it("compose: colorRange 'hdr' rejects with an actionable InvalidSpec (no pipeline yet)", async () => {
+  it("compose: colorRange 'hdr' rejects — source-clip HDR passthrough is unimplemented", async () => {
     await expect(
       Video.compose(
         { ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'hdr' } },
@@ -847,13 +849,13 @@ describe('output.colorRange (#90/#94)', () => {
     expect(fake.renderCalls).toHaveLength(0);
   });
 
-  it("compose: colorRange 'hdr' rejection message is actionable", async () => {
+  it("compose: colorRange 'hdr' rejection steers to Video.synthesize", async () => {
     await expect(
       Video.compose(
         { ...baseClipSpec, output: { ...baseClipSpec.output, colorRange: 'hdr' } },
         { drawFrame },
       ),
-    ).rejects.toThrow(/not yet implemented|set it to 'sdr'/);
+    ).rejects.toThrow(/Video\.synthesize|source clip/i);
   });
 
   it('compose: rejects an invalid colorRange value', async () => {
@@ -875,21 +877,43 @@ describe('output.colorRange (#90/#94)', () => {
     ).rejects.toBeInstanceOf(InvalidSpecError);
   });
 
-  it('synthesize: rejects colorRange presence entirely (hdr and sdr)', async () => {
+  it("synthesize: colorRange 'hdr' forwards to the native pump on iOS (#92)", async () => {
+    __setPlatformOSForTesting('ios');
+    const promise = Video.synthesize({
+      output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30, colorRange: 'hdr' },
+      duration: { mode: 'fixed', seconds: 1 },
+      drawFrame,
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    // The colorRange rides the native spec through to renderCompose.
+    const passed = fake.renderCalls[0]?.spec as { output?: { colorRange?: string } };
+    expect(passed.output?.colorRange).toBe('hdr');
+    fake.renderCalls[0]?.resolve();
+    await promise;
+  });
+
+  it("synthesize: colorRange 'hdr' rejects on Android (#93)", async () => {
+    __setPlatformOSForTesting('android');
     await expect(
       Video.synthesize({
         output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30, colorRange: 'hdr' },
         duration: { mode: 'fixed', seconds: 1 },
         drawFrame,
       }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
-    await expect(
-      Video.synthesize({
-        output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30, colorRange: 'sdr' },
-        duration: { mode: 'fixed', seconds: 1 },
-        drawFrame,
-      }),
-    ).rejects.toBeInstanceOf(InvalidSpecError);
+    ).rejects.toThrow(/Android/i);
+    expect(fake.renderCalls).toHaveLength(0);
+  });
+
+  it("synthesize: colorRange 'sdr' forwards on any platform", async () => {
+    __setPlatformOSForTesting('android');
+    const promise = Video.synthesize({
+      output: { path: '/tmp/out.mp4', width: 16, height: 9, fps: 30, colorRange: 'sdr' },
+      duration: { mode: 'fixed', seconds: 1 },
+      drawFrame,
+    });
+    expect(fake.renderCalls).toHaveLength(1);
+    fake.renderCalls[0]?.resolve();
+    await promise;
   });
 
   it("compose: colorRange 'hdr' rejects up front, before probing the source", async () => {

@@ -192,16 +192,19 @@ export interface OutputSpec {
   codec?: VideoCodec;
   container?: VideoContainer;
   /**
-   * Output dynamic range for the **compose** path (`Video.compose`). Ignored —
-   * and rejected up front — on the remux/transcode render and synthesize
-   * paths, which do not materialize into a worklet pixel buffer. See #90/#94.
+   * Output dynamic range for the worklet-drawing paths. Rejected up front on
+   * the remux/transcode `Video.render` path, which has no per-frame worklet
+   * pixel buffer. See #90/#94.
    *
-   * - `'sdr'` (default): tone-map an HDR (HLG/PQ, bt2020) source down to SDR
-   *   sRGB — today's behavior (#86). No regression.
-   * - `'hdr'`: preserve the source's dynamic range end-to-end via the 10-bit
-   *   pixel pipeline. Requires the platform HDR-compose pipeline (iOS #92 /
-   *   Android #93); until it lands on the current platform, `'hdr'` rejects
-   *   with `InvalidSpecError` rather than silently producing SDR.
+   * - `'sdr'` (default): the 8-bit path. On `Video.compose`, an HDR (HLG/PQ,
+   *   bt2020) source is tone-mapped down to SDR sRGB — today's behavior (#86).
+   *   No regression.
+   * - `'hdr'`: preserve full dynamic range end-to-end via the 10-bit pipeline
+   *   (an `rgbaFp16` worklet target → HEVC Main10 HLG). Supported on
+   *   `Video.synthesize` (worklet-generated) on iOS (#92); rejected on Android
+   *   (#93, pending an HDR-capable device) and for source-clip `Video.compose`
+   *   (passthrough unimplemented). `'hdr'` never silently produces SDR — every
+   *   unsupported combination rejects with `InvalidSpecError`.
    */
   colorRange?: ColorRange;
 }
@@ -210,9 +213,9 @@ export type VideoCodec = 'h264' | 'hevc';
 export type VideoContainer = 'mp4' | 'mov';
 
 /**
- * Output dynamic range for the compose path. An enum (not a `boolean`) so a
- * future refinement (`'hlg' | 'pq' | 'hdr10'`) can extend it without a
- * breaking rename. See `OutputSpec.colorRange`.
+ * Output dynamic range for the worklet-drawing paths. An enum (not a
+ * `boolean`) so a future refinement (`'hlg' | 'pq' | 'hdr10'`) can extend it
+ * without a breaking rename. See `OutputSpec.colorRange`.
  */
 export type ColorRange = 'sdr' | 'hdr';
 

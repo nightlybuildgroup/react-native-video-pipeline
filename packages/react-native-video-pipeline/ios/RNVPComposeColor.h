@@ -80,6 +80,31 @@ void RNVPComposeRenderSourceToHDR(CIContext* ciContext,
                                   CVPixelBufferRef target,
                                   CGRect bounds);
 
+/// The pixel-format + sink decision compose's null-input (worklet-generated)
+/// branch makes for a given output color range. Extracted from
+/// `VideoPipeline.mm` — which the host XCTest harness excludes (Nitro deps) —
+/// so the branch-selection contract is host-testable in isolation (#92).
+typedef struct {
+  BOOL valid;          ///< NO for a contradictory request (HDR + explicit H.264).
+  BOOL hdr;            ///< route to the Main10 HLG sink (vs the SDR H.264 sink).
+  OSType pixelFormat;  ///< CVPixelBuffer format for the worklet target.
+} RNVPComposeSynthesizePlan;
+
+/// Decide the plan for a worklet-generated (null-input) compose frame:
+///
+/// - SDR (or no HDR request): 8-bit `kCVPixelFormatType_32BGRA` into the H.264
+///   sink — today's behavior, unchanged.
+/// - HDR: half-float `kCVPixelFormatType_64RGBAHalf` (the `rgbaFp16` worklet
+///   target, #99) into the HEVC Main10 HLG sink (#92).
+/// - HDR requested with an explicit H.264 codec: `valid == NO`. HDR needs
+///   Main10/HEVC; silently overriding the caller's codec would hide the
+///   conflict, so the caller rejects with an actionable InvalidSpec instead.
+///
+/// @param hdrRequested  `output.colorRange == 'hdr'`.
+/// @param codecIsH264   `output.codec` resolved explicitly to h264.
+RNVPComposeSynthesizePlan RNVPComposeSynthesizePlanFor(BOOL hdrRequested,
+                                                       BOOL codecIsH264);
+
 #ifdef __cplusplus
 }
 #endif

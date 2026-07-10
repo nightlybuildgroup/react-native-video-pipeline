@@ -16,6 +16,7 @@ import type {
   VideoInfo,
 } from './nitro/VideoPipeline.nitro';
 import { type Overlay, toNativeOverlaySize } from './overlay';
+import { currentPlatformOS } from './platform';
 import type {
   AudioSpec,
   ClipInput,
@@ -122,17 +123,24 @@ function validateOutputForSynthesis(output: OutputSpec): void {
  * synthesize paths too — this validator is what enforces that it is only
  * meaningful on `Video.compose`.
  *
- * - `render` / `synthesize`: reject its presence outright — those paths do not
- *   materialize into a worklet pixel buffer, so there is no HDR range to keep.
- * - `compose`: `'sdr'` (or omitted) is today's tone-map-to-SDR default;
- *   `'hdr'` requires the platform 10-bit pipeline (iOS #92 / Android #93).
- *   Until that lands, `'hdr'` rejects up front with an actionable message
- *   rather than silently producing SDR — the discoverability gap #90 is about.
+ * - `render`: reject its presence outright — the render (transcode/remux) path
+ *   has no per-frame worklet buffer, so there is no HDR range to keep.
+ * - `compose` (source clips): `'sdr'` (or omitted) is the tone-map-to-SDR
+ *   default; `'hdr'` rejects — HDR *passthrough of a source clip* is not yet
+ *   implemented on any platform (iOS routes source-clip compose through
+ *   `AVAssetExportSession`, which cannot emit Main10; Android is #93). The
+ *   actionable message steers to `Video.synthesize`, the worklet-generated path
+ *   that does support HDR.
+ * - `synthesize` (null-input, worklet draws every pixel): this path *does*
+ *   materialize a worklet buffer, so `'hdr'` is meaningful. It is implemented on
+ *   iOS (an `rgbaFp16` worklet target → HEVC Main10 HLG sink, #92) and rejects
+ *   on Android (#93) until the 10-bit pipeline lands there.
  *
- * Called at the public entry points **before** any native work (clip probing
- * in `normalizeClips`, the pump itself) so an invalid `colorRange` fails fast
- * with this `InvalidSpecError` instead of a probe/source error — "reject up
- * front" is the contract. `throws` on failure; see `colorRangeGuard`.
+ * Never silently produces SDR for an `'hdr'` request — every unsupported
+ * combination rejects with an actionable message (the discoverability gap #90
+ * is about). Called at the public entry points **before** any native work so an
+ * invalid `colorRange` fails fast with this `InvalidSpecError`. `throws` on
+ * failure; see `colorRangeGuard`.
  */
 function validateColorRange(output: OutputSpec, path: 'render' | 'compose' | 'synthesize'): void {
   const colorRange = output.colorRange;
@@ -140,16 +148,29 @@ function validateColorRange(output: OutputSpec, path: 'render' | 'compose' | 'sy
   if (colorRange !== 'sdr' && colorRange !== 'hdr') {
     fail("output.colorRange must be 'sdr' or 'hdr'", { colorRange });
   }
-  if (path !== 'compose') {
-    fail(`output.colorRange is only supported on Video.compose (got it on Video.${path})`, {
-      colorRange,
-    });
-  }
-  if (colorRange === 'hdr') {
+  if (path === 'render') {
     fail(
-      "HDR-preserving compose (output.colorRange: 'hdr') is not yet implemented — omit " +
-        "output.colorRange or set it to 'sdr'. Tracking: " +
-        'https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/90',
+      'output.colorRange is not supported on Video.render — the transcode/remux path has no ' +
+        'per-frame worklet buffer to preserve HDR range. Omit output.colorRange.',
+      { colorRange },
+    );
+  }
+  if (colorRange !== 'hdr') return;
+  if (path === 'compose') {
+    fail(
+      "HDR-preserving compose of a source clip (output.colorRange: 'hdr' on Video.compose) is " +
+        'not yet supported. Use Video.synthesize for worklet-generated HDR output. Tracking: ' +
+        'https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/92',
+      { colorRange },
+    );
+  }
+  // synthesize + 'hdr': implemented on iOS (#92), pending on Android (#93).
+  if (currentPlatformOS() !== 'ios') {
+    fail(
+      "HDR-preserving compose (output.colorRange: 'hdr') is not yet implemented on Android — it " +
+        'requires an HDR-capable device encoder. Omit output.colorRange or set it to ' +
+        "'sdr'. Tracking: " +
+        'https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/93',
       { colorRange },
     );
   }

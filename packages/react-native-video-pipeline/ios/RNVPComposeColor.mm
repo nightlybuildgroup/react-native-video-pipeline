@@ -61,3 +61,21 @@ void RNVPComposeRenderSourceToHDR(CIContext* ciContext,
                         kCVImageBufferYCbCrMatrix_ITU_R_2020,
                         kCVAttachmentMode_ShouldPropagate);
 }
+
+RNVPComposeSynthesizePlan RNVPComposeSynthesizePlanFor(BOOL hdrRequested,
+                                                       BOOL codecIsH264) {
+  RNVPComposeSynthesizePlan plan;
+  // HDR requires the Main10/HEVC sink; an explicit H.264 request is a genuine
+  // conflict the caller must surface rather than silently override.
+  if (hdrRequested && codecIsH264) {
+    plan.valid = NO;
+    plan.hdr = NO;
+    plan.pixelFormat = kCVPixelFormatType_32BGRA;
+    return plan;
+  }
+  plan.valid = YES;
+  plan.hdr = hdrRequested ? YES : NO;
+  plan.pixelFormat =
+      hdrRequested ? kCVPixelFormatType_64RGBAHalf : kCVPixelFormatType_32BGRA;
+  return plan;
+}

@@ -1923,6 +1923,29 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
         "output.width, output.height, output.fps")));
   }
 
+  // HDR-preserving compose (#92): honoured only on the worklet-generated
+  // (null-input) path, and only with a Main10/HEVC-capable sink. Reject the
+  // unsupported combinations up front with an actionable InvalidSpec rather
+  // than silently producing SDR (the discoverability contract, #90). The JS
+  // guard (validateColorRange) already rejects these, so this is defense in
+  // depth for any caller reaching the native pump directly.
+  const bool hdrRequested = spec.output.colorRange.has_value() &&
+                            *spec.output.colorRange == ColorRange::HDR;
+  const bool codecIsH264 = spec.output.codec.has_value() &&
+                           *spec.output.codec == VideoCodec::H264;
+  if (hdrRequested && !isSynthesized) {
+    return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+        "VideoPipeline.renderCompose: InvalidSpec — HDR-preserving compose of a "
+        "source clip (output.colorRange 'hdr' with clips) is not yet supported; "
+        "use a null-input (worklet-generated) compose for HDR output")));
+  }
+  if (hdrRequested && codecIsH264) {
+    return Promise<void>::rejected(std::make_exception_ptr(makeInvalidSpec(
+        "VideoPipeline.renderCompose: InvalidSpec — output.colorRange 'hdr' "
+        "requires HEVC/Main10; it conflicts with an explicit output.codec "
+        "'h264'. Omit output.codec or set colorRange to 'sdr'")));
+  }
+
   const std::string outputPath = spec.output.path;
   const std::string clipUri =
       isSynthesized ? std::string{} : spec.clips->front().uri;
@@ -1960,7 +1983,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
                                specSeconds, outputPath, clipUri,
                                drawFrameCopy, onProgressCopy, stop,
                                tokenCopy, stampMetadata, audioMode,
-                               audioReplacementURL]() {
+                               audioReplacementURL, hdrRequested]() {
     // Accept a bare path or a `file://` URI for output.path (issue #74); the
     // muxer / fileExistsAtPath / fileURLWithPath below all want a bare path.
     NSString* outputPathNS = outputFilesystemPath(outputPath);
@@ -2197,14 +2220,29 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
     const int nbFrames =
         static_cast<int>(std::llround(specFps * specSeconds));
 
+    // Select the sink + worklet pixel format from the requested color range.
+    // `hdrRequested` is already validated to not co-occur with an explicit
+    // h264 codec above, so the plan is always valid here.
+    const RNVPComposeSynthesizePlan plan =
+        RNVPComposeSynthesizePlanFor(hdrRequested ? YES : NO, NO);
+
     RNVPAVMuxer* muxer = [[RNVPAVMuxer alloc] init];
     NSError* openErr = nil;
-    const BOOL opened = [muxer openVideoOnlyAtPath:outputPathNS
-                                             width:width
-                                            height:height
-                                               fps:(NSInteger)std::llround(fps)
-                                          metadata:sourceMetadata
-                                             error:&openErr];
+    const BOOL opened =
+        plan.hdr
+            ? [muxer openHDRVideoOnlyAtPath:outputPathNS
+                                      width:width
+                                     height:height
+                                        fps:(NSInteger)std::llround(fps)
+                                pixelFormat:plan.pixelFormat
+                                   metadata:sourceMetadata
+                                      error:&openErr]
+            : [muxer openVideoOnlyAtPath:outputPathNS
+                                   width:width
+                                  height:height
+                                     fps:(NSInteger)std::llround(fps)
+                                metadata:sourceMetadata
+                                   error:&openErr];
     if (!opened) {
       RenderTokenRegistry::unregisterToken(tokenCopy);
       const std::string desc = nsStringToUtf8(RNVPDescribeError(openErr));
@@ -2214,8 +2252,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
     }
 
     NSDictionary<NSString*, id>* pbAttrs = @{
-      (NSString*)kCVPixelBufferPixelFormatTypeKey :
-          @(kCVPixelFormatType_32BGRA),
+      (NSString*)kCVPixelBufferPixelFormatTypeKey : @(plan.pixelFormat),
       (NSString*)kCVPixelBufferWidthKey : @(width),
       (NSString*)kCVPixelBufferHeightKey : @(height),
       (NSString*)kCVPixelBufferIOSurfacePropertiesKey : @{},
@@ -2235,7 +2272,7 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
       CVPixelBufferRef destPb = NULL;
       CVReturn cv = CVPixelBufferCreate(
           kCFAllocatorDefault, (size_t)width, (size_t)height,
-          kCVPixelFormatType_32BGRA, (__bridge CFDictionaryRef)pbAttrs, &destPb);
+          plan.pixelFormat, (__bridge CFDictionaryRef)pbAttrs, &destPb);
       if (cv != kCVReturnSuccess || destPb == NULL) {
         failure = [NSError
             errorWithDomain:@"VideoPipeline"
@@ -2249,8 +2286,8 @@ std::shared_ptr<Promise<void>> HybridVideoPipeline::renderCompose(
         break;
       }
 
-      auto target =
-          std::make_shared<HybridFrameTarget>(destPb, PixelFormat::BGRA8888);
+      auto target = std::make_shared<HybridFrameTarget>(
+          destPb, plan.hdr ? PixelFormat::RGBAFP16 : PixelFormat::BGRA8888);
       const double timeSec = static_cast<double>(frameIndex) / fps;
 
       try {

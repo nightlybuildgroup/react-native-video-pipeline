@@ -30,6 +30,7 @@ module.exports = {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json'],
   moduleNameMapper: {
     '^react-native-nitro-modules$': '<rootDir>/__mocks__/react-native-nitro-modules.js',
+    '^react-native$': '<rootDir>/__mocks__/react-native.js',
   },
   testPathIgnorePatterns: ['/node_modules/', '/lib/', '/build/', '/nitrogen/', '/plugin/build/'],
   passWithNoTests: true,

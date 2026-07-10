@@ -1,11 +1,16 @@
 # HDR-preserving compose — design
 
-Status: **API + worklet pixel contract landed; platform pipelines in
-progress.** Tracking: [#90]. Sub-tasks: the `output.colorRange` API [#94] —
-**done**; the worklet-into-10-bit pixel contract [#99] — **done** (the
+Status: **iOS worklet-generated HDR landed (0.5.0); source-clip passthrough +
+Android in progress.** Tracking: [#90]. Sub-tasks: the `output.colorRange` API
+[#94] — **done**; the worklet-into-10-bit pixel contract [#99] — **done** (the
 `'rgbaFp16'` `PixelFormat` + format-driven `writeBytes`/`readBytes`); iOS
-10-bit pipeline [#92] — foundation landed (materialization + Main10 sink),
-compose-on-clip routing open; Android 10-bit pipeline [#93] — open.
+10-bit pipeline [#92] — **worklet-generated (null-input) path landed**
+(`Video.synthesize` with `colorRange: 'hdr'` → `rgbaFp16` target → HEVC Main10
+HLG sink), source-clip (`Video.compose`) passthrough still open (blocked on the
+`AVAssetExportSession`-can't-emit-Main10 problem — see below); Android 10-bit
+pipeline [#93] — open (deferred: the CI/dev emulator has no HEVC Main10 encoder,
+so it needs a physical HDR device to verify — `colorRange: 'hdr'` rejects on
+Android until then).
 
 **Worklet pixel contract ([#99], landed).** The worklet-facing HDR target is
 `PixelFormat` `'rgbaFp16'` — 16-bit half-float RGBA, 8 bytes/pixel, **linear
@@ -74,41 +79,66 @@ interface OutputSpec {
 **Behavior**
 
 - `'sdr'` (default): today's tone-map-to-SDR. No change; no regression.
-- `'hdr'`: passthrough — requires the platform 10-bit pipeline below. Until a
-  platform's pipeline lands, `'hdr'` must **reject up front** with a typed
-  `InvalidSpecError` and an actionable message ("HDR-preserving compose is not
-  yet implemented on <platform>; omit `output.colorRange` or set it to
-  `'sdr'`"), *never* silently produce SDR — silent downgrade is exactly the
-  discoverability gap [#90] is about.
+- `'hdr'`: passthrough — requires the platform 10-bit pipeline below, and only
+  on a path that materializes a worklet pixel buffer. Every unsupported
+  combination **rejects up front** with a typed `InvalidSpecError` and an
+  actionable message, *never* silently produces SDR — silent downgrade is
+  exactly the discoverability gap [#90] is about.
 
 **Resolved shape ([#94], landed).** `OutputSpec` is
 `export type OutputSpec = NativeOutputSpec` — a direct alias of the Nitro-spec
 struct (invariant #6) shared by `RenderSpec`, `ComposeSpec`, and
 `SynthesizeOutputSpec`. The three candidate shapes were:
 
-1. Add to shared `OutputSpec`; validate/act only on the compose path; reject
+1. Add to shared `OutputSpec`; validate/act only on the worklet paths; reject
    elsewhere. Simplest spec, muddiest semantics.
-2. Split a compose-specific output type so the field only appears where it
+2. Split a worklet-path-specific output type so the field only appears where it
    applies. Cleanest semantics, most type churn.
 3. `sdr: boolean` instead of the `colorRange` enum ([#90] floated both).
 
 **Decision: (1) + the enum.** `colorRange?: ColorRange` (`'sdr' | 'hdr'`) lives
-on the shared struct; `Video.compose` acts on it, and `Video.render` /
-`Video.synthesize` **reject its presence** with `InvalidSpecError`
-(`validateColorRange` in `src/video.ts`) — those paths do not materialize into
-a worklet buffer, so the muddy semantics option (1) warns about are closed off
-by rejecting rather than silently ignoring. The enum (not a bool) leaves room
-for a future `'hlg' | 'pq' | 'hdr10'` refinement. The library is pre-1.0, so
-splitting a compose-specific output type later stays reversible.
+on the shared struct; `validateColorRange` in `src/video.ts` gates it per path
++ platform. The enum (not a bool) leaves room for a future
+`'hlg' | 'pq' | 'hdr10'` refinement. The library is pre-1.0, so splitting a
+path-specific output type later stays reversible.
 
-Until a platform 10-bit pipeline lands, `Video.compose` with `'hdr'` also
-rejects with `InvalidSpecError` and an actionable message (this is the JS gate
-[#92]/[#93] each flip for their platform). `'sdr'` and omitted are the SDR
-default and pass through unchanged.
+**Correction to the original #94 placement.** #94 first scoped `colorRange` as
+"compose-only", rejecting it on `Video.synthesize` on the grounds that
+synthesize "does not materialize a worklet buffer". That reasoning was wrong:
+`Video.synthesize` is the *null-input compose* path — its `drawFrame` worklet
+draws **every** pixel into a materialized buffer, so it is precisely where HDR
+*is* meaningful and, as it turns out, first implementable (it owns the encoder
+sink directly, unlike source-clip compose). The shipped gate (0.5.0):
+
+| Path | `'hdr'` |
+| --- | --- |
+| `Video.synthesize` (null-input) | **iOS: implemented**; Android: rejects ([#93]). |
+| `Video.compose` (source clip) | rejects both platforms — source-clip passthrough is unimplemented (iOS `AVAssetExportSession` can't emit Main10). |
+| `Video.render` | rejects — no worklet buffer. |
+
+HDR + an explicit `output.codec: 'h264'` also rejects (HDR needs HEVC/Main10).
+`'sdr'` and omitted pass through unchanged everywhere they are accepted.
 
 ---
 
 ## iOS 10-bit pipeline ([#92])
+
+**Landed (0.5.0): the null-input / worklet-generated path.** `Video.synthesize`
+with `colorRange: 'hdr'` now routes `renderCompose`'s synthesize branch
+(`VideoPipeline.mm`) through the Main10 sink: `RNVPComposeSynthesizePlanFor`
+(host-tested in `RNVPComposeColor.mm`) selects a `kCVPixelFormatType_64RGBAHalf`
+worklet target (`PixelFormat::RGBAFP16`) and `RNVPAVMuxer openHDRVideoOnlyAtPath:`
+(HEVC Main10, bt2020 + HLG tags — proven by `testAVMuxerHDRWritesHEVCMain10…`).
+The worklet draws with `drawWithFloat16`. HDR + `clips` (source-clip compose) and
+HDR + explicit `h264` both reject with `InvalidSpecError`. Range survival +
+Main10 output are host-verified; the linear→HLG **transfer photometry** is not
+yet reference-validated (needs an HDR display) — see the open question below.
+
+**Still open (source-clip passthrough).** The steps below describe the
+source-materializing (`Video.compose`) path. It routes through
+`RNVPExportSession` (`AVAssetExportSession`), which cannot be configured to emit
+Main10 — closing it needs an `AVAssetReader`→`AVAssetWriter` re-architecture, so
+it stays rejected for now.
 
 Replace the 8-bit BGRA path (not the SDR default — add a parallel 10-bit
 path selected when `colorRange === 'hdr'` and the source is HDR):
