@@ -14,6 +14,24 @@ tags predate that and were never published.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-10
+
+### Added
+
+- **HDR-preserving compose on iOS (worklet-generated).** `Video.synthesize` with `output.colorRange: 'hdr'` now preserves full HDR dynamic range end-to-end: the worklet draws into an `rgbaFp16` half-float target (via `drawWithFloat16`) that is encoded to **HEVC Main10 HLG** (bt2020 primaries + HLG transfer + bt2020 matrix), instead of tone-mapping down to 8-bit SDR (#92).
+- `output.colorRange: 'sdr' | 'hdr'` API knob on the shared `OutputSpec` — opt into HDR preservation on the worklet paths (#94, #90).
+- `'rgbaFp16'` `PixelFormat` — the worklet-into-10-bit pixel contract (8 bytes/pixel, linear Rec.2020, premultiplied, extended range) with format-driven `writeBytes`/`readBytes` (#99).
+- `drawWithFloat16` — the half-float CPU worklet helper for drawing HDR frames into an `rgbaFp16` target (#102).
+
+### Changed
+
+- `output.colorRange` is now valid on the **worklet paths** (corrects the initial #94 "compose-only" scoping): `Video.synthesize` + `'hdr'` is supported on iOS and rejected on Android (#93, pending an HDR-capable device); `Video.compose` + `'hdr'` (source-clip passthrough) and `Video.render` + any `colorRange` reject with `InvalidSpecError`. `'hdr'` never silently produces SDR — every unsupported combination (including `'hdr'` + explicit `codec: 'h264'`) rejects up front with an actionable message.
+- Publish and install all packages from a single npm registry (npmjs.org) (#97).
+
+### Documentation
+
+- Documented the shipped `output.colorRange` contract in `docs/api.md` and updated `docs/hdr-compose.md` with the iOS worklet-generated HDR design, the source-clip / Android deferrals, and the preview-grade transfer-photometry caveat (#90, #92).
+
 ## [0.4.2] - 2026-07-02
 
 ### Changed
@@ -78,7 +96,8 @@ First release published to npm for all three packages.
 - Exclude `android/src/androidTest` from the published tarball (#63).
 - Add a manual-dispatch Android instrumented-test workflow (#57).
 
-[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/nightlybuildgroup/react-native-video-pipeline/releases/tag/v0.4.0
