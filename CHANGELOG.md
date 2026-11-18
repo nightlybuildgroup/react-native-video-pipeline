@@ -14,6 +14,8 @@ tags predate that and were never published.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-18
+
 ### Fixed
 
 - **`Video.info()` no longer crashes on iOS when several probes run concurrently** ([#106](https://github.com/nightlybuildgroup/react-native-video-pipeline/issues/106)). The creation-date parser shared one process-wide `NSISO8601DateFormatter` and changed its `formatOptions` for the fallback pass. Because `info()` runs on Nitro's async thread pool, one probe could swap out the formatter's underlying `CFDateFormatter` while another was parsing with it, a use-after-free that crashed in `__CFCheckCFInfoPACSignature`. The same mutation also never restored fractional-seconds parsing, so after the first plain timestamp every later `…T14:39:15.123Z` creation date came back `nil`. The parser now builds a local formatter per call. Guarded by iOS unit tests for parse order and a concurrent stress case, both of which fail against the old code.
@@ -106,7 +108,8 @@ First release published to npm for all three packages.
 - Exclude `android/src/androidTest` from the published tarball (#63).
 - Add a manual-dispatch Android instrumented-test workflow (#57).
 
-[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/nightlybuildgroup/react-native-video-pipeline/compare/v0.4.1...v0.4.2
