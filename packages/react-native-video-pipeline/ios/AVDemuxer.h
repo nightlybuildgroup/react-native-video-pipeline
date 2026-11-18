@@ -140,4 +140,19 @@ typedef NS_ERROR_ENUM(RNVPAVDemuxerErrorDomain, RNVPAVDemuxerErrorCode){
 
 @end
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/// Coerce an @c AVMetadataItem value for the common creation-date key into an
+/// @c NSDate. Returns @c value unchanged if it is already an @c NSDate, parses
+/// ISO 8601 internet date-time strings with or without fractional seconds,
+/// and returns @c nil for anything else. Safe to call concurrently from any
+/// thread (issue #106).
+NSDate *_Nullable RNVPDateFromMetadataValue(id _Nullable value);
+
+#ifdef __cplusplus
+}
+#endif
+
 NS_ASSUME_NONNULL_END
