@@ -257,6 +257,10 @@ typedef NS_ERROR_ENUM(RNVPAVDemuxerErrorDomain, RNVPAVDemuxerErrorCode) {
     NSDictionary<NSString *, NSString *> *customMetadata;
 @end
 
+// Standalone creation-date coercion helper from AVDemuxer.{h,mm} (#106).
+// Keep in lockstep with packages/react-native-video-pipeline/ios/AVDemuxer.h.
+extern NSDate *_Nullable RNVPDateFromMetadataValue(id _Nullable value);
+
 // Forward-declare RNVPRemuxer for the same clang-module reason as the other
 // RNVP* classes above. Keep in lockstep with
 // packages/react-native-video-pipeline/ios/Remuxer.h.
@@ -1861,6 +1865,70 @@ typedef void (^RNVPExportSessionProgress)(int32_t framesCompleted,
   XCTAssertFalse([demuxer openAtURL:url error:&error]);
   XCTAssertEqualObjects(error.domain, RNVPAVDemuxerErrorDomain);
   XCTAssertEqual(error.code, RNVPAVDemuxerErrorCodeNotFound);
+}
+
+/// #106: RNVPDateFromMetadataValue must parse both ISO 8601 shapes regardless
+/// of call order. The old process-wide formatter dropped the fractional-seconds
+/// option on its first fallback and never restored it, so a fractional string
+/// parsed after a plain one came back nil.
+- (void)testDateFromMetadataValueParsesBothISO8601FormsInAnyOrder
+{
+  const NSTimeInterval kExpected = 1794407955.0; // 2026-11-11T14:39:15Z
+  NSArray<NSString *> *inputs = @[
+    @"2026-11-11T14:39:15.123Z",
+    @"2026-11-11T14:39:15Z",
+    @"2026-11-11T14:39:15.123Z",
+    @"2026-11-11T16:39:15+02:00",
+    @"2026-11-11T16:39:15.123+02:00",
+  ];
+  for (NSString *input in inputs) {
+    NSDate *date = RNVPDateFromMetadataValue(input);
+    XCTAssertNotNil(date, @"%@ should parse", input);
+    XCTAssertEqualWithAccuracy(date.timeIntervalSince1970, kExpected, 0.2,
+                               @"%@ parsed to the wrong instant", input);
+  }
+}
+
+- (void)testDateFromMetadataValueHandlesNonStringValues
+{
+  NSDate *now = [NSDate date];
+  XCTAssertEqual(RNVPDateFromMetadataValue(now), now,
+                 @"an NSDate must pass through unchanged");
+  XCTAssertNil(RNVPDateFromMetadataValue(nil));
+  XCTAssertNil(RNVPDateFromMetadataValue(@1794407955));
+  XCTAssertNil(RNVPDateFromMetadataValue(@""));
+  XCTAssertNil(RNVPDateFromMetadataValue(@"not a date"));
+  XCTAssertNil(RNVPDateFromMetadataValue(@"2026-11-11"),
+               @"date-only strings are not internet date-time");
+}
+
+/// #106: Video.info() probes run concurrently on Nitro's async pool. Mixed
+/// fractional / plain inputs from many threads must all parse correctly. The
+/// old shared, mutated formatter both returned nil here (sticky options) and
+/// could crash with a use-after-free inside CoreFoundation.
+- (void)testDateFromMetadataValueIsCorrectUnderConcurrentCalls
+{
+  const NSTimeInterval kExpected = 1794407955.0;
+  NSArray<NSString *> *inputs = @[
+    @"2026-11-11T14:39:15.123Z",
+    @"2026-11-11T14:39:15Z",
+  ];
+  const size_t kIterations = 4000;
+  __block volatile int32_t failures = 0;
+  dispatch_apply(kIterations,
+                 dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+                 ^(size_t i) {
+                   @autoreleasepool {
+                     NSDate *date =
+                         RNVPDateFromMetadataValue(inputs[i % inputs.count]);
+                     if (date == nil ||
+                         fabs(date.timeIntervalSince1970 - kExpected) > 0.2) {
+                       __atomic_fetch_add(&failures, 1, __ATOMIC_RELAXED);
+                     }
+                   }
+                 });
+  XCTAssertEqual(failures, 0, @"%d of %zu concurrent parses were wrong",
+                 failures, kIterations);
 }
 
 /// T026 acceptance: author an MP4 via AVAssetWriter with known creationDate,

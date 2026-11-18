@@ -83,28 +83,6 @@ NSString *_Nullable containerFromURL(NSURL *url) {
   return ext;
 }
 
-NSDate *_Nullable coerceToDate(id _Nullable value) {
-  if (value == nil) return nil;
-  if ([value isKindOfClass:[NSDate class]]) return (NSDate *)value;
-  if (![value isKindOfClass:[NSString class]]) return nil;
-  // AVFoundation's common-metadata creation-date items are almost always
-  // already NSDate on read, but QuickTime user-data authored dates arrive as
-  // ISO 8601 strings. Try both formats that show up in the wild without
-  // pulling in a full date-parsing dependency.
-  static NSISO8601DateFormatter *iso = nil;
-  static dispatch_once_t once;
-  dispatch_once(&once, ^{
-    iso = [[NSISO8601DateFormatter alloc] init];
-    iso.formatOptions = NSISO8601DateFormatWithInternetDateTime |
-                        NSISO8601DateFormatWithFractionalSeconds;
-  });
-  NSDate *date = [iso dateFromString:(NSString *)value];
-  if (date != nil) return date;
-  iso.formatOptions = NSISO8601DateFormatWithInternetDateTime;
-  date = [iso dateFromString:(NSString *)value];
-  return date;
-}
-
 // ISO 6709 is what AVFoundation writes for AVMetadataCommonKeyLocation — e.g.
 // @"+37.7749-122.4194/" or @"+37.7749-122.4194+010.000/". Two sign+number
 // tokens at the start encode latitude and longitude in decimal degrees; an
@@ -141,6 +119,32 @@ BOOL parseISO6709(NSString *_Nullable raw, double *outLat, double *outLon,
 }
 
 } // namespace
+
+NSDate *_Nullable RNVPDateFromMetadataValue(id _Nullable value) {
+  if (value == nil) return nil;
+  if ([value isKindOfClass:[NSDate class]]) return (NSDate *)value;
+  if (![value isKindOfClass:[NSString class]]) return nil;
+  // AVFoundation's common-metadata creation-date items are almost always
+  // already NSDate on read, but QuickTime user-data authored dates arrive as
+  // ISO 8601 strings. Try both formats that show up in the wild without
+  // pulling in a full date-parsing dependency.
+  //
+  // The formatter is deliberately local and configured once (issue #106).
+  // Video.info() probes run concurrently on Nitro's async thread pool, and a
+  // process-wide formatter whose formatOptions get flipped for the fallback
+  // pass swaps out its underlying CFDateFormatter while another thread is
+  // parsing with it: a use-after-free that crashed in
+  // __CFCheckCFInfoPACSignature. This branch runs at most once per probe, so
+  // the allocation cost is irrelevant next to opening the asset.
+  NSString *string = (NSString *)value;
+  NSISO8601DateFormatter *iso = [[NSISO8601DateFormatter alloc] init];
+  iso.formatOptions = NSISO8601DateFormatWithInternetDateTime |
+                      NSISO8601DateFormatWithFractionalSeconds;
+  NSDate *date = [iso dateFromString:string];
+  if (date != nil) return date;
+  iso.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+  return [iso dateFromString:string];
+}
 
 @implementation RNVPAVDemuxer {
   AVURLAsset *_asset;
@@ -288,7 +292,7 @@ BOOL parseISO6709(NSString *_Nullable raw, double *outLat, double *outLon,
     NSString *key = item.commonKey;
     if (key.length == 0) continue;
     if ([key isEqualToString:AVMetadataCommonKeyCreationDate]) {
-      NSDate *date = coerceToDate(item.value);
+      NSDate *date = RNVPDateFromMetadataValue(item.value);
       if (date != nil) _creationDate = date;
       continue;
     }
